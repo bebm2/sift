@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sift PRD 评审 · V0.2</title>
+<style>
+  :root{
+    --bg:#030014;
+    --ink:#eaf0ff;
+    --muted:#9aa6c8;
+    --cyan:#34d6ff;
+    --blue:#3a7bff;
+    --purple:#a45cff;
+    --glass:rgba(255,255,255,0.05);
+    --glass-stroke:rgba(255,255,255,0.12);
+    --card-radius:22px;
+    --font:"Sarasa Gothic SC","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{
+    font-family:var(--font);
+    background:var(--bg);
+    color:var(--ink);
+    scroll-snap-type:y mandatory;
+    overflow-y:scroll;
+    scroll-behavior:smooth;
+  }
+  /* fixed aurora background */
+  .aurora{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none;}
+  .blob{position:absolute;border-radius:50%;filter:blur(90px);opacity:.55;}
+  .b1{width:620px;height:620px;background:radial-gradient(circle,#1f6bff,transparent 70%);top:-160px;right:-120px;}
+  .b2{width:560px;height:560px;background:radial-gradient(circle,#a45cff,transparent 70%);bottom:-180px;left:-140px;}
+  .b3{width:520px;height:520px;background:radial-gradient(circle,#34d6ff,transparent 70%);top:38%;left:42%;opacity:.4;}
+  .grain{position:fixed;inset:0;z-index:1;background:
+    radial-gradient(circle at 50% 0%,rgba(58,123,255,.08),transparent 60%);pointer-events:none;}
+
+  .slide{
+    position:relative;z-index:2;
+    min-height:100vh;
+    scroll-snap-align:start;
+    display:flex;flex-direction:column;justify-content:center;
+    padding:9vh 8vw;
+    border-bottom:1px solid rgba(255,255,255,.04);
+  }
+  .kicker{
+    display:inline-flex;align-items:center;gap:10px;
+    font-size:13px;letter-spacing:.28em;color:var(--cyan);
+    text-transform:uppercase;margin-bottom:22px;font-weight:600;
+  }
+  .kicker::before{content:"";width:34px;height:2px;background:linear-gradient(90deg,var(--cyan),transparent);}
+  h1{font-size:clamp(34px,5vw,68px);font-weight:800;line-height:1.05;letter-spacing:-.01em;}
+  h2{font-size:clamp(26px,3.4vw,44px);font-weight:800;line-height:1.1;margin-bottom:8px;}
+  .sub{color:var(--muted);font-size:clamp(15px,1.6vw,19px);line-height:1.7;max-width:760px;margin-top:18px;}
+  .accent{background:linear-gradient(90deg,var(--cyan),var(--purple));-webkit-background-clip:text;background-clip:text;color:transparent;}
+
+  .card{
+    background:var(--glass);
+    border:1px solid var(--glass-stroke);
+    border-radius:var(--card-radius);
+    backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px);
+    padding:26px 28px;
+    box-shadow:0 20px 60px rgba(0,0,0,.45);
+  }
+  .grid{display:grid;gap:18px;margin-top:34px;}
+  .g3{grid-template-columns:repeat(3,1fr);}
+  .g4{grid-template-columns:repeat(4,1fr);}
+  .g2{grid-template-columns:repeat(2,1fr);}
+  .card h3{font-size:19px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:10px;}
+  .card p{color:var(--muted);font-size:14.5px;line-height:1.65;}
+  .tag{font-size:12px;color:var(--cyan);border:1px solid var(--glass-stroke);border-radius:99px;padding:3px 12px;display:inline-block;margin-bottom:14px;}
+  .num{font-size:13px;color:var(--purple);font-weight:700;letter-spacing:.1em;}
+
+  /* flow */
+  .flow{display:flex;align-items:stretch;gap:0;margin-top:42px;flex-wrap:wrap;}
+  .step{flex:1 1 150px;min-width:150px;position:relative;padding:0 8px;}
+  .step .dot{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-weight:800;background:linear-gradient(135deg,var(--blue),var(--purple));box-shadow:0 8px 24px rgba(58,123,255,.4);margin-bottom:16px;}
+  .step h4{font-size:16px;font-weight:700;margin-bottom:6px;}
+  .step p{color:var(--muted);font-size:13px;line-height:1.55;}
+  .step:not(:last-child)::after{content:"";position:absolute;top:22px;right:-4px;width:calc(100% - 44px);height:2px;
+    background:linear-gradient(90deg,var(--glass-stroke),transparent);}
+
+  /* table */
+  table{width:100%;border-collapse:separate;border-spacing:0;margin-top:30px;font-size:14.5px;}
+  th,td{text-align:left;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.07);vertical-align:top;}
+  th{color:var(--cyan);font-weight:700;font-size:13px;letter-spacing:.04em;}
+  td.q{color:var(--ink);}
+  td.a{color:var(--muted);}
+  tr:hover td{background:rgba(255,255,255,.03);}
+
+  .pill{display:inline-flex;align-items:center;gap:8px;border-radius:99px;padding:12px 22px;
+    border:1px solid var(--glass-stroke);background:var(--glass);color:var(--ink);font-weight:600;font-size:15px;
+    backdrop-filter:blur(10px);}
+  .pills{display:flex;gap:14px;margin-top:34px;flex-wrap:wrap;}
+  .pill .ic{width:8px;height:8px;border-radius:50%;background:var(--cyan);box-shadow:0 0 12px var(--cyan);}
+
+  /* hero statement */
+  .hero-statement{font-size:clamp(30px,4.4vw,58px);font-weight:800;line-height:1.15;max-width:1100px;margin-top:10px;}
+
+  .nav{position:fixed;right:26px;top:50%;transform:translateY(-50%);z-index:5;display:flex;flex-direction:column;gap:12px;}
+  .nav a{width:11px;height:11px;border-radius:50%;background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.25);transition:.25s;}
+  .nav a:hover,.nav a.active{background:var(--cyan);box-shadow:0 0 12px var(--cyan);}
+  .progress{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--cyan),var(--purple));z-index:6;width:0;transition:width .15s;}
+
+  .footer{position:fixed;left:8vw;bottom:22px;z-index:5;color:var(--muted);font-size:12px;letter-spacing:.04em;}
+  .dark-accent{background:linear-gradient(180deg,rgba(58,123,255,.10),transparent);}
+
+  @media (max-width:880px){
+    .g3,.g4,.g2{grid-template-columns:1fr;}
+    .flow{flex-direction:column;gap:18px;}
+    .step:not(:last-child)::after{display:none;}
+  }
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="aurora"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
+<div class="grain"></div>
+
+<nav class="nav" id="nav">
+  <a href="#s1" class="active"></a><a href="#s2"></a><a href="#s3"></a><a href="#s4"></a>
+  <a href="#s5"></a><a href="#s6"></a><a href="#s7"></a><a href="#s8"></a>
+</nav>
+<div class="footer">Sift PRD 评审 · V0.2 — 本地版（非 ardot 渲染）</div>
+
+<!-- 1 Cover -->
+<section class="slide dark-accent" id="s1">
+  <div class="kicker">PRD 内部评审</div>
+  <h1>Sift PRD 评审<br/><span class="accent">V0.2</span></h1>
+  <p class="sub">本地多 Agent 任务编排与门禁中枢。<br/>一句话定位：<b>别人卖 Agent，Sift 卖「筛子 + 注意力调度」。</b></p>
+</section>
+
+<!-- 2 Key Statement -->
+<section class="slide" id="s2">
+  <div class="kicker">关键主张</div>
+  <div class="hero-statement">别人卖 <span class="accent">Agent</span>，<br/>Sift 卖 <span class="accent">「筛子 + 注意力调度」</span>。</div>
+  <div class="grid g3">
+    <div class="card"><span class="tag">差异化 01</span><h3>门禁 ≠ 又一个 Agent</h3><p>确定性代码把关，LLM 只出「建议」。状态转移、门禁、合并全由代码执行，不靠模型「拍板」。</p></div>
+    <div class="card"><span class="tag">差异化 02</span><h3>Forge 即唯一信道</h3><p>gh/glab CLI 作为人-机唯一接口，零凭据管理，GitHub/GitLab 双平台对称。</p></div>
+    <div class="card"><span class="tag">差异化 03</span><h3>零自建 UI</h3><p>人驻留在 forge 的评论/标签里，手机 App = 全功能审批终端；daemon 零开放端口。</p></div>
+  </div>
+</section>
+
+<!-- 3 System Overview -->
+<section class="slide" id="s3">
+  <div class="kicker">系统总览 · 8 模块</div>
+  <h2>一张图看懂 <span class="accent">Sift</span> 的骨架</h2>
+  <div class="grid g4">
+    <div class="card"><span class="num">M1</span><h3>Forge</h3><p>gh/glab 适配层，唯一的人-机信道。</p></div>
+    <div class="card"><span class="num">M2</span><h3>Intake</h3><p>Issue 解析、去重、T1 分流。</p></div>
+    <div class="card"><span class="num">M3</span><h3>Brain</h3><p>LLM 决策中枢，T1–T7 七个触点。</p></div>
+    <div class="card"><span class="num">M4</span><h3>Runtime</h3><p>本地 Agent 执行沙箱。</p></div>
+    <div class="card"><span class="num">M5</span><h3>Gate</h3><p>受保护路径 → Checks → 评审策略 → 自动合并。</p></div>
+    <div class="card"><span class="num">M6</span><h3>Attention</h3><p>中断调度，每条 ≤4 个互斥选项。</p></div>
+    <div class="card"><span class="num">M7</span><h3>Command</h3><p>人类指令语义层。</p></div>
+    <div class="card"><span class="num">M8</span><h3>CLI</h3><p>sift 命令行入口。</p></div>
+  </div>
+</section>
+
+<!-- 4 E2E Flow -->
+<section class="slide" id="s4">
+  <div class="kicker">端到端流程</div>
+  <h2>从 <span class="accent">Issue</span> 到 <span class="accent">Merge</span> 的 6 步</h2>
+  <div class="flow">
+    <div class="step"><div class="dot">1</div><h4>创建 Issue</h4><p>人提出任务，落到 forge。</p></div>
+    <div class="step"><div class="dot">2</div><h4>Intake 分流</h4><p>T1 判定类型/优先级/去重。</p></div>
+    <div class="step"><div class="dot">3</div><h4>派发 Agent</h4><p>Runtime 起本地执行沙箱。</p></div>
+    <div class="step"><div class="dot">4</div><h4>产生变更</h4><p>Agent 提交 PR（受保护路径）。</p></div>
+    <div class="step"><div class="dot">5</div><h4>门禁评估</h4><p>Shadow Gate 预审 → 真实 Gate。</p></div>
+    <div class="step"><div class="dot">6</div><h4>合并 / 回中断</h4><p>达标自动合并，否则结构化回人。</p></div>
+  </div>
+</section>
+
+<!-- 5 Design Strengths -->
+<section class="slide" id="s5">
+  <div class="kicker">设计亮点 · 3 支柱</div>
+  <h2>为什么这套设计 <span class="accent">立得住</span></h2>
+  <div class="grid g3">
+    <div class="card"><span class="tag">A1 无权柄原则</span><h3>LLM 只有发声权</h3><p>模型只产出建议；所有状态转移、门禁、合并由确定性代码执行。可控、可审计、可回放。</p></div>
+    <div class="card"><span class="tag">Forge 抽象</span><h3>双平台对称</h3><p>gh/glab 作为唯一信道，行为归一；零凭据管理，部署面极小。</p></div>
+    <div class="card"><span class="tag">零自建 UI</span><h3>寄生式人机界面</h3><p>人留在 forge 评论/标签；手机 = 审批终端；daemon 不暴露任何端口。</p></div>
+  </div>
+</section>
+
+<!-- 6 Risks & Gaps -->
+<section class="slide dark-accent" id="s6">
+  <div class="kicker">风险与缺口 · 2×2</div>
+  <h2>真正要盯的 <span class="accent">4 件事</span></h2>
+  <div class="grid g2">
+    <div class="card"><span class="tag">高影响 · 内部可控</span><h3>① 门禁可信度</h3><p>auto_merge 前必须靠 Shadow Gate 积累「预审命中率」证据，否则不敢自动合。</p></div>
+    <div class="card"><span class="tag">高影响 · 外部依赖</span><h3>② 双平台一致性</h3><p>GitHub / GitLab API 差异会悄悄导致行为漂移，需抽象层兜底。</p></div>
+    <div class="card"><span class="tag">中影响 · 内部</span><h3>③ 注意力稀释</h3><p>中断太多反而淹没人。需严格 ≤4 互斥选项 + 频率预算。</p></div>
+    <div class="card"><span class="tag">中影响 · 可观测</span><h3>④ 配置漂移</h3><p>多 repo 策略不一致会埋雷，需「策略即代码」+ 集中校验。</p></div>
+  </div>
+</section>
+
+<!-- 7 Open Q & Recommendations -->
+<section class="slide" id="s7">
+  <div class="kicker">开放问题 & 建议 · 6 行</div>
+  <h2>把 PRD 的问号，<span class="accent">变成动作</span></h2>
+  <table>
+    <thead><tr><th style="width:8%">#</th><th style="width:46%">开放问题（来自 PRD）</th><th style="width:46%">建议动作</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="q">Shadow Gate 准确率到多少才开 auto_merge？</td><td class="a">先跑 50 次 PR 双盲，目标预审命中 ≥95% 再启用。</td></tr>
+      <tr><td>2</td><td class="q">双平台 API 差异如何归一？</td><td class="a">抽象 Forge Adapter 层，维护差异矩阵与回归用例。</td></tr>
+      <tr><td>3</td><td class="q">中断频率上限怎么定？</td><td class="a">引入「注意力预算」，给每日中断配额与降级策略。</td></tr>
+      <tr><td>4</td><td class="q">多 repo 策略如何保持一致？</td><td class="a">策略即代码，中央模板 + CI 校验，禁止逐仓漂移。</td></tr>
+      <tr><td>5</td><td class="q">失败如何优雅回退？</td><td class="a">T6 失败分流三态：自动重试 / 转人工 / 安全放弃。</td></tr>
+      <tr><td>6</td><td class="q">Brain 自我标定频率？</td><td class="a">周级离线回放 + 人工抽检，量化偏差再校准。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 8 Closing -->
+<section class="slide" id="s8">
+  <div class="kicker">下一步</div>
+  <h2>先跑 <span class="accent">PoC</span>，别先造平台</h2>
+  <p class="sub">把一个 repo 跑通 Shadow Gate，比把 8 个模块都做漂亮更有价值。验证顺序建议：门禁可信度 → 双平台对称 → 中断预算。</p>
+  <div class="pills">
+    <span class="pill"><span class="ic"></span>① 单 repo 跑 Shadow Gate 验证</span>
+    <span class="pill"><span class="ic"></span>② 锁定 Forge Adapter 双平台</span>
+    <span class="pill"><span class="ic"></span>③ 定中断预算协议</span>
+  </div>
+</section>
+
+<script>
+  const nav=document.getElementById('nav').querySelectorAll('a');
+  const prog=document.getElementById('progress');
+  const secs=[...document.querySelectorAll('.slide')];
+  function onScroll(){
+    const st=window.scrollY, h=document.documentElement.scrollHeight-window.innerHeight;
+    prog.style.width=(h>0?st/h*100:0)+'%';
+    let idx=0;
+    secs.forEach((s,i)=>{if(s.getBoundingClientRect().top<=window.innerHeight/2)idx=i;});
+    nav.forEach((a,i)=>a.classList.toggle('active',i===idx));
+  }
+  window.addEventListener('scroll',onScroll,{passive:true});
+  onScroll();
+  nav.forEach(a=>a.addEventListener('click',e=>{
+    e.preventDefault();
+    document.querySelector(a.getAttribute('href')).scrollIntoView();
+  }));
+  window.addEventListener('keydown',e=>{
+    const cur=secs.findIndex(s=>s.getBoundingClientRect().top<=2 && s.getBoundingClientRect().bottom>2);
+    if(e.key==='ArrowDown'&&cur<secs.length-1)secs[cur+1].scrollIntoView();
+    if(e.key==='ArrowUp'&&cur>0)secs[cur-1].scrollIntoView();
+  });
+</script>
+</body>
+</html>
