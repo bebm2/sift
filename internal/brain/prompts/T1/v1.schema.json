@@ -1,0 +1,110 @@
+{
+  "$id": "https://sift.dev/decode/t1_output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "const": "ready"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "possible_duplicate_run_id": {
+            "type": "null"
+          },
+          "questions": {
+            "maxItems": 0,
+            "type": "array"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "const": "needs_clarification"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "possible_duplicate_run_id": {
+            "type": "null"
+          },
+          "questions": {
+            "maxItems": 5,
+            "minItems": 1,
+            "type": "array"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "const": "possible_duplicate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "possible_duplicate_run_id": {
+            "type": "string"
+          },
+          "questions": {
+            "maxItems": 0,
+            "type": "array"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "disposition": {
+      "enum": [
+        "ready",
+        "needs_clarification",
+        "possible_duplicate"
+      ],
+      "type": "string"
+    },
+    "possible_duplicate_run_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-sift:maxBytes": 64
+    },
+    "questions": {
+      "items": {
+        "type": "string",
+        "x-sift:maxBytes": 1000,
+        "x-sift:minBytes": 1
+      },
+      "maxItems": 5,
+      "type": "array"
+    },
+    "rationale": {
+      "type": "string",
+      "x-sift:maxBytes": 2000
+    }
+  },
+  "required": [
+    "disposition",
+    "possible_duplicate_run_id",
+    "questions",
+    "rationale"
+  ],
+  "title": "T1Output",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "closed",
+    "sourceType": "brain.T1Output"
+  }
+}

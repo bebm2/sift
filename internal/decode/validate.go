@@ -70,10 +70,14 @@ func walkStruct(v reflect.Value, path string) error {
 		}
 
 		fv := v.Field(i)
-		if isRequired(f) && isNilPointer(fv) {
+		rules := parseRules(f.Tag.Get("sift"))
+		if rules.required && isNilPointer(fv) {
 			return &DecodeError{Kind: KindMissingRequired, Field: fieldPath, Err: errMissingRequired}
 		}
 		if err := walkValue(fv, fieldPath); err != nil {
+			return err
+		}
+		if err := checkFieldConstraints(fv, fieldPath, rules); err != nil {
 			return err
 		}
 	}
@@ -120,7 +124,7 @@ func jsonFieldName(f reflect.StructField) (string, bool) {
 }
 
 func isRequired(f reflect.StructField) bool {
-	return strings.Contains(f.Tag.Get("sift"), "required")
+	return parseRules(f.Tag.Get("sift")).required
 }
 
 func isNilPointer(v reflect.Value) bool {
