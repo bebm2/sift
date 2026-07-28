@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
@@ -71,6 +72,26 @@ type OpenConfig struct {
 type DB struct {
 	db   *sql.DB
 	path string
+
+	wakeupMu     sync.RWMutex
+	outboxWakeup func()
+}
+
+// SetOutboxWakeup installs the post-commit wakeup hook used by the named
+// SupervisorScheduler. It never runs inside a database transaction.
+func (d *DB) SetOutboxWakeup(wakeup func()) {
+	d.wakeupMu.Lock()
+	defer d.wakeupMu.Unlock()
+	d.outboxWakeup = wakeup
+}
+
+func (d *DB) wakeOutbox() {
+	d.wakeupMu.RLock()
+	wakeup := d.outboxWakeup
+	d.wakeupMu.RUnlock()
+	if wakeup != nil {
+		wakeup()
+	}
 }
 
 // Path returns the database file path this handle opened.
