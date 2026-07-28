@@ -162,8 +162,8 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 - [ ] 编写 `specs/brain.md` 的统一调用与 T1/T2 契约
 - [ ] 本机 agent CLI 调用壳：stdin/临时文件输入 → schema 校验 → 同 prompt 重试一次 → 逐触点确定性兜底
-- [ ] 提示词与 schema 版本化并入 git；调用身份为 `(run_id, attempt_no, touchpoint, call_seq)`
-- [ ] 每次调用持久化输入、原始输出摘要、合法输出、版本、兜底标记、usage/token；可空关联 Gate 快照
+- [ ] 提示词与 schema 版本化并入 git；调用身份与各触点作用域以 `specs/brain.md`、`specs/storage.md` §10.1 为准
+- [ ] 每次调用按 `specs/storage.md` §10.1 持久化完整 trace；具体调用、兜底与 Gate 关联契约由 `specs/brain.md` 定义
 - [ ] T1：Issue 体检，失败兜底为直接入队
 - [ ] T2：生成 kind/agent/goals/开工前审批建议；失败兜底为人工分派
 - [ ] 组装 Task Spec（Description + Goals + Guardrails + Context）；Context 从 base/全局/任务附注组合
@@ -172,10 +172,10 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 ### 先写 spec
 
-- [ ] `specs/storage.md`
-- [ ] `specs/control-plane.md`
-- [ ] `specs/config.md`（含全部确定性默认值、Agent 定义、路径与启动探测分级）
-- [ ] `specs/outbox.md`
+- [x] `specs/storage.md`
+- [x] `specs/control-plane.md`
+- [x] `specs/config.md`（含全部确定性默认值、Agent 定义、路径与启动探测分级）
+- [x] `specs/outbox.md`
 - [ ] `specs/brain.md`（调用壳、T1/T2；后续触点随片增补）
 
 ### M1 门禁

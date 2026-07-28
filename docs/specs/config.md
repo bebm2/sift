@@ -59,12 +59,14 @@ V0 不采用 XDG 三目录拆分。macOS 与 Linux 使用同一布局：
 | `run.sock` | `0600` | Report 与 wrapper socket |
 | `logs/` | `0700` | 系统日志 |
 | `worktrees/` | `0700` | Run worktree |
-| `runs/<run_id>/` | `0700` | attempt 控制目录 |
-| `runs/<run_id>/bootstrap.json` | `0600` | 原子创建；wrapper 读取后立即 unlink |
-| `runs/<run_id>/control.json` | `0600` | 含 run token；存活到 Run 清理 |
-| `runs/<run_id>/heartbeat` | `0600` | wrapper 原子更新 |
-| `runs/<run_id>/result.json` | `0600` | wrapper 原子写入的完成证据 |
-| `runs/<run_id>/agent.log` | `0600` | Agent 原始字节流，按 logging 配置轮转 |
+| `runs/<run_id>/` | `0700` | Run 控制根目录 |
+| `runs/<run_id>/attempts/<attempt_no>/` | `0700` | `$SIFT_RUN_DIR`；每 attempt 独立，不覆盖重试历史 |
+| `runs/<run_id>/attempts/<attempt_no>/bootstrap.json` | `0600` | 原子创建；wrapper 读取后立即 unlink |
+| `runs/<run_id>/attempts/<attempt_no>/task.json` | `0600` | 冻结 Task Spec；存活到 attempt 清理 |
+| `runs/<run_id>/attempts/<attempt_no>/control.json` | `0600` | 含 run token；存活到 attempt 清理 |
+| `runs/<run_id>/attempts/<attempt_no>/heartbeat` | `0600` | wrapper 原子更新 |
+| `runs/<run_id>/attempts/<attempt_no>/result.json` | `0600` | wrapper 原子写入的完成证据 |
+| `runs/<run_id>/attempts/<attempt_no>/agent.log` | `0600` | Agent 原始字节流，按 logging 配置轮转 |
 
 控制文件的字段与原子写协议归 `specs/control-plane.md`；本表只定义路径、权限和生命周期。Sift 创建目录或文件后必须复核实际模式；不得只依赖进程 `umask`。
 
@@ -124,13 +126,13 @@ agents:
 |------|------|------|------|
 | `id` | string | — | 必填；匹配 `^[a-z][a-z0-9-]{0,62}$`，全局唯一 |
 | `executable` | string | — | 必填；非空；直接传给 `exec`，不得包含 shell 片段 |
-| `args` | `string[]` | `[]` | argv；每项不得含 NUL |
-| `task_transport` | enum | `stdin` | `stdin \| file`；`file` 的具体文件契约在 `specs/control-plane.md` 定义 |
+| `args` | `string[]` | `[]` | argv；每项不得含 NUL；仅允许完整 token `{task_file}` 占位符 |
+| `task_transport` | enum | `stdin` | `stdin \| file`；`file` 要求 args 中恰有一个 `{task_file}`，具体文件契约在 `specs/control-plane.md` 定义 |
 | `backend` | enum | `process` | `process \| tmux` |
 | `max_concurrent` | integer | `runtime.default_agent_max_concurrent` | `1..32`；Agent 省略时继承根配置 |
 | `version_args` | `string[]` | `["--version"]` | 启动探测 argv；空数组表示只探测 executable 可执行 |
 
-Agent 定义不接受任意环境变量映射。Runtime 只注入协议明确允许的非机密变量（V0 为 `SIFT_RUN_DIR`）；凭据不得经配置、argv 或环境变量传递。
+`task_transport=stdin` 时禁止 `{task_file}`；`file` 时必须恰有一个完整 argv token 等于 `{task_file}`，wrapper 只做单 token 替换，不做字符串插值或 shell 展开。Agent 定义不接受任意环境变量映射。Runtime 只注入协议明确允许的非机密变量（V0 为 `SIFT_RUN_DIR`）；凭据不得经配置、argv 或环境变量传递。
 
 ### 3.3 `projects[]`
 
@@ -402,6 +404,8 @@ Report 子配额统计所有 Report 直接触发的 Interrupt（含 critical）�
 6. `tmux`（仅有效 Agent/backend 使用时）。
 7. 每个启用项目引用的 forge CLI 登录与版本；未引用的 forge 不探测。
 8. 双 socket 路径可安全创建，且进程未创建 TCP/UDP listener。
+
+所有通过 PATH 配置的 Agent、Brain、Forge 与 wrapper executable 均在启动探测时解析为绝对路径；运行期启动和进程身份记录使用该已解析路径，不再次按可能漂移的 PATH 查找。原始配置仍进入 config hash，解析结果进入启动诊断。
 
 ### 5.2 项目级：仅隔离项目
 

@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 created: 2026-07-28
 summary: SQLite 表、事务、迁移与审计存储契约
 ---
@@ -12,7 +12,7 @@ summary: SQLite 表、事务、迁移与审计存储契约
 
 ## 评审处置
 
-评审原文：[2026-07-28-specs-review-pi-k3.md](../reviews/2026-07-28-specs-review-pi-k3.md)。
+首次评审：[2026-07-28-specs-review-pi-k3.md](../reviews/2026-07-28-specs-review-pi-k3.md)；定向复评：[2026-07-28-storage-rereview-pi-gpt-5.6-sol.md](../reviews/2026-07-28-storage-rereview-pi-gpt-5.6-sol.md)。
 
 | 发现 | 处置 |
 |------|------|
@@ -22,7 +22,7 @@ summary: SQLite 表、事务、迁移与审计存储契约
 | S4 Report burst 无法表达 | 新增整数令牌桶；critical fuse 改为 append-only entry 的滑动窗口查询 |
 | S5 字段与导出细节 | 统一 schema version/FK/原因枚举，明确 probe、manual Run、close reason、回放 JSONL 与 immutable payload trigger |
 
-S1–S5 已处置并完成内部自查；本规格保持 `draft`，等待定向复评后再转 `active`。
+S1–S5 已处置；定向复评通过，本规格转为 `active`。后续字段变更须与迁移、写端口和派生测试同步。
 
 ## 1. 存储不变量
 
@@ -69,7 +69,9 @@ PRAGMA wal_autocheckpoint = 1000;
 | JSON | `TEXT` | canonical JSON；schema version 另列 |
 | forge id | `TEXT` | 原样字符串，不假设数字 |
 
-数据库内不存 capability 明文。operator token 只在文件和 daemon 内存；run token、bootstrap nonce、wrapper session、spawn permit只存 SHA-256 hash。用于外部公开指令防重放的 Interrupt nonce 可以明文存储，因为它会出现在 forge 评论中，不作为秘密。
+列说明显式写 `NULL` 才允许空值；未写 `NULL` 的列均须在 DDL 声明 `NOT NULL`。SQLite rowid 表不会自动令组合主键各列 `NOT NULL`，因此本规格所有组合主键列还必须显式声明 `NOT NULL`，不得依赖 PRIMARY KEY 的隐含行为。
+
+数据库内不存 capability 明文。operator token 只在文件和 daemon 内存；run token、bootstrap nonce、wrapper session、spawn permit 只存 SHA-256 hash。用于外部公开指令防重放的 Interrupt nonce 可以明文存储，因为它会出现在 forge 评论中，不作为秘密。
 
 ## 3. 迁移
 
@@ -150,13 +152,13 @@ PRAGMA wal_autocheckpoint = 1000;
 | `core_hooks_path_value` | TEXT | NULL；未显式配置时为空 |
 | `effective_hooks_path` | TEXT | NOT NULL，规范化后的最终目录 |
 | `hooks_directory_digest` | TEXT | NOT NULL |
-| `baseline_digest` | TEXT | NOT NULL；覆盖前三项 |
+| `baseline_digest` | TEXT | NOT NULL；覆盖前四项配置/路径/目录事实 |
 | `source_run_id` | TEXT | NULL FK runs；初始基线可空 |
 | `source_attempt_no` | INTEGER | NULL；非空时与 source_run_id 组成 attempts 组合 FK |
 | `captured_at_ms` | INTEGER | NOT NULL |
 | `updated_at_ms` | INTEGER | NOT NULL |
 
-接入项目时建立基线；每次 Agent 结束后复核。无变化只更新时间；变化时更新投影并同事务追加 `hooks_drift_detected` 安全事件，不以新值静默覆盖而不留痕。
+接入项目时建立基线；每次 Agent 结束后复核。初始来源两列同为空，attempt 来源两列同为非空。无变化只更新时间；变化时以旧 `baseline_digest` 做 CAS，更新投影并同事务追加 `hooks_drift_detected` 安全事件；按确定性严重度映射需要停 Run/HITL 时，还须同事务执行 Run transition、Interrupt、预算与 outbox，不以新值静默覆盖而不留痕。
 
 ## 5. Run 与 attempt
 
@@ -222,8 +224,8 @@ PRAGMA wal_autocheckpoint = 1000;
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `run_id` | TEXT | FK runs ON DELETE RESTRICT |
-| `attempt_no` | INTEGER | PK part，正整数 |
+| `run_id` | TEXT | NOT NULL，FK runs ON DELETE RESTRICT |
+| `attempt_no` | INTEGER | NOT NULL，PK part，正整数 |
 | `phase` | TEXT | `pending \| starting \| spawning \| running \| finished \| orphaned` |
 | `generation` | INTEGER | NOT NULL，正整数；换 owner 时递增 |
 | `backend` | TEXT | `process \| tmux` |
@@ -262,7 +264,7 @@ PRAGMA wal_autocheckpoint = 1000;
 
 - wrapper 身份字段必须全空或 `pid/started/executable/pgid/instance` 全具备；Agent 身份三元组必须全空或全具备。
 - `task_spec_snapshot_id` 以 `(run_id, task_spec_snapshot_id)` 组合外键保证属于本 Run。
-- `running` 必须有 Agent 身份；`finished` 必须有 result；`orphaned` 不要求 result。
+- `running` 必须有 Agent 身份；`finished` 必须有 result，且 `result_exit_code/result_signal` 恰有一个非空；`orphaned` 不要求 result。
 - resolution 与 `resolution_at_ms` 同空同非空，写入后不可修改。
 - `isolation_state=frozen` 时 `isolated_at_ms` 非空且 `isolation_released_at_ms` 为空；解除时必须已有执行体消失证据并写 release 时间。Run 终态不得自动解除隔离。
 - partial unique index：每个 Run 最多一个 phase 属于 `pending/starting/spawning/running` 的 attempt。
@@ -273,13 +275,13 @@ PRAGMA wal_autocheckpoint = 1000;
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `run_id` | TEXT | PK part |
-| `attempt_no` | INTEGER | PK part |
+| `run_id` | TEXT | NOT NULL，PK part |
+| `attempt_no` | INTEGER | NOT NULL，PK part |
 | `generation` | INTEGER | NOT NULL，与 attempt 相同 |
 | `launch_operation_key` | TEXT | NOT NULL UNIQUE |
 | `dispatch_id` | TEXT | NULL |
-| `bootstrap_nonce_hash` | TEXT | NOT NULL |
-| `run_token_hash` | TEXT | NOT NULL |
+| `bootstrap_nonce_hash` | TEXT | NULL；launch dispatch 准备后非空 |
+| `run_token_hash` | TEXT | NULL；与 bootstrap hash 同空同非空 |
 | `wrapper_instance_id` | TEXT | NULL |
 | `wrapper_session_hash` | TEXT | NULL |
 | `spawn_permit_hash` | TEXT | NULL |
@@ -291,6 +293,7 @@ PRAGMA wal_autocheckpoint = 1000;
 
 约束：
 
+- `dispatch_id/bootstrap_nonce_hash/run_token_hash` 三者同空同非空；只有 `PrepareLaunchDispatch` 可从全空 CAS 为全非空。
 - 同一 wrapper instance 的 acquire 重放返回既有 session；不同 instance 不覆盖。
 - permit 每 attempt/generation 最多一个，写入后不可替换。
 - `spawning` 期间不得释放 claim 或递增 generation，除非受控终止已持久化消失证据。
@@ -403,8 +406,8 @@ PRAGMA wal_autocheckpoint = 1000;
 
 | 列 | 类型 | 说明 |
 |----|------|------|
-| `project_id` | TEXT | FK projects |
-| `stream` | TEXT | `issues \| issue_comments \| issue_labels \| changes \| change_comments \| checks` |
+| `project_id` | TEXT | NOT NULL，FK projects |
+| `stream` | TEXT | NOT NULL；`issues \| issue_comments \| issue_labels \| changes \| change_comments \| checks` |
 | `cursor` | TEXT | NULL |
 | `etag` | TEXT | NULL |
 | `since_ms` | INTEGER | NULL |
@@ -445,7 +448,7 @@ PRAGMA wal_autocheckpoint = 1000;
 | `event_id` | TEXT | NOT NULL FK events |
 | `received_at_ms` | INTEGER | NOT NULL |
 
-唯一约束 `(run_id, attempt_no, report_key)`。本表只记录已接受报告；重复请求返回既有 receipt，限流拒绝只记安全事件而不占用 report key。Agent 的 completed 只产生事件，不修改 Run 状态。
+唯一约束 `(run_id, attempt_no, report_key)`。本表只记录已接受报告；重复请求先按该键返回既有 receipt，不消费令牌、不重复写事件；限流拒绝只记安全事件而不占用 report key。Agent 的 completed 只产生事件，不修改 Run 状态。
 
 ## 8. Transactional outbox
 
@@ -496,11 +499,11 @@ PRAGMA wal_autocheckpoint = 1000;
 | `attempt_id` | TEXT | PK、FK outbox_attempts |
 | `finished_at_ms` | INTEGER | NOT NULL |
 | `outcome` | TEXT | `success \| retry \| failed \| stale \| conflict` |
-| `error_class` | TEXT | NULL |
+| `error_class` | TEXT | NULL 或 `transient \| rate_limited \| auth_or_capability \| contract_violation \| semantic_conflict` |
 | `error_summary` | TEXT | NULL |
 | `evidence_digest` | TEXT | NULL |
 
-每个 attempt 最多一个结果。operation claim 用 CAS：仅 pending/retryable 且到期的行可进入 executing；恢复扫描完成前禁止 claim `launch_agent`。外部动作结束后，同一事务插入 result 并 CAS 更新 operation；旧 lease owner 的结果整笔拒绝。
+每个 attempt 最多一个结果。operation claim 用 CAS：pending/retryable 且到期，或 executing 且 lease 已过期的行可被认领；后者先为旧 attempt 插入 `outcome=retry,error_class=transient,error_summary=lease_expired` result，再替换 lease owner并创建新 attempt，旧 owner 的 complete 随即 CAS 失败。恢复扫描完成前禁止 claim/reclaim `launch_agent`。外部动作结束后，同一事务插入 result 并 CAS 更新 operation；旧 lease owner 的结果整笔拒绝。
 
 ## 9. 预算
 
@@ -510,10 +513,10 @@ PRAGMA wal_autocheckpoint = 1000;
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `kind` | TEXT | `token \| forge_api \| attention \| report` |
-| `scope` | TEXT | `global \| project \| run \| severity` |
+| `kind` | TEXT | NOT NULL；`token \| forge_api \| attention \| report` |
+| `scope` | TEXT | NOT NULL；`global \| project \| run \| severity` |
 | `scope_id` | TEXT | NOT NULL；global 使用 `global` |
-| `bucket_start_ms` | INTEGER | PK part |
+| `bucket_start_ms` | INTEGER | NOT NULL，PK part |
 | `bucket_end_ms` | INTEGER | NOT NULL |
 | `limit_value` | INTEGER | NOT NULL |
 | `consumed_value` | INTEGER | NOT NULL，默认 0 |
@@ -528,8 +531,8 @@ Report 的 `events_per_minute + burst` 使用持久化令牌桶，不用固定�
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `kind` | TEXT | V0 为 `report` |
-| `scope_id` | TEXT | Run/attempt 作用域稳定键 |
+| `kind` | TEXT | NOT NULL；V0 为 `report` |
+| `scope_id` | TEXT | NOT NULL；`run:<run_id>:attempt:<attempt_no>` |
 | `capacity_units` | INTEGER | NOT NULL；来自 burst |
 | `available_units` | INTEGER | NOT NULL，`0..capacity_units` |
 | `refill_numerator` | INTEGER | NOT NULL；每周期补充 token 数 |
@@ -552,11 +555,10 @@ Report 的 `events_per_minute + burst` 使用持久化令牌桶，不用固定�
 | `amount` | INTEGER | NOT NULL，正整数 |
 | `reason` | TEXT | NOT NULL |
 | `run_id` | TEXT | NULL FK runs |
-| `interrupt_id` | TEXT | NULL FK interrupts |
 | `operation_key` | TEXT | NOT NULL UNIQUE；防重复收费 |
 | `created_at_ms` | INTEGER | NOT NULL |
 
-Interrupt 升级重推复用原 charge，不新增 entry；Interrupt 关闭不退款。非 critical 日配额 entry 使用 `kind=attention, scope=severity, scope_id=<severity>`；Report 致扰子配额使用 `kind=report, scope=run, scope_id=<run_id>`。critical 不写日配额 counter，但每次首次发射仍写 `kind=attention, scope=severity, scope_id=critical` entry。熔断在 `EmitInterrupt` 事务内按 `created_at_ms >= now-window` 对该 append-only 流做全局与 per-Run 计数，形成真实滑动窗口；不以固定桶近似。
+Interrupt 升级重推复用原 charge，不新增 entry；Interrupt 关闭不退款。非 critical 日配额 entry 使用 `kind=attention, scope=severity, scope_id=<severity>`；Report 致扰子配额使用 `kind=report, scope=run, scope_id=<run_id>`。critical 不写日配额 counter，但每次首次发射仍写 `kind=attention, scope=severity, scope_id=critical` entry，并令 `bucket_start_ms=created_at_ms`。熔断在 `EmitInterrupt` 事务内按 `created_at_ms >= now-window` 对该 append-only 流做全局与 per-Run 计数，形成真实滑动窗口；不以固定桶近似。`budget_entries` 不反向保存 Interrupt FK；Interrupt 通过不可变 `charged_budget_entry_id` 指向 charge，避免循环外键。
 
 ## 10. Brain、Gate、校准与 Ledger
 
@@ -575,7 +577,7 @@ Interrupt 升级重推复用原 charge，不新增 entry；Interrupt 关闭不�
 | `touchpoint` | TEXT | `T1`..`T7` |
 | `call_seq` | INTEGER | NOT NULL，正整数 |
 | `prompt_version` | TEXT | NOT NULL |
-| `schema_version` | INTEGER | NOT NULL |
+| `output_schema_version` | INTEGER | NOT NULL |
 | `input_json` | TEXT | NOT NULL |
 | `input_digest` | TEXT | NOT NULL |
 | `raw_output_text` | TEXT | NULL；受 config `max_raw_output_bytes` 限制 |
@@ -632,13 +634,14 @@ hash 必须覆盖整份冻结输入；不得在 Gate 内读取快照外的当前
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `gate_input_hash` | TEXT | PK part |
-| `gate_version` | TEXT | PK part |
-| `snapshot_id` | TEXT | NOT NULL FK |
+| `gate_input_hash` | TEXT | NOT NULL，PK part |
+| `gate_version` | TEXT | NOT NULL，PK part |
+| `snapshot_id` | TEXT | NOT NULL FK gate_input_snapshots |
 | `verdict_json` | TEXT | NOT NULL |
+| `verdict_digest` | TEXT | NOT NULL |
 | `created_at_ms` | INTEGER | NOT NULL |
 
-缓存条目、评估与回放必须引用同一 snapshot。
+缓存条目、评估与回放必须引用同一 snapshot。相同 `(gate_input_hash, gate_version)` 只能 insert-or-return existing；既有 digest 与本次 verdict 不同是 contract violation，不得覆盖缓存。
 
 ### 10.5 `calibration_entries`（不可变）
 
@@ -663,8 +666,8 @@ Gate 预判先插入；人的结果由受限存储端口一次性补全，补全
 
 | 列 | 类型 | 说明 |
 |----|------|------|
-| `task_kind` | TEXT | 任务类别 |
-| `certification_version` | TEXT | 含窗口与阈值版本 |
+| `task_kind` | TEXT | NOT NULL；任务类别 |
+| `certification_version` | TEXT | NOT NULL；含窗口与阈值版本 |
 | `total_samples` | INTEGER | NOT NULL |
 | `negative_samples` | INTEGER | NOT NULL |
 | `leak_count` | INTEGER | NOT NULL |
@@ -692,14 +695,14 @@ Ledger 消费者只能是 T7 提案、指标与类别级 certification；不得�
 
 ### 10.8 回放集 JSONL v1
 
-导出是只读 `SELECT → JSONL`，UTF-8，每行一个 canonical JSON object，不重新拼当前数据。按 `created_at_ms, record_id` 稳定排序。两种 record：
+导出是只读 `SELECT → JSONL`，UTF-8，每行一个 canonical JSON object，不重新拼当前数据。导出查询把 Gate 的 `created_at_ms` 与 Brain 的 `started_at_ms` 统一别名为 `recorded_at_ms`，按 `recorded_at_ms, record_type, record_id` 稳定排序。两种 record：
 
 ```json
 {"record_type":"gate","schema_version":1,"record_id":"...","snapshot_id":"...","input":{},"gate_version":"...","expected_verdict":{}}
 {"record_type":"brain","schema_version":1,"record_id":"...","scope":"run","subject_key":"run:...","touchpoint":"T3","prompt_version":"...","output_schema_version":1,"input":{},"raw_output":"...","validated_output":{},"fallback_used":false,"fallback_reason":null,"gate_input_snapshot_id":"..."}
 ```
 
-Gate record 来自同一 snapshot/evaluation；Brain record 来自 trace，`gate_input_snapshot_id` 可空。导出不得包含 capability hash、operator token 或控制文件内容。格式字段新增需 bump 顶层 `schema_version`；旧导出必须继续可读或由显式迁移工具转换。
+Gate record 来自同一 snapshot/evaluation；Brain record 来自 trace，`output_schema_version` 与表字段同名，`gate_input_snapshot_id` 可空。导出不得包含 capability hash、operator token 或控制文件内容。格式字段新增需 bump 顶层 `schema_version`；旧导出必须继续可读或由显式迁移工具转换。
 
 ## 11. 受限写端口
 
@@ -710,14 +713,16 @@ Gate record 来自同一 snapshot/evaluation；Brain record 来自 trace，`gate
 | `ApplyMigration` | schema，仅启动期 |
 | `ActivateConfig` | config snapshot、daemon boot、projects 当前投影 |
 | `FinishDaemonBoot` | daemon boot 的一次性停止补全 |
-| `UpdateProjectRuntime` | project health/isolation/capabilities + event；供持续能力探测 |
-| `RecordHookBaseline` | hook baseline 当前投影 + 漂移安全事件 |
+| `UpdateProjectRuntime` | project health/isolation/capabilities + event + 可选唯一告警 outbox；供持续能力探测 |
+| `RecordHookBaseline(expectedDigest)` | hook baseline CAS + 漂移安全事件 + 可选 Run transition/Interrupt/预算/outbox |
 | `TransitionRun(expectedVersion, command)` | runs + events + 可选 outbox/幂等记录 |
-| `SetInitialTaskSpec` | 初始 Task Spec snapshot + Run 当前指针 + event |
+| `SetInitialTaskSpec(expectedRunVersion, callIdentity)` | 幂等插入初始 Task Spec snapshot + Run 当前指针 + event |
 | `PersistIntakeBatch` | forge receipts、Run/事实投影、events，最后推进 cursor |
-| `ChargeForgeAPICall` | forge_api budget counter + entry；适配器每次真实调用前唯一收费 |
-| `ClaimOutboxOperation` | outbox operation + immutable attempt start |
-| `CompleteOutboxAttempt` | outbox operation + immutable attempt result + 可选 interrupt delivery 投影 |
+| `ChargeForgeAPICall(callAttemptKey)` | forge_api budget counter + entry；适配器每次外部调用尝试前预留且不退款，崩溃可能保守计费但不得超支 |
+| `ClaimOutboxOperation` | operation + immutable attempt start；reclaim 时先为旧 attempt 写 `retry/transient:lease_expired` result |
+| `PrepareLaunchDispatch` | lease/generation CAS + dispatch id + bootstrap/run token hash；提交后才可写 bootstrap/spawn wrapper |
+| `CompleteOutboxAttempt(expectedLease, outcomeCommand)` | operation + immutable result + kind-specific 投影/event；可选 project isolation、Run transition、Interrupt/预算、delivery、后继 outbox，必须同事务 |
+| `AcquireLaunchClaim` | wrapper/session CAS + pending→starting + launch outbox attempt/result/succeeded + event |
 | `AdvanceAttempt` | attempt/claim + events；不得旁路 Run transition |
 | `StartOrAdvanceProbe` | attempt probe + 受控终止观测事件 |
 | `ResolveAttemptRace` | resolution、迟到事实、Run transition、Interrupt、outbox 的统一 CAS 仲裁 |
@@ -751,7 +756,7 @@ CAS 失败整笔回滚并返回 `RejectedStale`；非法状态组合在开事务
 
 ### 12.2 Interrupt 五件事
 
-同一事务：Run 转 `waiting_human`（或确认已处于合法人工态）→ 按 generation key insert-or-return existing Interrupt → 首次时扣一次注意力预算 → 追加事件 → 创建 publish operation。generation key 已存在时不得重复扣费或创建第二 operation。
+同一事务：Run 转 `waiting_human`（或确认已处于合法人工态）→ 按 generation key 查重 → 首次时扣一次注意力预算并取得 entry id → 插入引用该 entry 的 Interrupt → 追加事件 → 创建 publish operation。generation key 已存在时直接返回既有 Interrupt，不得重复扣费或创建第二 operation。
 
 ### 12.3 Intake batch
 
@@ -759,7 +764,7 @@ CAS 失败整笔回滚并返回 `RejectedStale`；非法状态组合在开事务
 
 ### 12.4 Outbox claim
 
-CAS 将到期的 pending/retryable operation 改为 executing、写 lease owner/expiry、attempt_count+1，并新增 outbox_attempt。外部动作在提交后执行。执行结果再以 operation id + lease owner CAS 收敛；过期 worker 不得覆盖新 owner 结果。
+CAS 认领到期的 pending/retryable，或接管 lease 已过期的 executing operation；reclaim 先关闭旧 attempt result，再写新 lease owner/expiry、attempt_count+1并新增 outbox_attempt。外部动作在提交后执行。执行结果再以 operation id + lease owner CAS 收敛；过期 worker 不得覆盖新 owner 结果。
 
 ### 12.5 `startup_stall` retry 成功
 
@@ -795,6 +800,7 @@ Gate 首次判定：snapshot、evaluation、预判 calibration 同事务；需�
 - `brain_traces`
 - `gate_input_snapshots`
 - `gate_evaluations`
+- `gate_cache`
 - `ledger_entries`
 
 `calibration_entries` 只允许专用语句把 human decision 的 NULL 字段一次性补全；其余 UPDATE 与全部 DELETE 被 trigger 拒绝。`daemon_boots` 同理只允许一次性补全 stop 字段。
@@ -859,4 +865,4 @@ Gate 首次判定：snapshot、evaluation、预判 calibration 同事务；需�
 - [x] `attempt_resolution` 旧名未进入 spec，V0 枚举保持 `reject | retry_after_absence`。
 - [x] 所有 markdown 相对链接存在、代码围栏闭合、无尾随空白。
 
-**自查结论：** 两项 P1 与同轮 P2/P3 已关闭；保持 `draft`，等待定向复评。
+**自查结论：** 两项 P1 与同轮 P2/P3 已关闭；定向复评通过，允许转 `active`。

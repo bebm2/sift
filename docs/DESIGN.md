@@ -108,7 +108,7 @@ Sift 不持有 forge 凭证（由 `gh` / `glab` 自身持有），不监听端�
 
 端点分离不是为了整洁，是为了让边界**可被沙箱一次关掉**：沙箱的挂载集是「`run.sock` + 本 attempt 自己的 run dir」，deny 其余 `~/.sift/`（DB、`config.yaml`、`operator.token`、其他 Run 的 run dir），运维面即自然不可达。
 
-**挂载集必须把 run dir 写进去。** D0.2 把它写成「只挂 `run.sock`、deny read `~/.sift/`」，而 run token 就在 `~/.sift/runs/<run_id>/control.json`（§8.9）——按那句话字面执行，关掉的不只是运维面，上报面会一起消失，「闭合」出一个 agent 无法上报的系统。这是端点分离全部收益所依赖的一句话，必须精确。
+**挂载集必须把 run dir 写进去。** D0.2 把它写成「只挂 `run.sock`、deny read `~/.sift/`」，而 run token 就在本 attempt 的 run dir 下 `control.json`（§8.9；最终路径见 `specs/config.md`）——按那句话字面执行，关掉的不只是运维面，上报面会一起消失，「闭合」出一个 agent 无法上报的系统。这是端点分离全部收益所依赖的一句话，必须精确。
 
 V0 不实施沙箱，因此**同属主 agent 仍可读 operator token 并连运维 socket——这条暴露面如实列入 §9.1 TM6 清单**。
 
@@ -378,7 +378,8 @@ D0.2 写的「按 `(base, head branch)` 查是否已存在**开启的** Change�
   sift.db            config.yaml         operator.token（0600）
   siftd.sock（运维）  run.sock（上报 + 启动握手）
   logs/              worktrees/
-  runs/<run_id>/     control.json  heartbeat  result.json  agent.log
+  runs/<run_id>/attempts/<attempt_no>/
+                     task.json  control.json  heartbeat  result.json  agent.log
                      bootstrap.json（0600，wrapper 读后立即 unlink，§8.4）
 ```
 
@@ -389,7 +390,7 @@ D0.2 写的「按 `(base, head branch)` 查是否已存在**开启的** Change�
 | 对象 | 内容 | 支撑的 PRD 要求 |
 |------|------|----------------|
 | Gate 输入快照 | 冻结的 `changeFacts` / 有效策略 / riskScore + `gate_input_hash` | §5.6「同一输入重跑得同一 verdict」、量化策略改动 |
-| Brain 触点 trace | 各触点的输入、原始输出、提示词与 schema 版本、是否走了兜底；调用身份为 `(run_id, attempt_no, touchpoint, call_seq)` | §5.6「量化**提示词改动**带来的漏放变化」——只存 Gate 快照无法把差异归因到提示词 |
+| Brain 触点 trace | 各触点的输入、原始输出、提示词与 schema 版本、是否走了兜底；各触点身份域见 [`specs/storage.md`](specs/storage.md) §10.1 | §5.6「量化**提示词改动**带来的漏放变化」——只存 Gate 快照无法把差异归因到提示词 |
 
 **关联不是强制一一对应。** 缓存条目、影子 Gate 记录与 Gate 回放共用同一个 `gate_input_snapshot_id`；Brain trace 以自身调用身份独立存在，只有该次输出确实参与某份 Gate 输入组装时才携带可空的 `gate_input_snapshot_id`。因此 T1/T2/T6/T7 不需要伪造 Gate 外键，T3 等关联触点仍能回答「这次放行是策略变松了还是提示词变松了」。
 
