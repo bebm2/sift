@@ -20,15 +20,20 @@ import (
 )
 
 type Daemon struct {
-	DB       *storage.DB
-	Pollers  []*intake.Poller
-	Comments []*forgeworker.CommentWorker
-	Now      func() time.Time
-	mu       sync.Mutex
+	DB         *storage.DB
+	Pollers    []*intake.Poller
+	Evaluators []*intake.T1Evaluator
+	Comments   []*forgeworker.CommentWorker
+	Now        func() time.Time
+	mu         sync.Mutex
 }
 
 // Assemble creates one production Forge adapter, Intake poller/T1 evaluator,
-// and kind-scoped comment worker per enabled project. The caller owns DB.
+// and kind-scoped comment worker per enabled project. CommentWorker is also the
+// reply receipt path for intake comments: it lists the target before sending and
+// recognizes the durable operation marker, so a remotely accepted comment is
+// acknowledged after a crash without a second post (covered by forgeworker's
+// crash-recovery test). The caller owns DB.
 func Assemble(db *storage.DB, cfg *config.Config, now func() time.Time) (*Daemon, error) {
 	if db == nil || cfg == nil {
 		return nil, errors.New("daemon: database and config are required")
@@ -52,6 +57,7 @@ func Assemble(db *storage.DB, cfg *config.Config, now func() time.Time) (*Daemon
 		evaluator := &intake.T1Evaluator{DB: db, Brain: brain.NewShell(db, cfg.Brain, brain.SubprocessProvider{Executable: cfg.Brain.Executable, Args: cfg.Brain.Args}, now), Now: now}
 		poller := &intake.Poller{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now, Idle: cfg.Scheduler.IntakeIdleInterval, Active: cfg.Scheduler.IntakeActiveInterval, Slow: cfg.Forge.SlowPollInterval, HourlyLimit: int64(cfg.Forge.HourlyAPILimit), WarningRatio: cfg.Forge.WarningRatio, OnIssue: evaluator.EvaluateIssue}
 		d.Pollers = append(d.Pollers, poller)
+		d.Evaluators = append(d.Evaluators, evaluator)
 		d.Comments = append(d.Comments, &forgeworker.CommentWorker{DB: db, Client: adapter, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:comment:" + p.ID})
 	}
 	return d, nil
@@ -75,6 +81,7 @@ func (d *Daemon) Tick(ctx context.Context) error {
 			return fmt.Errorf("intake[%d]: %w", i, err)
 		}
 	}
+	// TODO(issue-61): schedule reverse-sync ReconcileOnce when its worker is available.
 	for i, w := range d.Comments {
 		if err := w.RunOnce(ctx); err != nil {
 			return fmt.Errorf("comment[%d]: %w", i, err)
