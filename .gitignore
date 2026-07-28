@@ -9,6 +9,8 @@ dist/
 # —— Go 工具链 ——
 vendor/
 *.sum
+# go.sum is the module checksum database and must be committed (Go modules).
+!go.sum
 go.work
 go.work.sum
 
