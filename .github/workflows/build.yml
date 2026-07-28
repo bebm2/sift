@@ -1,0 +1,55 @@
+name: build
+
+# WBS M1 §1.1 / V15 build segment: CGO_ENABLED=0 four-way build (H7).
+# Scope of this workflow intentionally minimal: it proves the module and the
+# three command stubs cross-build on darwin/linux × amd64/arm64, plus basic
+# vet/test hygiene. Decode gateway golden tests (V14) land in a later slice.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-matrix:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: build (CGO_ENABLED=0)
+        run: go build ./...
+
+  check:
+    name: vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
