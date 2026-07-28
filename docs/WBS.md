@@ -239,7 +239,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 ### 先写 spec
 
-- [ ] `specs/forge.md`
+- [x] [`specs/forge.md`](specs/forge.md)（[字段级评审 PASS](reviews/2026-07-29-forge-review-pi-gpt-5.6-sol.md)）
 
 ### M2 门禁
 
