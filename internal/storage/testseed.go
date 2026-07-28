@@ -32,12 +32,18 @@ func (d *DB) SeedProjectForTest(ctx context.Context, cfgID, projectID string, no
 // SeedForgeRunForTest inserts a forge-sourced queued run with minimal valid
 // fields.
 func (d *DB) SeedForgeRunForTest(ctx context.Context, runID, projectID, cfgID, issueID string, nowMS int64) error {
+	return d.SeedReverseSyncRunForTest(ctx, runID, projectID, cfgID, issueID, "", "queued", nowMS)
+}
+
+// SeedReverseSyncRunForTest inserts an active forge run with the remote
+// identity needed by the reverse-sync integration tests.
+func (d *DB) SeedReverseSyncRunForTest(ctx context.Context, runID, projectID, cfgID, issueID, changeID, status string, nowMS int64) error {
 	if _, err := d.db.ExecContext(ctx, `INSERT INTO runs
 		(id, source_kind, project_id, config_snapshot_id, forge_kind, forge_host, forge_project_key,
-		 issue_id, status, max_attempts, created_at_ms, updated_at_ms)
-		VALUES (?, 'forge', ?, ?, 'github', 'github.com', ?, ?, 'queued', 3, ?, ?)`,
-		runID, projectID, cfgID, "org/repo-"+projectID, issueID, nowMS, nowMS); err != nil {
-		return fmt.Errorf("storage: seed run: %w", err)
+		 issue_id, change_id, status, max_attempts, created_at_ms, updated_at_ms)
+		VALUES (?, 'forge', ?, ?, 'github', 'github.com', ?, ?, NULLIF(?, ''), ?, 3, ?, ?)`,
+		runID, projectID, cfgID, "org/repo-"+projectID, issueID, changeID, status, nowMS, nowMS); err != nil {
+		return fmt.Errorf("storage: seed reverse-sync run: %w", err)
 	}
 	return nil
 }
