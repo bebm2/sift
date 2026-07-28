@@ -163,11 +163,12 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] 编写 `specs/brain.md` 的统一调用与 T1/T2 契约
 - [ ] 本机 agent CLI 调用壳：stdin/临时文件输入 → schema 校验 → 同 prompt 重试一次 → 逐触点确定性兜底
 - [ ] 提示词与 schema 版本化并入 git；调用身份与各触点作用域以 `specs/brain.md`、`specs/storage.md` §10.1 为准
-- [ ] 每次调用按 `specs/storage.md` §10.1 持久化完整 trace；具体调用、兜底与 Gate 关联契约由 `specs/brain.md` 定义
+- [ ] 每次调用按 `specs/storage.md` §10.1 持久化 call/attempt（`brain_calls` 一次终结 + 有序 `brain_attempts`）；具体调用、兜底与 Gate 关联契约由 `specs/brain.md` 定义
 - [ ] T1：Issue 体检，失败兜底为直接入队
 - [ ] T2：生成 kind/agent/goals/开工前审批建议；失败兜底为人工分派
 - [ ] 组装 Task Spec（Description + Goals + Guardrails + Context）；Context 从 base/全局/任务附注组合
 - [ ] token 收费口只在调用壳；超限后所有触点走各自兜底并产生告警事件
+- [ ] intake crash/replay 验收：澄清/确认评论「远端成功、本地提交前崩溃」按 outbox marker 收敛不重复发；旧 generation 回复只记审计不推进状态；replay JSONL 单条 `brain_call` record 内携有序 attempts
 - [ ] M1 fake 链使用 fake provider 的合法 T2 输出；真实 CLI 壳通过 fixture/子进程测试
 
 ### 先写 spec
@@ -176,7 +177,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] `specs/control-plane.md`
 - [x] `specs/config.md`（含全部确定性默认值、Agent 定义、路径与启动探测分级）
 - [x] `specs/outbox.md`
-- [ ] `specs/brain.md`（调用壳、T1/T2；后续触点随片增补）
+- [x] `specs/brain.md`（调用壳、T1/T2；后续触点随片增补）
 
 ### M1 门禁
 

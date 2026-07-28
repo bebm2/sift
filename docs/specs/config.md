@@ -24,6 +24,8 @@ summary: 全局配置、默认值、路径与启动探测契约
 
 C1–C5 已全部处置，本规格转 `active`；后续字段变更须与代码和派生测试同步。
 
+Brain 字段级评审 [2026-07-28-brain-review-pi-gpt-5.6-sol.md](../reviews/2026-07-28-brain-review-pi-gpt-5.6-sol.md) 的交叉补丁：B5 新增 `brain.protocol`（V0 限定 `claude-json-v1`）；B3 新增 `brain.max_input_bytes` 输入总上限；B4 明确 `daily_token_limit` 的发起前阈值 + 事后越界语义。
+
 ## 1. 适用范围与不变量
 
 1. 全局配置是 **closed contract**：未知字段、字段缺失导致的歧义、错误类型和未知枚举一律拒绝。
@@ -167,9 +169,11 @@ projects:
 brain:
   executable: claude
   args: ["-p", "--output-format", "json"]
+  protocol: claude-json-v1
   daily_token_limit: 1000000
   call_timeout: 2m
   schema_retries: 1
+  max_input_bytes: 262144
   max_raw_output_bytes: 1048576
 ```
 
@@ -177,9 +181,11 @@ brain:
 |------|------|------|------|
 | `executable` | string/null | `null` | null 表示确定性模式，全部触点走各自兜底 |
 | `args` | `string[]` | `[]` | 直接 argv |
-| `daily_token_limit` | integer | `1000000` | `0` 表示禁止 LLM 调用；否则 `>=1000` |
+| `protocol` | enum | `claude-json-v1` | V0 只能为 `claude-json-v1`；协议语义变化必须引入新值，见 [`brain.md` §4](brain.md) |
+| `daily_token_limit` | integer | `1000000` | `0` 表示禁止 LLM 调用；否则 `>=1000`。它是发起新物理 attempt 的消费阈值；已发起 attempt 按实际 usage 事后全额记账，允许单次越界，见 [`brain.md` §6](brain.md) |
 | `call_timeout` | duration | `2m` | `1s..30m` |
 | `schema_retries` | integer | `1` | V0 只能为 `1`：同 prompt 重试一次 |
+| `max_input_bytes` | integer | `262144` | `4096..16777216`；单次 Brain 调用 input canonical JSON 总上限，超限不调用 provider、走触点确定性兜底 |
 | `max_raw_output_bytes` | integer | `1048576` | `4096..16777216` |
 | `version_args` | `string[]` | `["--version"]` | 启动探测 argv；空数组只探测 executable 可执行 |
 
