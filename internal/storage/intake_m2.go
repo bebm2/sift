@@ -14,6 +14,7 @@ type IntakeItemInput struct {
 	ForgeKind, Host, ProjectKey    string
 	EventID, EventKind, TargetKind string
 	Actor                          string
+	ForceHITLBeforeStart           bool
 	ObservedAtMS                   int64
 	RawDigest                      string
 }
@@ -28,7 +29,16 @@ type PersistIntakeBatchCmd struct {
 	Items        []IntakeItemInput
 }
 
-// IntakeCursor is the persisted polling state for one project stream.
+type ForgeEventReceipt struct {
+	Actor string
+}
+
+func (d *DB) ForgeEventReceipt(ctx context.Context, projectID, eventID string) (ForgeEventReceipt, error) {
+	var receipt ForgeEventReceipt
+	err := d.db.QueryRowContext(ctx, `SELECT COALESCE(actor,'') FROM forge_event_receipts WHERE project_id=? AND forge_event_id=?`, projectID, eventID).Scan(&receipt.Actor)
+	return receipt, err
+}
+
 type IntakeCursor struct {
 	ProjectID    string
 	Stream       string
@@ -94,11 +104,12 @@ type PendingIntake struct {
 	Version                                                                    int
 	Generation                                                                 int
 	State                                                                      string
+	ForceHITLBeforeStart                                                       bool
 }
 
 func (d *DB) FindPendingIntake(ctx context.Context, projectID, issueID string) (PendingIntake, error) {
 	var x PendingIntake
-	err := d.db.QueryRowContext(ctx, `SELECT id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,version,clarification_generation,state FROM intake_items WHERE project_id=? AND issue_id=? AND state='pending_evaluation'`, projectID, issueID).Scan(&x.ID, &x.ProjectID, &x.ForgeKind, &x.Host, &x.ProjectKey, &x.IssueID, &x.IssueURL, &x.IssueDigest, &x.Version, &x.Generation, &x.State)
+	err := d.db.QueryRowContext(ctx, `SELECT id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,version,clarification_generation,state,force_hitl_before_start FROM intake_items WHERE project_id=? AND issue_id=? AND state='pending_evaluation'`, projectID, issueID).Scan(&x.ID, &x.ProjectID, &x.ForgeKind, &x.Host, &x.ProjectKey, &x.IssueID, &x.IssueURL, &x.IssueDigest, &x.Version, &x.Generation, &x.State, &x.ForceHITLBeforeStart)
 	return x, err
 }
 
@@ -106,7 +117,7 @@ func (d *DB) PendingIntake(ctx context.Context, limit int) ([]PendingIntake, err
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := d.db.QueryContext(ctx, `SELECT id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,version,clarification_generation,state FROM intake_items WHERE state='pending_evaluation' ORDER BY created_at_ms,id LIMIT ?`, limit)
+	rows, err := d.db.QueryContext(ctx, `SELECT id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,version,clarification_generation,state,force_hitl_before_start FROM intake_items WHERE state='pending_evaluation' ORDER BY created_at_ms,id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +125,7 @@ func (d *DB) PendingIntake(ctx context.Context, limit int) ([]PendingIntake, err
 	var out []PendingIntake
 	for rows.Next() {
 		var x PendingIntake
-		if err := rows.Scan(&x.ID, &x.ProjectID, &x.ForgeKind, &x.Host, &x.ProjectKey, &x.IssueID, &x.IssueURL, &x.IssueDigest, &x.Version, &x.Generation, &x.State); err != nil {
+		if err := rows.Scan(&x.ID, &x.ProjectID, &x.ForgeKind, &x.Host, &x.ProjectKey, &x.IssueID, &x.IssueURL, &x.IssueDigest, &x.Version, &x.Generation, &x.State, &x.ForceHITLBeforeStart); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -151,14 +162,19 @@ func (d *DB) PersistIntakeBatch(ctx context.Context, cmd PersistIntakeBatchCmd) 
 		err = tx.QueryRowContext(ctx, `SELECT id FROM intake_items WHERE forge_kind=? AND normalized_host=? AND forge_project_key=? AND issue_id=?`, item.ForgeKind, item.Host, item.ProjectKey, item.IssueID).Scan(&existing)
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, err = tx.ExecContext(ctx, `INSERT INTO intake_items
-				(id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,state,version,created_at_ms,updated_at_ms)
-				VALUES (?,?,?,?,?,?,?,?,'pending_evaluation',1,?,?)`, intakeID, cmd.ProjectID, item.ForgeKind, item.Host, item.ProjectKey, item.IssueID, item.IssueURL, item.IssueDigest, cmd.NowMS, cmd.NowMS); err != nil {
+				(id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,force_hitl_before_start,state,version,created_at_ms,updated_at_ms)
+				VALUES (?,?,?,?,?,?,?,?,?,'pending_evaluation',1,?,?)`, intakeID, cmd.ProjectID, item.ForgeKind, item.Host, item.ProjectKey, item.IssueID, item.IssueURL, item.IssueDigest, boolInt(item.ForceHITLBeforeStart), cmd.NowMS, cmd.NowMS); err != nil {
 				return err
 			}
 		} else if err != nil {
 			return err
 		} else {
 			intakeID = existing
+			if item.ForceHITLBeforeStart {
+				if _, err = tx.ExecContext(ctx, `UPDATE intake_items SET force_hitl_before_start=1,updated_at_ms=? WHERE id=?`, cmd.NowMS, intakeID); err != nil {
+					return err
+				}
+			}
 		}
 		domainEventID := newID()
 		payload, _ := json.Marshal(map[string]any{"forge_event_id": item.EventID, "event_kind": item.EventKind, "target_id": item.IssueID})
@@ -222,8 +238,8 @@ func (d *DB) PersistIntakeDecision(ctx context.Context, cmd IntakeDecisionCmd) e
 	}
 	defer tx.Rollback()
 	var projectID, kind, host, projectKey, issueID, issueURL, state string
-	var version, generation int
-	err = tx.QueryRowContext(ctx, `SELECT project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,state,version,clarification_generation FROM intake_items WHERE id=?`, cmd.IntakeID).Scan(&projectID, &kind, &host, &projectKey, &issueID, &issueURL, &state, &version, &generation)
+	var version, generation, forceHITL int
+	err = tx.QueryRowContext(ctx, `SELECT project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,state,version,clarification_generation,force_hitl_before_start FROM intake_items WHERE id=?`, cmd.IntakeID).Scan(&projectID, &kind, &host, &projectKey, &issueID, &issueURL, &state, &version, &generation, &forceHITL)
 	if err != nil {
 		return err
 	}
@@ -250,7 +266,7 @@ func (d *DB) PersistIntakeDecision(ctx context.Context, cmd IntakeDecisionCmd) e
 		if cmd.RunID == "" {
 			cmd.RunID = newID()
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,source_kind,project_id,config_snapshot_id,forge_kind,forge_host,forge_project_key,issue_id,issue_url,status,max_attempts,created_at_ms,updated_at_ms) SELECT ?, 'forge',project_id,(SELECT config_snapshot_id FROM projects WHERE id=project_id),forge_kind,normalized_host,forge_project_key,issue_id,issue_url,'queued',3,?,? FROM intake_items WHERE id=?`, cmd.RunID, cmd.NowMS, cmd.NowMS, cmd.IntakeID); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,source_kind,project_id,config_snapshot_id,forge_kind,forge_host,forge_project_key,issue_id,issue_url,status,hitl_before_start,max_attempts,created_at_ms,updated_at_ms) SELECT ?, 'forge',project_id,(SELECT config_snapshot_id FROM projects WHERE id=project_id),forge_kind,normalized_host,forge_project_key,issue_id,issue_url,'queued',?,3,?,? FROM intake_items WHERE id=?`, cmd.RunID, forceHITL, cmd.NowMS, cmd.NowMS, cmd.IntakeID); err != nil {
 			return err
 		}
 		newState = "consumed"
@@ -259,7 +275,7 @@ func (d *DB) PersistIntakeDecision(ctx context.Context, cmd IntakeDecisionCmd) e
 		return err
 	}
 	payload, _ := json.Marshal(map[string]any{"intake_id": cmd.IntakeID, "disposition": cmd.Disposition, "generation": newGeneration})
-	if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?, 'intake.decision','brain',1,?,?,?)`, newID(), projectID, string(payload), cmd.NowMS, cmd.NowMS); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?, 'intake.decision','system',1,?,?,?)`, newID(), projectID, string(payload), cmd.NowMS, cmd.NowMS); err != nil {
 		return err
 	}
 	if cmd.Disposition != "ready" {

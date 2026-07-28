@@ -89,8 +89,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("SchemaVersion = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2", version)
 	}
 
 	embedded, err := loadEmbeddedMigrations()
@@ -124,7 +124,7 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	reopened, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow+1)})
+	reopened, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow + 1)})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -133,8 +133,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("schema_migrations rows = %d, want 1 after reopen", count)
+	if count != 2 {
+		t.Fatalf("schema_migrations rows = %d, want 2 after reopen", count)
 	}
 }
 

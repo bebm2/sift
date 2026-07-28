@@ -14,9 +14,10 @@ import (
 )
 
 type Project struct {
-	ID           string
-	Ref          forge.ProjectRef
-	TriggerLabel string
+	ID                string
+	Ref               forge.ProjectRef
+	TriggerLabel      string
+	OperatorAllowlist []string
 }
 type Poller struct {
 	DB                 *storage.DB
@@ -71,12 +72,22 @@ func (p *Poller) pollProject(ctx context.Context, project Project, now time.Time
 		return err
 	}
 	items := make([]storage.IntakeItemInput, 0, len(issues))
+	accepted := make([]forge.Issue, 0, len(issues))
 	for _, i := range issues {
 		if i.ID == "" || i.Author == "" || i.URL == "" {
 			return &forge.ClassifiedError{Class: forge.ErrContractViolation, Summary: "normalized issue missing required facts"}
 		}
+		trigger, ok, err := p.currentTrustedTrigger(ctx, project, i.ID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
 		digest := issueDigest(i)
-		items = append(items, storage.IntakeItemInput{IssueID: i.ID, IssueURL: i.URL, IssueDigest: digest, ForgeKind: string(project.Ref.Kind), Host: project.Ref.Host, ProjectKey: project.Ref.ProjectKey, EventID: "issue:" + i.ID + ":" + digest, EventKind: "issue_observed", TargetKind: "issue", Actor: i.Author, ObservedAtMS: now.UnixMilli(), RawDigest: digest})
+		triggerDigest := labelEventDigest(i.ID, trigger)
+		items = append(items, storage.IntakeItemInput{IssueID: i.ID, IssueURL: i.URL, IssueDigest: digest, ForgeKind: string(project.Ref.Kind), Host: project.Ref.Host, ProjectKey: project.Ref.ProjectKey, EventID: "label:" + triggerDigest, EventKind: "trigger_label_added", TargetKind: "issue", Actor: trigger.Actor, ObservedAtMS: trigger.ObservedAt.UnixMilli(), RawDigest: triggerDigest, ForceHITLBeforeStart: !isAllowedActor(project.OperatorAllowlist, i.Author)})
+		accepted = append(accepted, i)
 	}
 	mode := "idle"
 	interval := p.Idle
@@ -99,7 +110,7 @@ func (p *Poller) pollProject(ctx context.Context, project Project, now time.Time
 	// T1 is deliberately after the transaction. A crash here leaves the cursor
 	// advanced but the durable intake item pending, ready for a later evaluator.
 	if p.OnIssue != nil {
-		for _, i := range issues {
+		for _, i := range accepted {
 			if err := p.OnIssue(ctx, project, i); err != nil {
 				return err
 			}
@@ -107,6 +118,49 @@ func (p *Poller) pollProject(ctx context.Context, project Project, now time.Time
 	}
 	return nil
 }
+func (p *Poller) currentTrustedTrigger(ctx context.Context, project Project, issueID string) (forge.LabelEvent, bool, error) {
+	events, _, err := p.Forge.ListLabelEvents(ctx, project.Ref, forge.TargetRef{Kind: forge.TargetIssue, ID: issueID}, "")
+	if err != nil {
+		return forge.LabelEvent{}, false, err
+	}
+	var latest forge.LabelEvent
+	found := false
+	for _, event := range events {
+		if event.TargetID != issueID || event.Label != project.TriggerLabel || event.Actor == "" || event.ObservedAt.IsZero() {
+			continue
+		}
+		if !found || event.ObservedAt.After(latest.ObservedAt) || (event.ObservedAt.Equal(latest.ObservedAt) && labelEventOrder(event) > labelEventOrder(latest)) {
+			latest, found = event, true
+		}
+	}
+	if !found || latest.Action != forge.LabelAdded || !isAllowedActor(project.OperatorAllowlist, latest.Actor) {
+		return forge.LabelEvent{}, false, nil
+	}
+	return latest, true, nil
+}
+
+func isAllowedActor(allowlist []string, actor string) bool {
+	for _, allowed := range allowlist {
+		if allowed == actor {
+			return true
+		}
+	}
+	return false
+}
+
+func labelEventOrder(e forge.LabelEvent) string {
+	return string(e.Action) + "\x00" + e.Actor
+}
+
+func labelEventDigest(issueID string, e forge.LabelEvent) string {
+	b, _ := json.Marshal(struct {
+		IssueID string           `json:"issue_id"`
+		Event   forge.LabelEvent `json:"event"`
+	}{issueID, e})
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
 func issueDigest(i forge.Issue) string {
 	b, _ := json.Marshal(i)
 	h := sha256.Sum256(b)
