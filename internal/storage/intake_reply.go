@@ -51,7 +51,7 @@ func (d *DB) ApplyIntakeReply(ctx context.Context, cmd IntakeReplyCmd) error {
 	if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,project_id,type,source,actor,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?,?,'forge',?,1,?,?,?)`, eventID, projectID, eventType, cmd.Actor, string(payload), cmd.ObservedAtMS, cmd.NowMS); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO forge_event_receipts(id,project_id,forge_event_id,event_kind,target_kind,target_id,actor,raw_digest,disposition,domain_event_id,observed_at_ms) VALUES(?,?,?,?,?,?,?,?,'accepted',?,?)`, newID(), projectID, cmd.EventID, "issue_comment", cmd.IntakeID, cmd.Actor, cmd.RawDigest, eventID, cmd.ObservedAtMS); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO forge_event_receipts(id,project_id,forge_event_id,event_kind,target_kind,target_id,actor,raw_digest,disposition,domain_event_id,observed_at_ms) VALUES(?,?,?,?,'issue',?,?,?, 'accepted',?,?)`, newID(), projectID, cmd.EventID, "issue_comment", cmd.IntakeID, cmd.Actor, cmd.RawDigest, eventID, cmd.ObservedAtMS); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -41,6 +41,12 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 		now = time.UnixMilli(1)
 	}
 	for _, project := range p.Projects {
+		// Skip projects already quarantined by a prior auth/capability failure so
+		// a bad credential is neither re-probed nor re-alerted every tick (WBS
+		// §2.3: alert once, no hammering).
+		if isolated, err := p.DB.ProjectIsolated(ctx, project.ID); err == nil && isolated {
+			continue
+		}
 		if err := p.pollProject(ctx, project, now); err != nil {
 			var ce *forge.ClassifiedError
 			if errors.As(err, &ce) && errors.Is(err, forge.ErrAuthOrCapability) {

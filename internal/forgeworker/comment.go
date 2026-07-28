@@ -11,9 +11,19 @@ import (
 	"github.com/miaoxiaoyong/sift/internal/storage"
 )
 
+// commentPayload mirrors the snake_case keys PersistIntakeDecision writes into
+// the forge_comment operation payload. The json tags are load-bearing: Go's
+// case-insensitive match does not bridge "forge_kind" to "ForgeKind".
 type commentPayload struct {
-	ForgeKind, ForgeHost, ForgeProjectKey, TargetKind, TargetID, Purpose, Markdown, IntakeID string
-	Generation                                                                               int
+	ForgeKind       string `json:"forge_kind"`
+	ForgeHost       string `json:"forge_host"`
+	ForgeProjectKey string `json:"forge_project_key"`
+	TargetKind      string `json:"target_kind"`
+	TargetID        string `json:"target_id"`
+	Purpose         string `json:"purpose"`
+	Markdown        string `json:"markdown"`
+	IntakeID        string `json:"intake_id"`
+	Generation      int    `json:"generation"`
 }
 
 // CommentWorker executes forge_comment operations. The marker lookup happens

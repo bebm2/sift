@@ -1,0 +1,13 @@
+[
+  {
+    "number": 9,
+    "html_url": "https://github.com/owner/repo/pull/9",
+    "state": "closed",
+    "head": { "sha": "head-9" },
+    "merged_at": null,
+    "mergeable": true,
+    "draft": false,
+    "title": "stale sift change",
+    "body": "<!-- sift-op:run:demo:create-change:head-9 -->"
+  }
+]

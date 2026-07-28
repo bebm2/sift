@@ -1,0 +1,11 @@
+{
+  "number": 7,
+  "html_url": "https://github.com/owner/repo/pull/7",
+  "state": "closed",
+  "head": { "sha": "head-7" },
+  "merged_at": "2026-01-01T00:00:00Z",
+  "mergeable": true,
+  "draft": false,
+  "title": "Add feature",
+  "body": "real change body"
+}
