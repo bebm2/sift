@@ -24,6 +24,8 @@ summary: 外部副作用、幂等证据与重试收敛契约
 
 O1–O5 已关闭，评审通过，本规格转为 `active`。
 
+Brain 字段级评审 [2026-07-28-brain-review-pi-gpt-5.6-sol.md](../reviews/2026-07-28-brain-review-pi-gpt-5.6-sol.md) 的交叉补丁：B2 为 `forge_comment` 新增 intake 澄清/确认目的与稳定 key（§2/§5.1）；B4 为 `forge_alert` 新增 token 越界告警目的（§5.1）。
+
 ## 1. 不变量
 
 1. 外部 IO 前必须已有同领域事务提交的 outbox operation；worker 不临时补建 operation。
@@ -55,6 +57,7 @@ O1–O5 已关闭，评审通过，本规格转为 `active`。
 | kind | operation key |
 |------|---------------|
 | `forge_comment` | `comment:<purpose>:<subject_id>:<generation>` |
+| `forge_comment`（intake） | `comment:intake-clarification:<intake_id>:<generation>` 或 `comment:intake-duplicate-confirmation:<intake_id>:<generation>`；subject_id 为 intake_id |
 | `forge_labels` | `labels:<subject_kind>:<subject_id>:<projection_version>` |
 | `create_change` | `run:<run_id>:create-change:<head_sha>` |
 | `merge_change` | `run:<run_id>:merge:<expected_head_sha>` |
@@ -125,10 +128,14 @@ min(retry_max_delay, retry_initial_delay * retry_multiplier^(n-1))
 }
 ```
 
-- `forge_comment.purpose = interrupt | summary`；
+- `forge_comment.purpose = interrupt | summary | intake_clarification | intake_duplicate_confirmation`；
 - `command_ack.purpose = command_ack`；
-- `forge_alert.purpose = channel_failure | project_isolated | config_drift`；
+- `forge_alert.purpose = channel_failure | project_isolated | config_drift | token_budget_exceeded`；
 - payload 不存 marker，避免 digest 自引用；worker 在执行时由 operation key + 已冻结 payload digest 重算并追加 marker。
+
+intake 目的的 comment payload 额外携带 `intake_id` 与 `generation`，outbox 行 `run_id` 保持 NULL，不伪造 run 关联；marker 与查询协议不变。
+
+`token_budget_exceeded` 告警：按通用 key 格式 `alert:<alert_kind>:<subject_id>:<generation>` 取 `alert:token_budget_exceeded:global:<bucket_start_ms>:1`（subject_id 为 `global:<bucket_start_ms>`，generation 固定 1），每 UTC 日桶最多一个 operation；它仍走正常 attention 预算扣费，不得因 token 告警突破注意力配额。语义见 [`brain.md` §6](brain.md)。
 
 ### 5.2 执行
 
@@ -295,7 +302,7 @@ M1 必须完整实现通用 claim/complete、退避、immutable attempts/results
 
 ## 15. 自查结果
 
-- [x] 八类 operation 均有稳定 key、closed payload 与明确投递语义。
+- [x] 八类 operation 均有稳定 key、closed payload 与明确投递语义；intake 评论与 token 告警目的不伪造 run 关联、不突破注意力配额。
 - [x] effectively-once 声明均有 marker/set/CAS/handoff 证据；Channel 如实为 at-least-once。
 - [x] create Change 不接管同 base/head 的人工对象；merge 不以预读替代远端 CAS。
 - [x] launch payload 无 capability 明文，prepare/file/spawn/acquire 窗口有唯一恢复动作。

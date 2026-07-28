@@ -8,7 +8,7 @@
 
 M1 规格阶段，尚无代码。产品需求：[docs/PRD.md](docs/PRD.md)；架构与工作基线见 [docs/DESIGN.md](docs/DESIGN.md) / [docs/WBS.md](docs/WBS.md)。
 
-M1 五份基础规格中，`config`、`storage`、`control-plane`、`outbox` 已 `active`；[`brain`](docs/specs/brain.md) 为 `draft`，待字段级评审。五份规格全部稳定前不创建 Go module、不开始实现。
+M1 五份基础规格（`config`、`storage`、`control-plane`、`outbox`、[`brain`](docs/specs/brain.md)）全部 `active`，尚无代码，可进入 M1 实现派工。
 
 ## 上下文规则（摘要）
 
