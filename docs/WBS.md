@@ -195,7 +195,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 ### 前置
 
-- [ ] M1 门禁通过
+- [x] M1 门禁通过（[第二次定向复审 PASS WITH NOTES](reviews/2026-07-29-s1-m1-rereview-2-pi-gpt-5.6-sol.md)）
 
 ### 任务
 
