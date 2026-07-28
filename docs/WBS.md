@@ -152,11 +152,11 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 1.6 Reconciler 与 fake 骨架链
 
-- [ ] fake Forge、fake Agent、fake Brain provider 实现与真实端口同契约
-- [ ] M1 骨架链：fake Issue → T1/T2 → queued → fake attempt 完成证据 → 注入 fake forge「Change 已合并」事实 → done
-- [ ] M1 **不实现临时 Gate、不创建 Change、不保留旁路裁定**；M4 接入 Gate/Create Change 后替换测试夹具
-- [ ] 将 fake 骨架链作为 V9 的首段 CI 测试，而非手工验证
-- [ ] 事件时间戳覆盖「可信触发标签观测 → Agent started」，为 P50 指标留 day-1 数据
+- [x] fake Forge、fake Agent、fake Brain provider 实现与真实端口同契约（[`internal/forge`](../internal/forge)、[`internal/attempt`](../internal/attempt)、Brain fake provider 自 #20）
+- [x] M1 骨架链：fake Issue → T1/T2 → queued → fake attempt 完成证据 → 注入 fake forge「Change 已合并」事实 → done（[`internal/skeleton`](../internal/skeleton)）
+- [x] M1 **不实现临时 Gate、不创建 Change、不保留旁路裁定**；M4 接入 Gate/Create Change 后替换测试夹具
+- [x] 将 fake 骨架链作为 V9 的首段 CI 测试，而非手工验证（`internal/skeleton/chain_test.go`）
+- [x] 事件时间戳覆盖「可信触发标签观测 → Agent started」，为 P50 指标留 day-1 数据
 
 #### 1.7 Brain 调用壳、T1/T2 与 Task Spec
 
