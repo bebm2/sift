@@ -12,6 +12,24 @@ import (
 	"github.com/miaoxiaoyong/sift/internal/decode"
 )
 
+// TestV12ZeroConfigStartsDaemon verifies the executable startup path accepts an
+// absent config.yaml, not merely that the config decoder can construct defaults.
+func TestV12ZeroConfigStartsDaemon(t *testing.T) {
+	home := testHome(t)
+	snapshot, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatalf("zero-config load: %v", err)
+	}
+	if snapshot.Source.Present || len(snapshot.Config.Agents) != 0 || len(snapshot.Config.Projects) != 0 {
+		t.Fatalf("zero-config snapshot = %+v", snapshot)
+	}
+	s, err := Start(home)
+	if err != nil {
+		t.Fatalf("zero-config daemon start: %v", err)
+	}
+	defer s.Close()
+}
+
 func TestV10aEndpointCapabilitiesAndSockets(t *testing.T) {
 	home := testHome(t)
 	s, err := Start(home)
@@ -53,6 +71,43 @@ func TestV10aEndpointCapabilitiesAndSockets(t *testing.T) {
 	}
 	if response.Result.(map[string]any)["security_posture"] != "unsafe-local" {
 		t.Fatal("doctor did not report unsafe-local")
+	}
+}
+
+// TestV10bUnsafeLocalAttackReproduces verifies the deliberately unclosed V0
+// boundary as an Agent would exploit it: same-UID code reads operator.token
+// and uses it to invoke an operator RPC successfully.
+func TestV10bUnsafeLocalAttackReproduces(t *testing.T) {
+	home := testHome(t)
+	s, err := Start(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Serve(ctx) }()
+	path := filepath.Join(home.Path, "siftd.sock")
+	waitSocket(t, path)
+
+	// This read intentionally models an untrusted same-UID Agent, not daemon
+	// internals. V10b requires this attack to succeed until M8 closes it.
+	data, err := os.ReadFile(filepath.Join(home.Path, "operator.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := string(data[:len(data)-1])
+	response := call(t, path, Request{ProtocolMajor: 1, ProtocolMinor: 0, ClientVersion: Version, RequestID: "fedcba9876543210fedcba9876543210", Method: "ops.doctor", Auth: Auth{Kind: "operator", Token: token}, Params: map[string]any{}})
+	if !response.OK {
+		t.Fatalf("same-UID agent operator RPC = %#v", response)
+	}
+	result := response.Result.(map[string]any)
+	if result["security_posture"] != "unsafe-local" {
+		t.Fatalf("security posture = %v", result["security_posture"])
+	}
+	checks := result["checks"].([]any)
+	if len(checks) != 1 || checks[0].(map[string]any)["id"] != "operator-token-readable-by-agent" || checks[0].(map[string]any)["level"] != "warning" {
+		t.Fatalf("doctor checks = %#v", checks)
 	}
 }
 
