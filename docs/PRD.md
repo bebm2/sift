@@ -331,12 +331,12 @@ Task Spec = Description + Goals + Guardrails + Context
 
 | 动词 | 用途 |
 |------|------|
-| `listIssuesByLabel(since, cursor)` | 增量摄入 |
-| `getIssue(id)` | 读详情与正文 |
-| `listIssueComments(id, since)` | 读审批指令与人工补充。**必须返回 `author`** |
-| `listLabelEvents(target, since)` | 读标签增删事件及其 **`actor`**——§9.2 的闸门依赖它 |
-| `commentIssue(id, body)` | 发决策简报 / 确认回执 |
-| `setLabels(id, add[], remove[])` | 状态投影与触发标签管理 |
+| `listIssuesByLabel(label, cursor)` | 增量摄入；返回下一不透明游标 |
+| `getIssue(id)` | 读详情、正文与 open/closed 事实 |
+| `listIssueComments(id, cursor)` | 读审批指令与人工补充；返回下一游标。**必须返回 `author`** |
+| `listLabelEvents(targetRef, cursor)` | 读 Issue/Change 标签增删事件及其 **`actor`**，返回下一游标——§9.2 的闸门依赖它 |
+| `commentTarget(targetRef, body)` | 向 Issue/Change 发决策简报 / 确认回执 / 告警 |
+| `setLabels(targetRef, add[], remove[])` | Issue/Change 状态投影与触发/审批标签管理 |
 | `createChange(branch, base, title, body)` | **由 Sift 创建**（§5.1） |
 | `findChangeForCreateOperation(opKey, branch, base)` | 为创建操作做崩溃对账；跨开启 / 关闭 / 已合并状态查 operation marker，并返回同 base/head 的无 marker 冲突 |
 | `getChange(id)` | 状态、可合并性、head sha、审查状态 |
@@ -347,7 +347,7 @@ Task Spec = Description + Goals + Guardrails + Context
 
 > **`expectedHeadSha` 是门禁契约，不只是幂等键。** 本地在调用前重读 head 只能缩小竞态窗口，不能替代 merge 请求自身的远端条件检查；旧 operation 发现 head 已变化必须收敛为 stale/no-op。适配器无法提供该条件语义时，Sift 不得自动合并。
 
-> **actor 是契约的一部分，不是实现细节。** §9.2 规定所有驱动性事件必须解析 actor 且 fail closed；如果动词集不显式声明 actor 的可得性，实现阶段就会发现「要的闸门，抽象层没给铲子」。两个平台都有对应能力（GitHub issue events / timeline、GitLab resource label events），经 `api` 子命令均可取得，这纯粹是契约不能漏写。
+> **actor 是契约的一部分，不是实现细节。** §9.2 规定所有驱动性事件必须解析 actor 且 fail closed；如果动词集不显式声明 actor 的可得性，实现阶段就会发现「要的闸门，抽象层没给铲子」。`targetRef` 必须携 `issue | change`，因为 GitLab 两类对象端点不同且 `iid` 可重号。两个平台都有对应事件能力，经 `api` 子命令均可取得。字段签名与游标规则见 [`specs/forge.md`](specs/forge.md)。
 
 #### 平台差异清单
 
