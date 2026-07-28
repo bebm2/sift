@@ -131,12 +131,12 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 1.4 配置与启动生命周期
 
-- [ ] 统一 `SIFT_HOME` 路径解析，默认 `~/.sift/`
-- [ ] 全局配置 schema、零配置默认值、Agent 定义 schema 与至少两个 Agent 配置的校验能力
-- [ ] 敏感配置启动期一次读取并保存指纹；运行期变更只告警、不生效
-- [ ] 调度硬护栏：未知 Agent 拒绝、按 Agent 的 `max_concurrent`、需要时的项目互斥
-- [ ] 启动探测分级框架：进程级失败拒启；项目级失败只隔离该项目并产生一次告警
-- [ ] V12：不提供任何可选配置也能启动并调度；默认值表缺项即失败
+- [x] 统一 `SIFT_HOME` 路径解析，默认 `~/.sift/`（`internal/config/home.go`）
+- [x] 全局配置 schema、零配置默认值、Agent 定义 schema 与至少两个 Agent 配置的校验能力（`internal/config`：closed 契约、`DefaultConfig`、多 Agent 唯一性校验）
+- [x] 敏感配置启动期一次读取并保存指纹；运行期变更只告警、不生效（`Load` + `Fingerprint` + `DriftChecker` warn-only）
+- [x] 调度硬护栏：未知 Agent 拒绝、按 Agent 的 `max_concurrent`、需要时的项目互斥（`internal/config/guard.go`）
+- [x] 启动探测分级框架：进程级失败拒启；项目级失败只隔离该项目并产生一次告警（`internal/config/probe.go`）
+- [x] V12：不提供任何可选配置也能启动并调度；默认值表缺项即失败（`config_test.go` 两种场景 + 全默认断言）
 
 #### 1.5 控制面与进程边界
 
@@ -185,7 +185,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] Brain fixture 覆盖 schema 失败后同 prompt 重试一次、逐触点兜底、trace 持久化与 token 收费
 - [ ] V15 四组合构建段通过
 - [ ] 第二实例拒启且进程无网络 listener
-- [ ] 敏感配置磁盘漂移不热生效；零配置启动通过
+- [x] 敏感配置磁盘漂移不热生效；零配置启动通过（`internal/config` DriftChecker warn-only + V12 两种场景）
 
 ---
 
