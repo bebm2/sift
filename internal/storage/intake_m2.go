@@ -33,6 +33,15 @@ type ForgeEventReceipt struct {
 	Actor string
 }
 
+// IntakeReplyOperation is the durable clarification operation used to identify
+// the generation that a reply may belong to. The marker is on the outbound
+// clarification comment, not on the operator reply.
+type IntakeReplyOperation struct {
+	Key      string
+	Payload  json.RawMessage
+	Evidence json.RawMessage
+}
+
 func (d *DB) ForgeEventReceipt(ctx context.Context, projectID, eventID string) (ForgeEventReceipt, error) {
 	var receipt ForgeEventReceipt
 	err := d.db.QueryRowContext(ctx, `SELECT COALESCE(actor,'') FROM forge_event_receipts WHERE project_id=? AND forge_event_id=?`, projectID, eventID).Scan(&receipt.Actor)
@@ -45,6 +54,40 @@ type IntakeCursor struct {
 	Cursor       string
 	PollMode     string
 	NextPollAtMS int64
+}
+
+func (d *DB) IntakeReplyOperations(ctx context.Context, intakeID string) ([]IntakeReplyOperation, error) {
+	if intakeID == "" {
+		return nil, errors.New("storage: invalid intake id")
+	}
+	rows, err := d.db.QueryContext(ctx, `SELECT operation_key,payload_json,COALESCE(remote_evidence_json,'') FROM outbox_operations WHERE operation_key LIKE 'comment:intake-%:' || ? || ':%' ORDER BY operation_key`, intakeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IntakeReplyOperation
+	for rows.Next() {
+		var op IntakeReplyOperation
+		var payload, evidence string
+		if err := rows.Scan(&op.Key, &payload, &evidence); err != nil {
+			return nil, err
+		}
+		op.Payload = json.RawMessage(payload)
+		op.Evidence = json.RawMessage(evidence)
+		out = append(out, op)
+	}
+	return out, rows.Err()
+}
+
+// SaveForgeCursor advances a per-target observation cursor. It is deliberately
+// separate from PersistIntakeBatch because comment receipts are committed one
+// at a time and a crash must replay them safely.
+func (d *DB) SaveForgeCursor(ctx context.Context, projectID, stream, cursor string, nowMS int64) error {
+	if projectID == "" || stream == "" || cursor == "" || nowMS <= 0 {
+		return errors.New("storage: incomplete forge cursor")
+	}
+	_, err := d.db.ExecContext(ctx, `INSERT INTO forge_cursors(project_id,stream,cursor,poll_mode,next_poll_at_ms,updated_at_ms) VALUES(?,?,?,'active',?,?) ON CONFLICT(project_id,stream) DO UPDATE SET cursor=excluded.cursor,updated_at_ms=excluded.updated_at_ms`, projectID, stream, cursor, nowMS, nowMS)
+	return err
 }
 
 func (d *DB) IntakeCursor(ctx context.Context, projectID, stream string) (IntakeCursor, error) {
