@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 	"github.com/miaoxiaoyong/sift/internal/storage"
 )
 
-func TestAssembleWiresIntakeT1CommentsAndBudget(t *testing.T) {
+func TestAssembleWiresIntakeT1ReconcilerCommentsAndBudget(t *testing.T) {
 	ctx := context.Background()
 	now := time.UnixMilli(1000)
 	db, err := storage.Open(ctx, storage.OpenConfig{
@@ -38,8 +39,8 @@ func TestAssembleWiresIntakeT1CommentsAndBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workers.Pollers) != 2 || len(workers.Evaluators) != 2 || len(workers.Comments) != 2 {
-		t.Fatalf("assembly counts: pollers=%d evaluators=%d comments=%d", len(workers.Pollers), len(workers.Evaluators), len(workers.Comments))
+	if len(workers.Pollers) != 2 || len(workers.Evaluators) != 2 || len(workers.Reconcilers) != 2 || len(workers.Comments) != 2 {
+		t.Fatalf("assembly counts: pollers=%d evaluators=%d reconcilers=%d comments=%d", len(workers.Pollers), len(workers.Evaluators), len(workers.Reconcilers), len(workers.Comments))
 	}
 	for i, p := range workers.Pollers {
 		if p.OnIssue == nil {
@@ -55,6 +56,15 @@ func TestAssembleWiresIntakeT1CommentsAndBudget(t *testing.T) {
 		if client.Kind != forge.Kind(p.Projects[0].Ref.Kind) {
 			t.Fatalf("poller %d adapter kind=%s project kind=%s", i, client.Kind, p.Projects[0].Ref.Kind)
 		}
+		reconciler := workers.Reconcilers[i]
+		if len(reconciler.Projects) != 1 || !reflect.DeepEqual(reconciler.Projects[0], p.Projects[0]) {
+			t.Fatalf("reconciler %d project scope=%+v, want %+v", i, reconciler.Projects, p.Projects)
+		}
+		reconcilerClient, ok := reconciler.Forge.(*forge.Adapter)
+		if !ok || reconcilerClient != client {
+			t.Fatalf("reconciler %d is not scoped to its poller's adapter", i)
+		}
+
 		commentClient, ok := workers.Comments[i].Client.(*forge.Adapter)
 		if !ok || commentClient != client {
 			t.Fatalf("comment worker %d is not scoped to its poller's adapter", i)

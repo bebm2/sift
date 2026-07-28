@@ -20,18 +20,20 @@ import (
 )
 
 type Daemon struct {
-	DB         *storage.DB
-	Pollers    []*intake.Poller
-	Evaluators []*intake.T1Evaluator
-	Comments   []*forgeworker.CommentWorker
-	Now        func() time.Time
-	mu         sync.Mutex
+	DB          *storage.DB
+	Pollers     []*intake.Poller
+	Evaluators  []*intake.T1Evaluator
+	Reconcilers []*intake.Reconciler
+	Comments    []*forgeworker.CommentWorker
+	Now         func() time.Time
+	mu          sync.Mutex
 }
 
 // Assemble creates one production Forge adapter, Intake poller/T1 evaluator,
-// and kind-scoped comment worker per enabled project. CommentWorker is also the
-// reply receipt path for intake comments: it lists the target before sending and
-// recognizes the durable operation marker, so a remotely accepted comment is
+// reverse-sync reconciler, and kind-scoped comment worker per enabled project.
+// CommentWorker is also the reply receipt path for intake comments: it lists
+// the target before sending and recognizes the durable operation marker, so a
+// remotely accepted comment is
 // acknowledged after a crash without a second post (covered by forgeworker's
 // crash-recovery test). The caller owns DB.
 func Assemble(db *storage.DB, cfg *config.Config, now func() time.Time) (*Daemon, error) {
@@ -58,6 +60,7 @@ func Assemble(db *storage.DB, cfg *config.Config, now func() time.Time) (*Daemon
 		poller := &intake.Poller{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now, Idle: cfg.Scheduler.IntakeIdleInterval, Active: cfg.Scheduler.IntakeActiveInterval, Slow: cfg.Forge.SlowPollInterval, HourlyLimit: int64(cfg.Forge.HourlyAPILimit), WarningRatio: cfg.Forge.WarningRatio, OnIssue: evaluator.EvaluateIssue}
 		d.Pollers = append(d.Pollers, poller)
 		d.Evaluators = append(d.Evaluators, evaluator)
+		d.Reconcilers = append(d.Reconcilers, &intake.Reconciler{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now})
 		d.Comments = append(d.Comments, &forgeworker.CommentWorker{DB: db, Client: adapter, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:comment:" + p.ID})
 	}
 	return d, nil
@@ -70,9 +73,9 @@ func operators(o config.Operators, k forge.Kind) []string {
 	return append([]string(nil), o.GitHub...)
 }
 
-// Tick advances Intake and then one comment operation per project. A project
-// failure is returned with its identity; the scheduler may continue other
-// projects on the next tick.
+// Tick advances Intake, reverse-sync reconciliation, and then one comment
+// operation per project. A project failure is returned with its identity; the
+// scheduler may continue other projects on the next tick.
 func (d *Daemon) Tick(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -81,7 +84,11 @@ func (d *Daemon) Tick(ctx context.Context) error {
 			return fmt.Errorf("intake[%d]: %w", i, err)
 		}
 	}
-	// TODO(issue-61): schedule reverse-sync ReconcileOnce when its worker is available.
+	for i, r := range d.Reconcilers {
+		if err := r.ReconcileOnce(ctx); err != nil {
+			return fmt.Errorf("reconciler[%d]: %w", i, err)
+		}
+	}
 	for i, w := range d.Comments {
 		if err := w.RunOnce(ctx); err != nil {
 			return fmt.Errorf("comment[%d]: %w", i, err)
