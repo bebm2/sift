@@ -182,7 +182,7 @@ func (d *DB) transition(ctx context.Context, tx *sql.Tx, runID string, expectedV
 	if n != 1 {
 		return ErrRejectedStale
 	}
-	payload, _ := json.Marshal(map[string]any{"from_version": expectedVersion, "to": cmd.To, "failure_reason": cmd.FailureReason})
+	payload, _ := json.Marshal(map[string]any{"from_version": expectedVersion, "to": cmd.To, "failure_reason": cmd.FailureReason, "gate_bypassed": cmd.GateBypassed})
 	eventID := newID()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events (id, run_id, type, source, actor, payload_schema_version, payload_json, occurred_at_ms, recorded_at_ms)
 		VALUES (?, ?, 'run.transitioned', ?, ?, 1, ?, ?, ?)`, eventID, runID, cmd.Source, nullable(cmd.Actor), string(payload), cmd.OccurredAtMS, cmd.OccurredAtMS); err != nil {

@@ -83,6 +83,10 @@ func (d *DB) SetProjectHealth(ctx context.Context, projectID, reason string, now
 		if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?, 'project.isolated','recovery',1,?,?,?)`, newID(), projectID, string(payload), nowMS, nowMS); err != nil {
 			return err
 		}
+		alertPayload, _ := json.Marshal(map[string]any{"purpose": "project_isolated", "project_id": projectID, "reason": reason})
+		if err = insertOperation(ctx, tx, Operation{Key: AlertOperationKey("project_isolated", "project:"+projectID, 1), Kind: OperationForgeAlert, Payload: alertPayload}, "", "", nowMS); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

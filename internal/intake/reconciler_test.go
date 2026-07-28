@@ -1,0 +1,174 @@
+package intake
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/miaoxiaoyong/sift/internal/forge"
+	"github.com/miaoxiaoyong/sift/internal/storage"
+)
+
+const reconcilerNow = int64(1_704_000_000_000)
+
+func reconcilerDB(t *testing.T, projectID string) (*storage.DB, Project) {
+	t.Helper()
+	db, err := storage.Open(context.Background(), storage.OpenConfig{
+		Path: t.TempDir() + "/sift.db", BinaryVersion: "test-binary", Now: time.UnixMilli(reconcilerNow),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.SeedProjectForTest(context.Background(), "cfg-"+projectID, projectID, reconcilerNow); err != nil {
+		t.Fatal(err)
+	}
+	return db, Project{ID: projectID, TriggerLabel: "sift", OperatorAllowlist: []string{"trusted"}, Ref: forge.ProjectRef{
+		Kind: forge.KindGitHub, Host: "github.com", ProjectKey: "org/repo-" + projectID,
+	}}
+}
+
+func seedWaitingRun(t *testing.T, db *storage.DB, project Project, runID, issueID, changeID string) {
+	t.Helper()
+	if err := db.SeedReverseSyncRunForTest(context.Background(), runID, project.ID, "cfg-"+project.ID, issueID, changeID, "waiting_human", reconcilerNow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func reconcile(t *testing.T, db *storage.DB, fc forge.Client, projects ...Project) {
+	t.Helper()
+	if err := (&Reconciler{DB: db, Forge: fc, Projects: projects, Now: func() time.Time { return time.UnixMilli(reconcilerNow) }}).ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func addIssue(fc *forge.Fake, p forge.ProjectRef, id string, state forge.IssueState) {
+	fc.AddIssue(p, forge.Issue{ID: id, Title: id, Body: "body", Author: "author", URL: "https://example.test/" + id, State: state})
+}
+
+func TestReconcilerOnceExternalMergeCompletesWaitingHuman(t *testing.T) {
+	db, project := reconcilerDB(t, "merge")
+	fc := forge.NewFake()
+	addIssue(fc, project.Ref, "1", forge.IssueOpen)
+	change := fc.AddChange(project.Ref, "c1", "head1")
+	change.URL = "https://example.test/c1"
+	if _, err := fc.InjectMerged(project.Ref, "c1", time.UnixMilli(reconcilerNow)); err != nil {
+		t.Fatal(err)
+	}
+	seedWaitingRun(t, db, project, "run-merge", "1", "c1")
+
+	reconcile(t, db, fc, project)
+	run, err := db.Run(context.Background(), "run-merge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != storage.RunDone || !run.GateBypassed || run.ChangeID != change.ID {
+		t.Fatalf("run after external merge = %+v, want done with gate_bypassed", run)
+	}
+}
+
+func TestReconcilerOnceClosedChangeAndIssueFailRuns(t *testing.T) {
+	db, project := reconcilerDB(t, "closed")
+	fc := forge.NewFake()
+	addIssue(fc, project.Ref, "issue-closed", forge.IssueClosed)
+	addIssue(fc, project.Ref, "change-closed", forge.IssueOpen)
+	fc.AddChange(project.Ref, "c-closed", "head")
+	seedWaitingRun(t, db, project, "run-issue", "issue-closed", "")
+	seedWaitingRun(t, db, project, "run-change", "change-closed", "c-closed")
+
+	// The fake has no mutation helper for a closed Change; this client supplies
+	// the forge's current object-state observation while delegating everything else.
+	reconcile(t, db, &closedChangeClient{Fake: fc, project: project.Ref, changeID: "c-closed"}, project)
+	for _, tc := range []struct{ id, reason string }{{"run-issue", "closed_upstream"}, {"run-change", "change_closed"}} {
+		run, err := db.Run(context.Background(), tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Status != storage.RunFailed || run.FailureReason != tc.reason {
+			t.Errorf("%s = %+v, want failed/%s", tc.id, run, tc.reason)
+		}
+	}
+}
+
+type closedChangeClient struct {
+	*forge.Fake
+	project  forge.ProjectRef
+	changeID string
+}
+
+func (c *closedChangeClient) GetChange(ctx context.Context, p forge.ProjectRef, id string) (forge.Change, error) {
+	change, err := c.Fake.GetChange(ctx, p, id)
+	if err == nil && p == c.project && id == c.changeID {
+		change.State = forge.ChangeClosed
+	}
+	return change, err
+}
+
+func TestReconcilerOnceUntriggerRequiresTrustedActor(t *testing.T) {
+	db, project := reconcilerDB(t, "untrigger")
+	fc := forge.NewFake()
+	addIssue(fc, project.Ref, "trusted", forge.IssueOpen)
+	addIssue(fc, project.Ref, "untrusted", forge.IssueOpen)
+	fc.AddLabelEvent(project.Ref, forge.LabelEvent{TargetID: "trusted", Label: "sift", Action: forge.LabelRemoved, Actor: "trusted", ObservedAt: time.UnixMilli(reconcilerNow)})
+	fc.AddLabelEvent(project.Ref, forge.LabelEvent{TargetID: "untrusted", Label: "sift", Action: forge.LabelRemoved, Actor: "outsider", ObservedAt: time.UnixMilli(reconcilerNow)})
+	seedWaitingRun(t, db, project, "run-trusted", "trusted", "")
+	seedWaitingRun(t, db, project, "run-untrusted", "untrusted", "")
+
+	reconcile(t, db, fc, project)
+	trusted, _ := db.Run(context.Background(), "run-trusted")
+	untrusted, _ := db.Run(context.Background(), "run-untrusted")
+	if trusted.Status != storage.RunFailed || trusted.FailureReason != "untriggered" {
+		t.Fatalf("trusted removal = %+v, want untriggered failure", trusted)
+	}
+	if untrusted.Status != storage.RunWaitingHuman {
+		t.Fatalf("untrusted removal = %+v, must be ignored", untrusted)
+	}
+}
+
+func TestReconcilerOnceIsolationAlertsOnceAndContinues(t *testing.T) {
+	db, bad := reconcilerDB(t, "bad")
+	if err := db.SeedProjectForTest(context.Background(), "cfg-good", "good", reconcilerNow); err != nil {
+		t.Fatal(err)
+	}
+	good := bad
+	good.ID, good.Ref.ProjectKey = "good", "org/repo-good"
+	seedWaitingRun(t, db, bad, "run-bad", "1", "")
+	seedWaitingRun(t, db, good, "run-good", "2", "")
+	fc := forge.NewFake()
+	addIssue(fc, bad.Ref, "1", forge.IssueOpen)
+	addIssue(fc, good.Ref, "2", forge.IssueOpen)
+	client := &authForProjectClient{Fake: fc, bad: bad.Ref}
+	isolated := 0
+	r := &Reconciler{DB: db, Forge: client, Projects: []Project{bad, good}, Now: func() time.Time { return time.UnixMilli(reconcilerNow) }, Isolated: func(Project, error) { isolated++ }}
+	if err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if isolated != 1 {
+		t.Fatalf("isolation callbacks=%d, want 1", isolated)
+	}
+	alerts, err := db.CountOperationsByKind(context.Background(), storage.OperationForgeAlert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alerts != 1 {
+		t.Fatalf("forge alerts=%d, want one project-isolation alert", alerts)
+	}
+	if run, _ := db.Run(context.Background(), "run-good"); run.Status != storage.RunWaitingHuman {
+		t.Fatalf("healthy project run=%+v, want untouched", run)
+	}
+}
+
+type authForProjectClient struct {
+	*forge.Fake
+	bad forge.ProjectRef
+}
+
+func (c *authForProjectClient) GetIssue(ctx context.Context, p forge.ProjectRef, id string) (forge.Issue, error) {
+	if p == c.bad {
+		return forge.Issue{}, &forge.ClassifiedError{Class: forge.ErrAuthOrCapability, Summary: "forbidden"}
+	}
+	return c.Fake.GetIssue(ctx, p, id)
+}
