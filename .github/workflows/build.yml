@@ -81,3 +81,13 @@ jobs:
       - run: CGO_ENABLED=0 go vet ./...
       - name: test (CGO_ENABLED=0)
         run: CGO_ENABLED=0 go test ./...
+      # issue #35: TestV10ZeroNetworkListeners is //go:build linux gated, so
+      # it only compiles and runs on this ubuntu runner. The step above already
+      # gates the whole suite; this re-runs the named test verbosely and asserts
+      # its PASS line is present, so the Linux success is reviewable in the log
+      # instead of only a package-level "ok". No assertion is weakened: the
+      # grep fails the build if the named test did not run and pass.
+      - name: V10 zero-listener evidence (linux)
+        run: |
+          CGO_ENABLED=0 go test -v -run TestV10ZeroNetworkListeners ./internal/controlplane/ | tee v10.log
+          grep -q -- "--- PASS: TestV10ZeroNetworkListeners" v10.log
