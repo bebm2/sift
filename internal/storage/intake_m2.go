@@ -19,11 +19,95 @@ type IntakeItemInput struct {
 }
 
 type PersistIntakeBatchCmd struct {
-	ProjectID string
-	Stream    string
-	Cursor    string
-	NowMS     int64
-	Items     []IntakeItemInput
+	ProjectID    string
+	Stream       string
+	Cursor       string
+	PollMode     string
+	NextPollAtMS int64
+	NowMS        int64
+	Items        []IntakeItemInput
+}
+
+// IntakeCursor is the persisted polling state for one project stream.
+type IntakeCursor struct {
+	ProjectID    string
+	Stream       string
+	Cursor       string
+	PollMode     string
+	NextPollAtMS int64
+}
+
+func (d *DB) IntakeCursor(ctx context.Context, projectID, stream string) (IntakeCursor, error) {
+	var c IntakeCursor
+	c.ProjectID, c.Stream = projectID, stream
+	var cursor sql.NullString
+	err := d.db.QueryRowContext(ctx, `SELECT cursor,poll_mode,next_poll_at_ms FROM forge_cursors WHERE project_id=? AND stream=?`, projectID, stream).Scan(&cursor, &c.PollMode, &c.NextPollAtMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return c, nil
+	}
+	if err != nil {
+		return IntakeCursor{}, err
+	}
+	c.Cursor = cursor.String
+	return c, nil
+}
+
+// SetProjectHealth is idempotent: repeated capability failures do not create
+// repeated isolation events or alerts, and isolation is scoped to this project.
+func (d *DB) SetProjectHealth(ctx context.Context, projectID, reason string, nowMS int64) error {
+	if projectID == "" || reason == "" || nowMS <= 0 {
+		return errors.New("storage: invalid project health update")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE projects SET health='isolated',isolation_reason=?,updated_at_ms=? WHERE id=? AND health<>'isolated'`, reason, nowMS, projectID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 1 {
+		payload, _ := json.Marshal(map[string]any{"project_id": projectID, "reason": reason})
+		if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?, 'project.isolated','recovery',1,?,?,?)`, newID(), projectID, string(payload), nowMS, nowMS); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type PendingIntake struct {
+	ID, ProjectID, ForgeKind, Host, ProjectKey, IssueID, IssueURL, IssueDigest string
+	Version                                                                    int
+	Generation                                                                 int
+	State                                                                      string
+}
+
+func (d *DB) FindPendingIntake(ctx context.Context, projectID, issueID string) (PendingIntake, error) {
+	var x PendingIntake
+	err := d.db.QueryRowContext(ctx, `SELECT id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,version,clarification_generation,state FROM intake_items WHERE project_id=? AND issue_id=? AND state='pending_evaluation'`, projectID, issueID).Scan(&x.ID, &x.ProjectID, &x.ForgeKind, &x.Host, &x.ProjectKey, &x.IssueID, &x.IssueURL, &x.IssueDigest, &x.Version, &x.Generation, &x.State)
+	return x, err
+}
+
+func (d *DB) PendingIntake(ctx context.Context, limit int) ([]PendingIntake, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := d.db.QueryContext(ctx, `SELECT id,project_id,forge_kind,normalized_host,forge_project_key,issue_id,issue_url,issue_digest,version,clarification_generation,state FROM intake_items WHERE state='pending_evaluation' ORDER BY created_at_ms,id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingIntake
+	for rows.Next() {
+		var x PendingIntake
+		if err := rows.Scan(&x.ID, &x.ProjectID, &x.ForgeKind, &x.Host, &x.ProjectKey, &x.IssueID, &x.IssueURL, &x.IssueDigest, &x.Version, &x.Generation, &x.State); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
 }
 
 // PersistIntakeBatch writes receipts and pending intake projections before
@@ -73,7 +157,18 @@ func (d *DB) PersistIntakeBatch(ctx context.Context, cmd PersistIntakeBatchCmd) 
 			return err
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO forge_cursors(project_id,stream,cursor,poll_mode,next_poll_at_ms,updated_at_ms) VALUES(?,?,?,'active',?,?) ON CONFLICT(project_id,stream) DO UPDATE SET cursor=excluded.cursor,updated_at_ms=excluded.updated_at_ms`, cmd.ProjectID, cmd.Stream, nullable(cmd.Cursor), cmd.NowMS, cmd.NowMS); err != nil {
+	mode := cmd.PollMode
+	if mode == "" {
+		mode = "active"
+	}
+	next := cmd.NextPollAtMS
+	if next == 0 {
+		next = cmd.NowMS
+	}
+	if mode != "idle" && mode != "active" && mode != "interrupt" && mode != "slow" {
+		return errors.New("storage: invalid intake poll mode")
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO forge_cursors(project_id,stream,cursor,poll_mode,next_poll_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,stream) DO UPDATE SET cursor=excluded.cursor,poll_mode=excluded.poll_mode,next_poll_at_ms=excluded.next_poll_at_ms,updated_at_ms=excluded.updated_at_ms`, cmd.ProjectID, cmd.Stream, nullable(cmd.Cursor), mode, next, cmd.NowMS); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -160,7 +255,7 @@ func (d *DB) PersistIntakeDecision(ctx context.Context, cmd IntakeDecisionCmd) e
 		if cmd.Disposition == "possible_duplicate" {
 			purpose = "intake-duplicate-confirmation"
 		}
-		body, _ := json.Marshal(map[string]any{"forge_kind": kind, "forge_host": host, "forge_project_key": projectKey, "target_kind": "issue", "target_id": issueID, "purpose": purpose, "intake_id": cmd.IntakeID, "generation": newGeneration, "markdown": cmd.Rationale})
+		body, _ := json.Marshal(map[string]any{"project_id": projectID, "forge_kind": kind, "forge_host": host, "forge_project_key": projectKey, "target_kind": "issue", "target_id": issueID, "purpose": purpose, "intake_id": cmd.IntakeID, "generation": newGeneration, "markdown": cmd.Rationale})
 		op := Operation{Key: CommentOperationKey(purpose, cmd.IntakeID, newGeneration), Kind: OperationForgeComment, Payload: body}
 		if err = insertOperation(ctx, tx, op, "", "", cmd.NowMS); err != nil {
 			return err
