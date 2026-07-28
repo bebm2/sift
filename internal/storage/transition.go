@@ -62,14 +62,17 @@ var (
 )
 
 type Run struct {
-	ID            string
-	Status        RunStatus
-	Version       int64
-	FailureReason string
-	ChangeID      string
-	GateBypassed  bool
-	UpdatedAtMS   int64
-	CompletedAtMS *int64
+	ID              string
+	Status          RunStatus
+	Version         int64
+	Kind            string
+	AgentID         string
+	HITLBeforeStart bool
+	FailureReason   string
+	ChangeID        string
+	GateBypassed    bool
+	UpdatedAtMS     int64
+	CompletedAtMS   *int64
 }
 
 // Run returns the current Run projection. It is read-only and never exposes a
@@ -79,14 +82,19 @@ func (d *DB) Run(ctx context.Context, id string) (Run, error) {
 	var status string
 	var bypass int
 	var completed sql.NullInt64
-	var failure, change sql.NullString
-	err := d.db.QueryRowContext(ctx, `SELECT id, status, version, failure_reason, change_id,
+	var failure, change, kind, agent sql.NullString
+	var hitl sql.NullInt64
+	err := d.db.QueryRowContext(ctx, `SELECT id, status, version, kind, agent_id, hitl_before_start, failure_reason, change_id,
 		gate_bypassed, updated_at_ms, completed_at_ms FROM runs WHERE id = ?`, id).Scan(
-		&r.ID, &status, &r.Version, &failure, &change, &bypass, &r.UpdatedAtMS, &completed)
+		&r.ID, &status, &r.Version, &kind, &agent, &hitl, &failure, &change, &bypass, &r.UpdatedAtMS, &completed)
 	if err != nil {
 		return Run{}, err
 	}
 	r.Status, r.FailureReason, r.ChangeID, r.GateBypassed = RunStatus(status), failure.String, change.String, bypass != 0
+	r.Kind, r.AgentID = kind.String, agent.String
+	if hitl.Valid {
+		r.HITLBeforeStart = hitl.Int64 != 0
+	}
 	if completed.Valid {
 		v := completed.Int64
 		r.CompletedAtMS = &v
