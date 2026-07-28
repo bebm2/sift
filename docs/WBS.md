@@ -6,9 +6,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 # Sift — 工作分解与里程碑
 
-> **D0.2 · 对应 DESIGN D0.10 / PRD V0.8**
+> **D0.3 · 对应 DESIGN D0.10 / PRD V0.8**
 >
-> 四份 D0.1 评审已处置并自查通过；状态保持 `draft`，等待独立复评。
+> 四份 D0.1 评审与 D0.2 独立复评均已处置；[D0.3 定向复核](reviews/2026-07-28-wbs-review-pi-gpt-5.6-sol-02.md)通过，状态为 `active`。
 
 本文把 [DESIGN §13](DESIGN.md) 的八个纵向切片展开为任务与验收。需求语义以 [PRD](PRD.md) 为准，结构与理由以 [DESIGN](DESIGN.md) / ADR 为准，字段级契约下沉 `specs/`，执行步骤下沉 `plans/`；本文不复制完整协议表。
 
@@ -29,6 +29,8 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [cursor-opus5](reviews/2026-07-28-wbs-review-cursor-opus5.md)
 - [glm-5.2](reviews/2026-07-28-wbs-review-glm-5.2.md)
 - [kimi-code](reviews/2026-07-28-wbs-review-kimi-code-01.md)
+- [pi-gpt-5.6-sol · D0.2 独立复评](reviews/2026-07-28-wbs-review-pi-gpt-5.6-sol-01.md)
+- [pi-gpt-5.6-sol · D0.3 定向复核](reviews/2026-07-28-wbs-review-pi-gpt-5.6-sol-02.md)
 
 | # | 合并后的发现 | 处置 | 落点 |
 |---|-------------|------|------|
@@ -37,7 +39,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 | R3 | M1–M4 验收依赖后续切片，形成环 | 骨架链不引入临时 Gate；V5/V10a/V9 分阶段；M3 前移唯一 Interrupt 发射核心，M5 扩展而不另建入口 | 各里程碑验收、验收权威表 |
 | R4 | 配置/策略生命周期、敏感配置不热加载、两级启动探测和 Agent 定义校验缺失 | 新增硬约束；M1 实现全局配置生命周期与探测分级；M4 实现有效策略组装 | H16、M1 §1.4、M4 §4.1 |
 | R5 | `max_escalations` 上限统一落 `hold` 与 PRD 冲突 | 改为按 reason 确定性映射到 `auto_reject` 或 `hold`；`startup_stall` 强制 `hold` | M5 §5.3 |
-| R6 | Ledger 缺人类结果写入，认证投影与指标无数据源 | M4 落 Ledger 写入 API/认证投影；M5 的 Command 同事务写人类决定、语义原料并更新投影；补八项指标与延迟指标 | M4 §4.4、M5 §5.5–5.7 |
+| R6 | Ledger 缺人类结果写入，认证投影与指标无数据源 | M4 落 Ledger 写入 API/认证投影；M5 的 Command 同事务写人类决定、语义原料并更新投影；补 PRD §10.2 全部九项指标与延迟指标 | M4 §4.4、M5 §5.5–5.7 |
 | R7 | launcher、版本握手、`SIFT_RUN_DIR`、单实例和零网络监听缺失 | M1 定控制协议版本、单实例与零 listener；M3 落 launcher、同版本 wrapper 解析与 `SIFT_RUN_DIR`；M8 验发布归档 | M1 §1.5、M3 §3.1、M8 |
 | R8 | 状态机缺 `queued → failed`、`waiting_human → done` | 已按 PRD §4.5 的既有事实收敛要求补回 PRD §4.1，WBS V1/V11 覆盖 | PRD §4.1、M1 §1.3、M2 §2.5 |
 | R9 | V5、V9、V10a、V11、V12 与 A3/A5 归属漂移 | 设单一验收权威表，标注首跑与最终闭合；里程碑表只链接对应阶段 | §自动化门禁、§人工验收 |
@@ -46,6 +48,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 | R12 | M8 新增“稳定运行 ≥3 天”无来源 | 删除；不新增未标注来源的发布硬门槛 | M8 前置 |
 | R13 | doctor 缺隔离、hooks 指纹和策略漂移；M7 双平台任务重复 | 补齐 doctor 接线；合并为一次正式 PoC 取证 | M3 §3.8、M4 §4.1、M7 §7.2、M8 §8.5 |
 | R14 | ADR-010 旧名未处理 | 已按 DESIGN §14.14 仅增加 ADR-013 修订指针；历史正文保留旧名，新文档只用 `attempt_resolution` | ADR-010 决策 6 前 |
+| R15 | D0.2 仍有 Gate→Interrupt、V11→指标两处后向依赖；CLI/doctor、通用 Command、软豁免与手工合并校准未闭合 | M3 发射器改为全 reason 泛型核心；V11 指标闭合移至 M5；补齐四项工作包与验收 | M1 §1.5、M3 §3.6、M4 §4.3–4.4、M5 §5.4/§5.7 |
+| R16 | D0.3 定向复核 | 前序 F1–F6、N1–N2 全部关闭，无新阻断；允许进入 M1 specs | D0.3 定向复核 |
+
 
 ---
 
@@ -79,7 +84,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 |--------|----------|----------------------|
 | M1 骨架 | Go/SQLite、状态机、outbox、控制面、配置、Brain 壳/T1/T2、fake 骨架链 | Brain、CLI |
 | M2 Forge | GitHub/GitLab 适配、Intake、actor 闸门、API 预算 | Forge、Intake |
-| M3 Runtime | process backend、wrapper handoff、恢复、worktree、startup_stall 发射核心 | Runtime、Attention（安全最小集） |
+| M3 Runtime | process backend、wrapper handoff、恢复、worktree、泛型 Interrupt 发射核心 | Runtime、Attention（确定性核心） |
 | M4 门禁 | 有效策略、T3/T5、Gate、Shadow Gate、Ledger、认证、回放、Change 创建 | Gate、Ledger、Brain |
 | M5 注意力 | T4/T6/T7、Interrupt 全功能、Command、Report、Channel、指标 | Attention、Command、Report、Brain、CLI |
 | M6 tmux | 第二后端与全恢复矩阵 | Runtime |
@@ -141,6 +146,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] 只创建 Unix socket，不创建 TCP/UDP listener；集成测试检查零网络监听
 - [ ] V10a 首段：无 operator token 的运维请求被拒、`run.sock` 无运维动词、run token 不能调用 wrapper handoff 动词
 - [ ] V10b：V0 以 Agent 身份读取 operator token 并调用运维 RPC 预期成功，同时 `doctor` 必须报告此未闭合边界
+- [ ] 实现薄 CLI 的 `ps/logs/worktree/doctor` 与 `kill/retry` 请求壳；所有运维命令只走 daemon，不直连 DB
+- [ ] daemon 不可用时只允许明确标记为 offline 的只读诊断；`kill/retry` 等写操作拒绝，绝不离线改库
+- [ ] `doctor` 基线检查 runtime、SQLite、Agent CLI、相关 forge CLI 登录/版本、按配置启用的 tmux、目录/socket 权限；后续片增补策略、hooks、积压与安全姿态
 
 #### 1.6 Reconciler 与 fake 骨架链
 
@@ -220,7 +228,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 - [ ] 双平台 fixture 跑同一契约套件：分页、actor 缺失、限流、平台差异、marker、merge CAS
 - [ ] V11 首段：fake/fixture 中让 `waiting_human` Run 的 Change 被外部合并，断言 `done + gate_bypassed`
-- [ ] V11 完整指标口径在 M4（Gate 已存在）闭合
+- [ ] V11 在 M4 闭合 Gate/审计/Ledger 分类，在 M5 闭合指标分母
 
 ### 先写 spec
 
@@ -282,12 +290,13 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] `attempt_resolution=reject | retry_after_absence` 先落定：迟到事实不推进旧 Run，登记身份、返回 `superseded_by_decision` 并受控终止旧执行体
 - [ ] 自动 escalate/hold 不写 resolution，事实优先窗口保持开放
 
-#### 3.6 Attention 单一发射器的安全最小集
+#### 3.6 Attention 泛型单一发射器核心
 
-- [ ] 在 M3 建立此后唯一的 Interrupt 发射入口；M5 只能扩展，不能新建第二入口
-- [ ] `startup_stall` 生成键 `(run_id, attempt_no, generation, cause)` 加唯一约束
+- [ ] 在 M3 建立此后唯一的 Interrupt 发射入口；M4/M5 只能调用或扩展渲染/调度，不能新建第二入口
+- [ ] 入口从第一天支持 PRD 全部 reason 的最小确定性契约：reason/min_modality、互斥 options（≤4）、fallback headline/brief/links、expires/on_expire 与 severity 映射；T4 不可用时也能生成合法对象
+- [ ] 每类故障有稳定生成键并受唯一约束；`startup_stall` 使用 `(run_id, attempt_no, generation, cause)`
 - [ ] Run 转移、Interrupt、注意力记账、事件、发布 operation 五件事同事务
-- [ ] M3 使用已有 forge 评论作为可见发布面；Channel 与完整调度在 M5 增补
+- [ ] M3 使用已有 forge 评论与确定性 fallback 作为可见发布面；T4/T6、Channel、critical 熔断在 M5 增补
 - [ ] 受控终止无法证明消失时生成一条 `startup_stall`、Run 转 `waiting_human`、attempt 保持隔离；不得静默停在 queued
 
 #### 3.7 受控终止
@@ -306,13 +315,14 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] `specs/control-plane.md`：acquire/permit/started 完整字段与版本握手
 - [ ] `specs/storage.md`：resolution、隔离、关闭原因
 - [ ] `specs/config.md`：启动 lease/等待/终止/复核/Report 退避默认值
-- [ ] `specs/interrupt.md`：先落 startup_stall 最小契约
+- [ ] `specs/interrupt.md`：先落全部 reason 的最小确定性契约与 `startup_stall` 特殊规则
 
 ### M3 门禁
 
 - [ ] V4 的 process backend、handoff、恢复矩阵、受控终止与资格门控部分通过
 - [ ] V5a：base/worktree 读取源通过；硬护栏 V5b 留 M4
 - [ ] V10a wrapper 凭据部分通过
+- [ ] 每个 PRD reason 均能在无 T4/T6 时生成结构合法、可发布的 fallback Interrupt
 - [ ] 同一 startup_stall 并发发现只生成一条 Interrupt、扣一次配额、保留一条可重放发布 operation
 - [ ] 无法证明消失时系统可见且 worktree 保持隔离；本片不要求 M5 的人工 retry 两段式
 
@@ -347,6 +357,8 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] 编写 `specs/gate.md`；`gate(changeFacts, effectivePolicy, riskScore)` 保持纯函数
 - [ ] `gate_input_hash` 摘要整份规范化快照；缓存键仅 `(gate_input_hash, gate_version)`
 - [ ] 默认硬护栏、Checks、review policy、auto merge 顺序按 PRD §5.4
+- [ ] 软护栏豁免默认仅本 Run 本次命中；“记住”必须是独立显式选项，并形成可审计的仓库 policy 例外变更
+- [ ] 硬护栏永远不进入一次性/记住豁免路径；测试同时覆盖两类软豁免与硬护栏拒绝
 - [ ] Gate 每次调用强制写快照与影子预判，无配置开关；行为测试断言每次调用新增 calibration 行
 - [ ] 需要 HITL 时，预判与 M3 发射器的 Interrupt 五件事同事务
 - [ ] 仅消费 M3 的“可创建 Change”事实；创建操作使用 marker 并持久化远端 ID
@@ -357,6 +369,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] 提供确定性 `recordHumanDecision` 应用入口；M5 Command 只调用它，不另写账本
 - [ ] 人类结果、校准样本与认证投影增量在同事务提交
 - [ ] 认证按任务类别计算漏放、误拦、总样本与负样本绝对数；输出只有类别布尔与证据摘要
+- [ ] forge 手工合并在已有 Gate 预判时调用 `recordHumanDecision`：把手工合并记为人的实际决定、保留校准样本并附 `gate_bypassed`
 - [ ] `gate_bypassed` 不进入 Sift 自发合并的误放行率分母，但作为独立绕过样本保留
 
 #### 4.5 回放集
@@ -378,7 +391,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] T3/T5 正常输出与确定性兜底均被版本化并进入 trace/Gate 快照
 - [ ] V6：纯函数、cache miss、每次 Gate 必有校准记录、导出重放通过
 - [ ] V7：Change marker 与 merge stale/no-op 全链通过
-- [ ] V11 完整段：等待 Gate/HITL 时外部合并 → done + gate_bypassed，指标分母排除正确
+- [ ] V11 审计段：等待 Gate/HITL 时外部合并 → done + gate_bypassed，并写入人类决定/校准分类；指标查询分母留 M5
 - [ ] Gate/Shadow/认证/回放/Change 创建五项同时可用，无延后项
 
 ---
@@ -401,7 +414,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.2 Interrupt 全功能与 Channel
 
-- [ ] 扩展 M3 唯一发射器到全部 reason：结构约束、severity 纯函数、生成去重、注意力收费、critical 熔断
+- [ ] 复用 M3 已支持全部 reason 的唯一发射器，接入 T4/T6、Channel、调度与 critical 熔断；不得新增 reason 专用旁路
 - [ ] LLM 只能建议 severity 降级；`min_modality: visual` renderer 拒绝语音路径
 - [ ] 实现首个 Channel；连续失败 N 次转 forge 告警评论，并在 ps/doctor 显示
 - [ ] 一次 Interrupt 只收费一次；升级重推不重复收费
@@ -417,7 +430,10 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 #### 5.4 Command 与 startup_stall 两段式
 
 - [ ] actor 鉴权 → 严格语法 → nonce/current Interrupt/options 校验 → DomainCommand + 回执 outbox
-- [ ] 标签和评论路径共用鉴权/幂等实现；`startup_stall` 只提供 retry/reject/hold，approve 必须拒绝
+- [ ] 逐项实现 PRD §7.1 `/sift approve | reject | retry | hold | ask` 与审批标签的 reason-specific 确定性效果；不在当前 options 内一律拒绝
+- [ ] `/sift ask <文本>` 同事务写当前 Run 的任务层澄清与 Ledger 语义原料，并按当前 Interrupt 契约继续；不得自动升格项目/全局 Context
+- [ ] 通用 reject/retry/hold/approve 均经唯一 transition 与 outbox，不直接写状态；标签和评论路径共用鉴权/幂等实现
+- [ ] `startup_stall` 只提供 retry/reject/hold，approve 必须拒绝
 - [ ] retry 请求不关闭 Interrupt、不写 resolution；探测在途拒绝新指令并回复“已在探测中”
 - [ ] 探测失败复用同一 Interrupt、升级计数、轮换 nonce；达到上限 hold
 - [ ] 探测成功以 ADR-013 单一 CAS 事务提交：消失证据、旧 attempt 终结、`retry_after_absence`、解除隔离、关闭 Interrupt、Run → queued、新 attempt/claim、启动与回执 operation、事件
@@ -440,7 +456,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.7 指标、CLI 与时间线
 
-- [ ] 从事件流/Ledger 确定性派生 PRD §10.2 八项指标：加权打扰/已合并 Change、误放行率、门禁绕过率、Gate 漏放/误拦、HITL 率、配额消耗、分派准确率、LLM 成本
+- [ ] 从事件流/Ledger 确定性派生 PRD §10.2 全部指标（当前九项）：加权打扰/已合并 Change、误放行率、门禁绕过率、Gate 漏放/误拦、HITL 率、配额消耗、分派准确率、LLM 成本
 - [ ] reason 耗时权重为配置项；响应间隔只作调度特征，不作人类分钟数
 - [ ] `gate_bypassed` 排除误放行率分母的查询测试
 - [ ] `sift ps` 显示 Run/attempt、今日注意力余量、隔离与推送故障；`logs` 提供 Run 原始日志；事件时间线可查
@@ -460,7 +476,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] T4/T6 各自兜底、T7 两类只读提案及 A7 防火墙测试通过
 - [ ] V8、V10a Command/Report 段、V13 通过
 - [ ] `startup_stall` approve/auto_reject 均被拒；retry 两段式与迟到事实仲裁通过
-- [ ] 八项指标可查询，V11 分母口径通过
+- [ ] 九项指标可查询，V11 指标段闭合：`gate_bypassed` 不进入误放行率分母且进入门禁绕过率
 - [ ] 全 fake 端到端链（含 Gate、Interrupt、Command、merge）成为 V9 的自动化完整段
 
 ---
@@ -549,7 +565,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 #### 8.4 doctor 最终姿态
 
 - [ ] 报 `unsafe-local` 与 TM6 每条未闭合暴露面，不把资格写成沙箱闭合
-- [ ] 报版本不匹配、hooks/配置指纹、项目 policy 漂移、隔离 attempt/worktree、资格、outbox、推送故障
+- [ ] 按 DESIGN §8.10 全量检查 runtime、SQLite、Agent CLI/资格、相关 forge CLI、可选 tmux、policy schema/漂移、hooks、目录/socket 权限、版本、隔离、outbox 与推送故障
 - [ ] macOS/Linux 安全姿态分别呈现
 
 ### M8 门禁
@@ -577,7 +593,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 | V9 端到端 | M1 骨架 fake 段 | M5 完整 fake；M7 真实低频 | 双平台真实链为人工证据 |
 | V10a 授权 | M1 端点段 | M5 | M3 wrapper 凭据、M5 Command/Report |
 | V10b 未闭合暴露面 | M1 | M8 doctor 最终呈现 | V0 攻击复现预期成功 |
-| V11 手工合并冲突 | M2 事实收敛段 | M4 | done + gate_bypassed + 指标分母 |
+| V11 手工合并冲突 | M2 事实收敛段 | M5 | M4 闭合 Gate/审计/Ledger 分类；M5 闭合指标分母 |
 | V12 零配置启动 | M1 | M1 | 所有新增默认值持续纳入 |
 | V13 critical 熔断 | M5 | M5 | 洪水合批、不借支 |
 | V14 边界解码 | M1 | M1 | closed/open-envelope/schema 漂移 |
@@ -612,7 +628,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 | `specs/outbox.md` | M1 | M2 marker/CAS；M3 启动；M5 发布/回执 |
 | `specs/brain.md` | M1（壳/T1/T2） | M4 T3/T5；M5 T4/T6/T7 |
 | `specs/forge.md` | M2 | 随适配器契约同步 |
-| `specs/interrupt.md` | M3（startup_stall） | M5 完整 reason/renderer |
+| `specs/interrupt.md` | M3（全部 reason 最小契约） | M5 T4/T6、Channel、调度/renderer |
 | `specs/policy.md` | M4 | 随 Gate 策略同步 |
 | `specs/gate.md` | M4 | 随 Gate/回放同步 |
 | `specs/ledger.md` | M4 | M5 Command/指标同步 |
@@ -624,7 +640,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 ## 自查结果
 
-- [x] 四份评审的阻断项均在「评审处置对账」中有结论与落点
+- [x] 六份 WBS 评审/复核的发现均在「评审处置对账」中有结论与落点
 - [x] PRD 十个模块均有明确工作包
 - [x] DESIGN §15 所列待写 spec/dev 文档均有里程碑归属
 - [x] M1–M8 的门禁不依赖未完成的后续片；跨片测试均标首跑/最终闭合
@@ -633,12 +649,14 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] ADR-013 的 resolution、隔离、事实仲裁、retry 两段式和原子结果事务均有任务与测试
 - [x] `max_escalations` 按 reason 收敛，`startup_stall` 强制 hold
 - [x] 配置不热加载、两级探测、有效策略、Agent 校验与 V12 已落地
-- [x] Ledger 人类结果、语义原料、认证投影、八项指标与 P50 测量已落地
+- [x] Ledger 人类结果、语义原料、认证投影、九项指标与 P50 测量已落地
 - [x] launcher、版本握手、`SIFT_RUN_DIR`、单实例、零网络监听与 V15 有被测实现
 - [x] 已删除无来源的“三天稳定运行”发布门槛
 
-**自查结论：D0.2 通过内部一致性检查，可提交独立复评；复评通过前不进入 `plans/` 与编码。**
+- [x] D0.2 复评 F1/F2 后向依赖已消除，F3–F6 已进入任务、spec 与验收
+
+**结论：D0.3 已关闭 D0.2 独立复评全部发现，并通过定向复核；WBS 进入 `active`。**
 
 ---
 
-_D0.2 | 2026-07-28 | draft / 自查通过，待独立复评 | 对应 DESIGN D0.10 / PRD V0.8_
+_D0.3 | 2026-07-28 | active / 定向复核通过 | 对应 DESIGN D0.10 / PRD V0.8_

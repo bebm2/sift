@@ -738,7 +738,7 @@ V0 实际执行的：
 | Agent 日志 | 每 Run 原始字节流，轮转，不依赖 tmux scrollback | 现场回看 |
 | 领域事件 | append-only、低基数 | 时间线、指标、审计、回放 |
 
-PRD §10.2 的八项指标全部从事件流与账本派生，V0 就打点。北极星采用**加权打扰次数 / 已合并 Change**，权重表是配置项（人工标定），真实分钟数作为人工抽样校准项——不得用「推送→回复」时间差。
+PRD §10.2 的全部指标（当前九项）均从事件流与账本派生，V0 就打点。北极星采用**加权打扰次数 / 已合并 Change**，权重表是配置项（人工标定），真实分钟数作为人工抽样校准项——不得用「推送→回复」时间差。
 
 ### 9.4 配置体系
 
@@ -918,17 +918,17 @@ PRD §10.1 的成功标准里有依赖真实设备与人的项目，把它们混
 
 ## 13. 交付切片
 
-纵向切片交付，**双平台骨架与事件流从第一片就存在**；**影子门禁记录器随 Gate 于第 4 片落地，自此常驻无开关**（PRD §3.4 / §10.3）。
+纵向切片交付，**双平台骨架与事件流从第一片就存在**；**影子门禁记录器随 Gate 于第 4 片落地，自此常驻无开关**（PRD §3.4 / §10.3）。Brain 触点随消费者分片，不另设横向阶段。启动恢复与第 4 片 Gate 都需要在第 5 片完整 Attention 之前产生合法 HITL，因此第 3 片先交付支持全部 reason 的**泛型确定性 Interrupt 发射核心**；第 5 片只增智能简报/调度、Channel、熔断与 Command，不建立第二入口。
 
 > 这里要说准：影子记录器挂在 Gate 调用点上（§8.5），Gate 不存在时它无从记录。PRD §3.4「第一天就开始记录」的真实含义是「Gate 上线之日即常驻、不是某个后续阶段才补」，不是「代码第一片就要有」。把它写成第 1 片会给 WBS 传递一条无法执行的约束。
 
 | 片 | 内容 |
 |----|------|
-| 1 | SQLite + 状态机 + 事件/outbox（含逐类幂等协议骨架）+ **decode gateway 与 schema 生成**+ fake Forge/Agent 跑通闭环 |
+| 1 | SQLite + 状态机 + 事件/outbox（含逐类幂等协议骨架）+ **decode gateway 与 schema 生成** + Brain 调用壳/T1/T2 + fake Forge/Agent 跑通骨架闭环 |
 | 2 | GitHub / GitLab 最小动词适配（含 Change operation 全状态查找与 merge expected-head CAS）、Intake、actor 鉴权 |
-| 3 | `process` 后端、wrapper、**operation lease + wrapper session + `spawning` handoff + started 证据协议**、worktree、启动期恢复矩阵 |
-| 4 | Gate + 影子门禁 + **认证投影** + 回放集导出 + Change 创建（**五者同片，不拆**） |
-| 5 | Interrupt、Command、首个 Channel + **推送失败的 forge 兜底告警**、三类预算、超时与升级 |
+| 3 | `process` 后端、wrapper、**operation lease + wrapper session + `spawning` handoff + started 证据协议**、worktree、启动期恢复矩阵 + **泛型确定性 Interrupt 发射核心** |
+| 4 | Brain T3/T5 + Gate + 影子门禁 + **认证投影** + 回放集导出 + Change 创建（后五者**同片，不拆**） |
+| 5 | Brain T4/T6/T7 + Interrupt 智能化/调度、Command、Report、首个 Channel + **推送失败的 forge 兜底告警**、三类预算集成、超时与升级 |
 | 6 | `tmux` 后端（**只换 wrapper 的宿主，不引入第二条证据链**，§8.4 拓扑裁决）、attach、故障注入验证（V2 / V4 全矩阵，两个后端同一套断言） |
 | 7 | 真实 agent、双平台 PoC 验收、凭证形态 spike（按 OS）与进程组拓扑资格测试（按 agent CLI + 版本） |
 | 8 | **发布链**：三二进制单归档、四组合构建/冒烟、版本握手与原子升级、托管单元（launchd / systemd user）、foreground fallback、Homebrew tap、干净机安装验收（V15） |
