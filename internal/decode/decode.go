@@ -166,6 +166,8 @@ const (
 	KindTrailingData
 	// KindInvalidValue: a Validator hook rejected the decoded value.
 	KindInvalidValue
+	// KindDuplicateKey: an object repeated a key (RejectDuplicateKeys).
+	KindDuplicateKey
 	// KindInternal: programmer error (e.g. non-pointer target). Indicates a
 	// caller bug, not invalid input.
 	KindInternal
@@ -188,6 +190,8 @@ func (k Kind) String() string {
 		return "trailing_data"
 	case KindInvalidValue:
 		return "invalid_value"
+	case KindDuplicateKey:
+		return "duplicate_key"
 	case KindInternal:
 		return "internal"
 	default:

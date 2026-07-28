@@ -1,0 +1,56 @@
+{
+  "$id": "https://sift.dev/decode/t2_output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent": {
+      "type": "string",
+      "x-sift:maxBytes": 64
+    },
+    "goals": {
+      "items": {
+        "type": "string",
+        "x-sift:maxBytes": 1000,
+        "x-sift:minBytes": 1
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array"
+    },
+    "hitl_before_start": {
+      "type": "boolean"
+    },
+    "kind": {
+      "enum": [
+        "feature",
+        "bug",
+        "chore",
+        "docs",
+        "refactor"
+      ],
+      "type": "string"
+    },
+    "rationale": {
+      "type": "string",
+      "x-sift:maxBytes": 2000
+    },
+    "risk_notes": {
+      "type": "string",
+      "x-sift:maxBytes": 2000
+    }
+  },
+  "required": [
+    "agent",
+    "goals",
+    "hitl_before_start",
+    "kind",
+    "rationale",
+    "risk_notes"
+  ],
+  "title": "T2Output",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "closed",
+    "sourceType": "brain.T2Output"
+  }
+}
