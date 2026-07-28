@@ -29,14 +29,19 @@ type Daemon struct {
 	mu          sync.Mutex
 }
 
-// Assemble creates one production Forge adapter, Intake poller/T1 evaluator,
-// reverse-sync reconciler, and kind-scoped comment worker per enabled project.
+// Assemble probes and records auto-merge capability, then creates one
+// production Forge adapter, Intake poller/T1 evaluator, reverse-sync
+// reconciler, and kind-scoped comment worker per enabled project.
 // CommentWorker is also the reply receipt path for intake comments: it lists
 // the target before sending and recognizes the durable operation marker, so a
 // remotely accepted comment is
 // acknowledged after a crash without a second post (covered by forgeworker's
 // crash-recovery test). The caller owns DB.
 func Assemble(db *storage.DB, cfg *config.Config, now func() time.Time) (*Daemon, error) {
+	return assemble(db, cfg, now, forge.NewProductionAdapter)
+}
+
+func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, newAdapter func(forge.Kind, string, forge.Runner, forge.Charger) (*forge.Adapter, error)) (*Daemon, error) {
 	if db == nil || cfg == nil {
 		return nil, errors.New("daemon: database and config are required")
 	}
@@ -50,11 +55,20 @@ func Assemble(db *storage.DB, cfg *config.Config, now func() time.Time) (*Daemon
 		}
 		ref := forge.ProjectRef{Kind: forge.Kind(p.Forge.Kind), Host: p.Forge.Host, ProjectKey: p.Forge.Project}
 		charger := &forgebudget.Charger{DB: db, Limit: int64(cfg.Forge.HourlyAPILimit), WarningRatio: cfg.Forge.WarningRatio, Now: now}
-		adapter, err := forge.NewProductionAdapter(ref.Kind, p.Forge.CLI, nil, charger)
+		adapter, err := newAdapter(ref.Kind, p.Forge.CLI, nil, charger)
 		if err != nil {
 			return nil, fmt.Errorf("project %s: %w", p.ID, err)
 		}
 		adapter.WithAutoMergeCapabilityReader(db)
+		probeCtx := context.Background()
+		if cfg.Forge.CommandTimeout > 0 {
+			var cancel context.CancelFunc
+			probeCtx, cancel = context.WithTimeout(probeCtx, cfg.Forge.CommandTimeout)
+			defer cancel()
+		}
+		if err := adapter.ProbeAndRecordAutoMergeCapability(probeCtx, p.ID, ref, db, now()); err != nil {
+			return nil, fmt.Errorf("project %s: record auto-merge capability: %w", p.ID, err)
+		}
 		project := intake.Project{ID: p.ID, Ref: ref, TriggerLabel: cfg.Labels.Trigger, OperatorAllowlist: operators(cfg.Operators, ref.Kind)}
 		evaluator := &intake.T1Evaluator{DB: db, Brain: brain.NewShell(db, cfg.Brain, brain.SubprocessProvider{Executable: cfg.Brain.Executable, Args: cfg.Brain.Args}, now), Now: now}
 		poller := &intake.Poller{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now, Idle: cfg.Scheduler.IntakeIdleInterval, Active: cfg.Scheduler.IntakeActiveInterval, Slow: cfg.Forge.SlowPollInterval, HourlyLimit: int64(cfg.Forge.HourlyAPILimit), WarningRatio: cfg.Forge.WarningRatio, OnIssue: evaluator.EvaluateIssue}
