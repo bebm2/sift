@@ -127,7 +127,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] CAS 拒绝过期命令；非法转移报错并记审计事件
 - [ ] transactional outbox、稳定 operation key、提交唤醒与退避框架
 - [ ] 三组具名调度器骨架；禁止散落 ticker
-- [ ] V1 与 V2 核心崩溃注入
+- [ ] V1 与 V2 核心崩溃注入；逐项覆盖 `specs/storage.md` §11 的可变写入族，含项目健康、Task Spec、Forge 收费、Interrupt 推进与 delivery
 
 #### 1.4 配置与启动生命周期
 
