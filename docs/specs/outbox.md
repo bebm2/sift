@@ -130,12 +130,14 @@ min(retry_max_delay, retry_initial_delay * retry_multiplier^(n-1))
 
 - `forge_comment.purpose = interrupt | summary | intake_clarification | intake_duplicate_confirmation`；
 - `command_ack.purpose = command_ack`；
-- `forge_alert.purpose = channel_failure | project_isolated | config_drift | token_budget_exceeded`；
+- `forge_alert.purpose = channel_failure | project_isolated | config_drift | token_budget_exceeded | forge_api_budget_warning`；
 - payload 不存 marker，避免 digest 自引用；worker 在执行时由 operation key + 已冻结 payload digest 重算并追加 marker。
 
 intake 目的的 comment payload 额外携带 `intake_id` 与 `generation`，outbox 行 `run_id` 保持 NULL，不伪造 run 关联；marker 与查询协议不变。该契约在 M1 冻结；真实 Forge comment worker、Intake 写端口接线及 crash marker 验收归属 [WBS M2 §2.3/§2.5](../WBS.md)，不能以 operation key/schema 已存在代替实现证据。
 
 `token_budget_exceeded` 告警：按通用 key 格式 `alert:<alert_kind>:<subject_id>:<generation>` 取 `alert:token_budget_exceeded:global:<bucket_start_ms>:1`（subject_id 为 `global:<bucket_start_ms>`，generation 固定 1），每 UTC 日桶最多一个 operation；它仍走正常 attention 预算扣费，不得因 token 告警突破注意力配额。语义见 [`brain.md` §6](brain.md)。
+
+`forge_api_budget_warning` 告警：项目每小时 forge API 消耗达到 `warning_ratio` 时由 `ChargeForgeAPICall` 同事务发出（[`forge.md` §9](forge.md)、[`storage.md` §9.1](storage.md)）。key 取 `alert:forge_api_budget_warning:project:<project_id>:<bucket_start_ms>:1`，subject_id 为 `project:<project_id>:<bucket_start_ms>`，generation 固定 1，每项目每 UTC 固定小时桶最多一个 operation（payload digest 稳定，仅含 purpose/project_id/bucket_start_ms，重复触发由 operation key 去重）。语义见 [`forge.md` §9](forge.md)。
 
 ### 5.2 执行
 
