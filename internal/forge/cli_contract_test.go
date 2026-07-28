@@ -2,8 +2,10 @@ package forge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -53,5 +55,80 @@ func TestGitLabNormalization(t *testing.T) {
 	c, err := a.GetChange(context.Background(), ProjectRef{Kind: KindGitLab, Host: "gitlab.example", ProjectKey: "o/r"}, "7")
 	if err != nil || c.ID != "7" || !c.IsDraft || c.Mergeability != Conflicting {
 		t.Fatalf("change=%+v err=%v", c, err)
+	}
+}
+
+func TestFindChangeForCreateOperationMarkerAndConflict(t *testing.T) {
+	project := ProjectRef{Kind: KindGitHub, Host: "github.com", ProjectKey: "owner/repo"}
+	for _, test := range []struct {
+		name string
+		body string
+		want FindResult
+	}{
+		{"marker hit across closed state", `<!-- sift-op:run:1 -->`, MarkerHit},
+		{"unmarked same head conflicts", "human change", SemanticConflict},
+		{"no change", "", NoMatch},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a := NewGitHub("gh", func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+				if !strings.Contains(args[1], "state=all") || !strings.Contains(args[1], "head=owner%3Abranch") {
+					t.Fatalf("lookup path = %q", args[1])
+				}
+				if test.want == NoMatch {
+					return []byte(`[]`), nil, nil
+				}
+				return []byte(`[{"number":7,"html_url":"https://x/7","state":"closed","head":{"sha":"head"},"body":` + strconv.Quote(test.body) + `}]`), nil, nil
+			})
+			change, got, err := a.FindChangeForCreateOperation(context.Background(), project, "run:1", "branch", "main")
+			if err != nil || got != test.want {
+				t.Fatalf("result=%q change=%+v err=%v", got, change, err)
+			}
+			if got == MarkerHit && (change == nil || change.State != ChangeClosed) {
+				t.Fatalf("closed marker hit = %+v", change)
+			}
+		})
+	}
+}
+
+func TestMergeChangeExpectedHeadCASAndCapabilityFailure(t *testing.T) {
+	project := ProjectRef{Kind: KindGitHub, Host: "github.com", ProjectKey: "owner/repo"}
+	calls := 0
+	a := NewGitHub("gh", func(_ context.Context, _ string, args []string, input []byte) ([]byte, []byte, error) {
+		calls++
+		if calls == 1 {
+			if !strings.Contains(args[1], "/pulls/7/merge") {
+				t.Fatalf("merge path = %q", args[1])
+			}
+			var payload map[string]string
+			if err := json.Unmarshal(input, &payload); err != nil || payload["sha"] != "head-a" || payload["merge_method"] != "merge" {
+				t.Fatalf("merge payload=%s err=%v", input, err)
+			}
+			return []byte(`{"merged":true}`), nil, nil
+		}
+		return []byte(`{"number":7,"html_url":"https://x/7","state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"sha":"head-a"}}`), nil, nil
+	})
+	change, err := a.MergeChange(context.Background(), project, "7", "head-a", "merge")
+	if err != nil || change.State != ChangeMerged || calls != 2 {
+		t.Fatalf("merge=%+v calls=%d err=%v", change, calls, err)
+	}
+
+	a = NewGitHub("gh", func(context.Context, string, []string, []byte) ([]byte, []byte, error) {
+		return nil, []byte("unknown parameter: sha; capability_unsupported"), errors.New("exit status 1")
+	})
+	_, err = a.MergeChange(context.Background(), project, "7", "head-a", "merge")
+	if !errors.Is(err, ErrAuthOrCapability) || a.AutoMergeSupported(project) {
+		t.Fatalf("missing expected-head CAS capability error=%v supported=%v", err, a.AutoMergeSupported(project))
+	}
+	_, err = a.MergeChange(context.Background(), project, "7", "head-a", "merge")
+	if !errors.Is(err, ErrAuthOrCapability) {
+		t.Fatalf("disabled auto-merge error=%v", err)
+	}
+
+	a = NewGitHub("gh", func(context.Context, string, []string, []byte) ([]byte, []byte, error) {
+		return nil, []byte("409 head SHA does not match"), errors.New("exit status 1")
+	})
+	_, err = a.MergeChange(context.Background(), project, "7", "head-a", "merge")
+	if !errors.Is(err, ErrSemanticConflict) {
+		t.Fatalf("stale head error=%v", err)
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +29,9 @@ type Adapter struct {
 	CLI  string
 	Kind Kind
 	Run  Runner
+
+	mu             sync.RWMutex
+	unsupportedCAS map[string]bool
 }
 
 func NewAdapter(k Kind, cli string, r Runner) *Adapter {
@@ -39,7 +44,34 @@ func NewAdapter(k Kind, cli string, r Runner) *Adapter {
 	if r == nil {
 		r = ExecRunner
 	}
-	return &Adapter{cli, k, r}
+	return &Adapter{CLI: cli, Kind: k, Run: r, unsupportedCAS: map[string]bool{}}
+}
+
+// AutoMergeSupported reports whether this project has a proven expected-head
+// CAS path. A capability rejection permanently disables automatic merging for
+// the adapter instance; callers must not retry with an unconditional merge.
+func (a *Adapter) AutoMergeSupported(p ProjectRef) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return !a.unsupportedCAS[projectCapabilityKey(p)]
+}
+
+func projectCapabilityKey(p ProjectRef) string {
+	return string(p.Kind) + "\x00" + p.Host + "\x00" + p.ProjectKey
+}
+
+func (a *Adapter) disableAutoMerge(p ProjectRef) {
+	a.mu.Lock()
+	a.unsupportedCAS[projectCapabilityKey(p)] = true
+	a.mu.Unlock()
+}
+
+func unsupportedCAS(err error) bool {
+	var classified *ClassifiedError
+	return errors.As(err, &classified) && classified.Class == ErrAuthOrCapability &&
+		(strings.Contains(strings.ToLower(classified.Summary), "unknown parameter") ||
+			strings.Contains(strings.ToLower(classified.Summary), "unsupported parameter") ||
+			strings.Contains(strings.ToLower(classified.Summary), "capability_unsupported"))
 }
 func NewGitHub(c string, r Runner) *Adapter { return NewAdapter(KindGitHub, c, r) }
 func NewGitLab(c string, r Runner) *Adapter { return NewAdapter(KindGitLab, c, r) }
@@ -52,8 +84,11 @@ func classify(s string, e error) error {
 	if strings.Contains(q, "401") || strings.Contains(q, "403") || strings.Contains(q, "unauthorized") || strings.Contains(q, "forbidden") || strings.Contains(q, "permission") {
 		cl = ErrAuthOrCapability
 	}
-	if strings.Contains(q, "409") {
+	if strings.Contains(q, "409") || strings.Contains(q, "head sha") || strings.Contains(q, "head commit") || strings.Contains(q, "sha does not match") {
 		cl = ErrSemanticConflict
+	}
+	if strings.Contains(q, "unknown parameter") || strings.Contains(q, "unsupported parameter") || strings.Contains(q, "capability_unsupported") {
+		cl = ErrAuthOrCapability
 	}
 	if s == "" {
 		s = e.Error()
@@ -346,12 +381,19 @@ func (a *Adapter) CreateChange(ctx context.Context, p ProjectRef, branch, base, 
 	return c, nil
 }
 func (a *Adapter) FindChangeForCreateOperation(ctx context.Context, p ProjectRef, opKey, branch, base string) (*Change, FindResult, error) {
+	if opKey == "" || branch == "" || base == "" {
+		return nil, "", &ClassifiedError{Class: ErrContractViolation, Summary: "operation key, branch, and base are required"}
+	}
 	path := a.base(p) + "/pulls?state=all"
 	if a.Kind == KindGitLab {
 		path = a.base(p) + "/merge_requests?state=all"
 	}
 	if a.Kind == KindGitHub {
-		path += "&head=" + url.QueryEscape(p.ProjectKey+":"+branch) + "&base=" + url.QueryEscape(base)
+		owner, _, ok := strings.Cut(p.ProjectKey, "/")
+		if !ok || owner == "" {
+			return nil, "", &ClassifiedError{Class: ErrContractViolation, Summary: "github project key must be owner/repository"}
+		}
+		path += "&head=" + url.QueryEscape(owner+":"+branch) + "&base=" + url.QueryEscape(base)
 	} else {
 		path += "&source_branch=" + url.QueryEscape(branch) + "&target_branch=" + url.QueryEscape(base)
 	}
@@ -470,19 +512,42 @@ func normalizeCI(s string) string {
 	return "unknown"
 }
 func (a *Adapter) MergeChange(ctx context.Context, p ProjectRef, id, expected, method string) (Change, error) {
+	if !a.AutoMergeSupported(p) {
+		return Change{}, &ClassifiedError{Class: ErrAuthOrCapability, Summary: "capability_unsupported: expected-head CAS"}
+	}
+	if id == "" || expected == "" {
+		return Change{}, &ClassifiedError{Class: ErrContractViolation, Summary: "change id and expected head sha are required"}
+	}
 	if method != "merge" {
 		return Change{}, &ClassifiedError{Class: ErrContractViolation, Summary: "only merge method is supported"}
 	}
 	path := a.base(p) + "/pulls/" + pathPart(id) + "/merge"
+	payload := map[string]string{"sha": expected, "merge_method": "merge"}
 	if a.Kind == KindGitLab {
 		path = a.base(p) + "/merge_requests/" + pathPart(id) + "/merge"
+		// GitLab has no merge_method equivalent. Its project configuration
+		// selects the strategy, but sha remains the required CAS field.
+		payload = map[string]string{"sha": expected}
 	}
-	in, _ := json.Marshal(map[string]string{"sha": expected})
-	var x rawChange
-	if e := a.call(ctx, p, path, "PUT", in, &x); e != nil {
+	in, _ := json.Marshal(payload)
+	var response json.RawMessage
+	if e := a.call(ctx, p, path, "PUT", in, &response); e != nil {
+		if unsupportedCAS(e) {
+			a.disableAutoMerge(p)
+		}
 		return Change{}, e
 	}
-	return a.change(x)
+	// GitHub's merge response is not a pull-request projection. Re-read the
+	// Change rather than accepting a successful transport response as merge
+	// evidence; this also gives both platforms the same neutral result.
+	c, e := a.GetChange(ctx, p, id)
+	if e != nil {
+		return Change{}, e
+	}
+	if c.State != ChangeMerged {
+		return Change{}, &ClassifiedError{Class: ErrSemanticConflict, Summary: "merge response did not produce a merged change"}
+	}
+	return c, nil
 }
 func targetPath(a *Adapter, p ProjectRef, t TargetRef, suffix string) (string, error) {
 	if t.ID == "" || (t.Kind != TargetIssue && t.Kind != TargetChange) {

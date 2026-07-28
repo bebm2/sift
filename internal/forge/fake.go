@@ -10,17 +10,18 @@ import (
 )
 
 type Fake struct {
-	mu       sync.Mutex
-	issues   map[string][]Issue
-	events   map[string][]LabelEvent
-	changes  map[string]map[string]Change
-	comments map[string][]Comment
-	labels   map[string]map[string]map[string]bool
-	diffs    map[string]string
+	mu           sync.Mutex
+	issues       map[string][]Issue
+	events       map[string][]LabelEvent
+	changes      map[string]map[string]Change
+	changeBodies map[string]map[string]string
+	comments     map[string][]Comment
+	labels       map[string]map[string]map[string]bool
+	diffs        map[string]string
 }
 
 func NewFake() *Fake {
-	return &Fake{issues: map[string][]Issue{}, events: map[string][]LabelEvent{}, changes: map[string]map[string]Change{}, comments: map[string][]Comment{}, labels: map[string]map[string]map[string]bool{}, diffs: map[string]string{}}
+	return &Fake{issues: map[string][]Issue{}, events: map[string][]LabelEvent{}, changes: map[string]map[string]Change{}, changeBodies: map[string]map[string]string{}, comments: map[string][]Comment{}, labels: map[string]map[string]map[string]bool{}, diffs: map[string]string{}}
 }
 func projectKey(p ProjectRef) string { return string(p.Kind) + ":" + p.Host + ":" + p.ProjectKey }
 func (f *Fake) AddIssue(p ProjectRef, i Issue) Issue {
@@ -45,13 +46,21 @@ func (f *Fake) AddLabelEvent(p ProjectRef, e LabelEvent) {
 	f.mu.Unlock()
 }
 func (f *Fake) AddChange(p ProjectRef, id, sha string) Change {
+	return f.AddChangeWithBody(p, id, sha, "")
+}
+
+// AddChangeWithBody scripts a remotely existing Change for marker-recovery
+// tests. The body is remote evidence, not part of Change's neutral projection.
+func (f *Fake) AddChangeWithBody(p ProjectRef, id, sha, body string) Change {
 	c := Change{ID: id, HeadSHA: sha, State: ChangeOpen, Mergeability: MergeabilityUnknown, ReviewState: ReviewUnknown}
 	f.mu.Lock()
 	k := projectKey(p)
 	if f.changes[k] == nil {
 		f.changes[k] = map[string]Change{}
+		f.changeBodies[k] = map[string]string{}
 	}
 	f.changes[k][id] = c
+	f.changeBodies[k][id] = body
 	f.mu.Unlock()
 	return c
 }
@@ -155,16 +164,29 @@ func (f *Fake) SetLabels(_ context.Context, p ProjectRef, t TargetRef, add, remo
 }
 func (f *Fake) CreateChange(_ context.Context, p ProjectRef, branch, base, title, body string) (Change, error) {
 	id := fakeNumber(len(f.changes[projectKey(p)]) + 1)
-	return f.AddChange(p, id, branch), nil
+	return f.AddChangeWithBody(p, id, branch, body), nil
 }
 func (f *Fake) FindChangeForCreateOperation(_ context.Context, p ProjectRef, op, branch, base string) (*Change, FindResult, error) {
+	if op == "" || branch == "" || base == "" {
+		return nil, "", &ClassifiedError{Class: ErrContractViolation, Summary: "operation key, branch, and base are required"}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, c := range f.changes[projectKey(p)] {
-		if strings.Contains(c.URL, op) {
-			x := c
-			return &x, MarkerHit, nil
+	changes := f.changes[projectKey(p)]
+	var marked []Change
+	for id, c := range changes {
+		if strings.Contains(f.changeBodies[projectKey(p)][id], op) {
+			marked = append(marked, c)
 		}
+	}
+	if len(marked) > 1 {
+		return nil, "", &ClassifiedError{Class: ErrSemanticConflict, Summary: "operation marker matched multiple changes"}
+	}
+	if len(marked) == 1 {
+		return &marked[0], MarkerHit, nil
+	}
+	if len(changes) > 0 {
+		return nil, SemanticConflict, nil
 	}
 	return nil, NoMatch, nil
 }

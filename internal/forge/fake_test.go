@@ -88,6 +88,27 @@ func TestFakeUnknownChangeIsSemanticConflict(t *testing.T) {
 	}
 }
 
+func TestFakeChangeMarkerConflictAndExpectedHeadCAS(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	p := ProjectRef{Kind: KindGitHub, Host: "github.com", ProjectKey: "org/repo"}
+	f.AddChangeWithBody(p, "7", "head-a", "<!-- sift-op:run:1 -->")
+	change, result, err := f.FindChangeForCreateOperation(ctx, p, "run:1", "branch", "main")
+	if err != nil || result != MarkerHit || change == nil || change.ID != "7" {
+		t.Fatalf("marker lookup: change=%+v result=%q err=%v", change, result, err)
+	}
+	if _, err := f.MergeChange(ctx, p, "7", "head-b", "merge"); !errors.Is(err, ErrSemanticConflict) {
+		t.Fatalf("stale merge error=%v", err)
+	}
+
+	f = NewFake()
+	f.AddChangeWithBody(p, "8", "head-a", "human change")
+	_, result, err = f.FindChangeForCreateOperation(ctx, p, "run:1", "branch", "main")
+	if err != nil || result != SemanticConflict {
+		t.Fatalf("unmarked change result=%q err=%v", result, err)
+	}
+}
+
 func TestFakeRejectsIncompleteScripting(t *testing.T) {
 	f := NewFake()
 	p := ProjectRef{Kind: KindGitHub, Host: "github.com", ProjectKey: "org/repo"}
