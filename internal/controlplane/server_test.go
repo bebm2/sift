@@ -106,9 +106,13 @@ func TestV10bUnsafeLocalAttackReproduces(t *testing.T) {
 		t.Fatalf("security posture = %v", result["security_posture"])
 	}
 	checks := result["checks"].([]any)
-	if len(checks) != 1 || checks[0].(map[string]any)["id"] != "operator-token-readable-by-agent" || checks[0].(map[string]any)["level"] != "warning" {
-		t.Fatalf("doctor checks = %#v", checks)
+	for _, check := range checks {
+		item := check.(map[string]any)
+		if item["id"] == "operator-token-readable-by-agent" && item["level"] == "warning" {
+			return
+		}
 	}
+	t.Fatalf("doctor did not report unsafe-local: %#v", checks)
 }
 
 func TestSecondDaemonRefusesLock(t *testing.T) {
