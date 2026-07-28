@@ -47,7 +47,7 @@ func TestFakeClientContract(t *testing.T) {
 		TargetID: "1", Label: "sift", Action: LabelAdded,
 		Actor: "alice", ObservedAt: time.UnixMilli(1),
 	})
-	evs, err := f.ListLabelEvents(ctx, p, "1", "")
+	evs, _, err := f.ListLabelEvents(ctx, p, TargetRef{Kind: TargetIssue, ID: "1"}, "")
 	if err != nil || len(evs) != 1 || evs[0].Actor != "alice" {
 		t.Fatalf("ListLabelEvents = %+v %v", evs, err)
 	}
@@ -59,7 +59,7 @@ func TestFakeClientContract(t *testing.T) {
 	if err != nil || ch.State != ChangeOpen {
 		t.Fatalf("open change = %+v %v", ch, err)
 	}
-	merged, err := f.MergeChange(p, "c1", time.UnixMilli(5))
+	merged, err := f.InjectMerged(p, "c1", time.UnixMilli(5))
 	if err != nil || merged.State != ChangeMerged || merged.HeadSHA != "sha1" {
 		t.Fatalf("merge = %+v %v", merged, err)
 	}
@@ -83,7 +83,7 @@ func TestFakeUnknownChangeIsSemanticConflict(t *testing.T) {
 	if !errors.As(err, &ce) || ce.Class != ErrSemanticConflict {
 		t.Fatalf("err not a ClassifiedError: %v", err)
 	}
-	if _, err := f.MergeChange(p, "nope", time.Now()); !errors.Is(err, ErrSemanticConflict) {
+	if _, err := f.InjectMerged(p, "nope", time.Now()); !errors.Is(err, ErrSemanticConflict) {
 		t.Fatalf("merge unknown err = %v", err)
 	}
 }
