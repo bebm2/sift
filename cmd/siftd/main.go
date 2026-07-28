@@ -11,6 +11,9 @@ import (
 
 	"github.com/miaoxiaoyong/sift/internal/config"
 	"github.com/miaoxiaoyong/sift/internal/controlplane"
+	"github.com/miaoxiaoyong/sift/internal/daemon"
+	"github.com/miaoxiaoyong/sift/internal/storage"
+	"path/filepath"
 )
 
 func main() {
@@ -18,7 +21,19 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	if _, err := config.Load(home, time.Now()); err != nil {
+	snapshot, err := config.Load(home, time.Now())
+	if err != nil {
+		fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	db, err := storage.Open(ctx, storage.OpenConfig{Path: filepath.Join(home.Path, "sift.db"), BinaryVersion: controlplane.Version, Now: time.Now()})
+	if err != nil {
+		fatal(err)
+	}
+	defer db.Close()
+	workers, err := daemon.Assemble(db, snapshot.Config, time.Now)
+	if err != nil {
 		fatal(err)
 	}
 	s, err := controlplane.Start(home)
@@ -26,8 +41,18 @@ func main() {
 		fatal(err)
 	}
 	defer s.Close()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	go func() {
+		ticker := time.NewTicker(snapshot.Config.Scheduler.SupervisorInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = workers.Tick(ctx)
+			}
+		}
+	}()
 	if err := s.Serve(ctx); err != nil {
 		fatal(err)
 	}

@@ -153,6 +153,20 @@ func insertOperation(ctx context.Context, tx *sql.Tx, op Operation, runID, _ str
 // reclaimed in the same transaction, with an immutable lease_expired result
 // written for the old attempt first.
 func (d *DB) ClaimOutboxOperation(ctx context.Context, workerID string, nowMS, leaseMS int64) (*ClaimedOperation, error) {
+	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, "")
+}
+
+// ClaimOutboxOperationKind leases only operations consumed by one worker kind.
+// A worker must never claim another worker's operation and turn it into a
+// contract failure.
+func (d *DB) ClaimOutboxOperationKind(ctx context.Context, workerID string, kind OperationKind, nowMS, leaseMS int64) (*ClaimedOperation, error) {
+	if !validOperationKind(kind) {
+		return nil, errors.New("storage: invalid outbox operation kind")
+	}
+	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, kind)
+}
+
+func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, leaseMS int64, filterKind OperationKind) (*ClaimedOperation, error) {
 	if workerID == "" || leaseMS <= 0 {
 		return nil, errors.New("storage: worker id and positive lease required")
 	}
@@ -161,9 +175,16 @@ func (d *DB) ClaimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 		return nil, err
 	}
 	defer tx.Rollback()
-	row := tx.QueryRowContext(ctx, `SELECT id, operation_key, kind, payload_json, run_id, attempt_no, interrupt_id, attempt_count, state
-		FROM outbox_operations WHERE (state IN ('pending','retryable') AND next_attempt_at_ms <= ?)
-		OR (state='executing' AND lease_expires_at_ms <= ?) ORDER BY next_attempt_at_ms, id LIMIT 1`, nowMS, nowMS)
+	query := `SELECT id, operation_key, kind, payload_json, run_id, attempt_no, interrupt_id, attempt_count, state
+		FROM outbox_operations WHERE ((state IN ('pending','retryable') AND next_attempt_at_ms <= ?)
+		OR (state='executing' AND lease_expires_at_ms <= ?))`
+	args := []any{nowMS, nowMS}
+	if filterKind != "" {
+		query += ` AND kind=?`
+		args = append(args, filterKind)
+	}
+	query += ` ORDER BY next_attempt_at_ms, id LIMIT 1`
+	row := tx.QueryRowContext(ctx, query, args...)
 	var c ClaimedOperation
 	var kind, payload, state string
 	var run, interrupt sql.NullString
