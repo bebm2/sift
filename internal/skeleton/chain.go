@@ -313,7 +313,7 @@ func (c *Chain) Drive(ctx context.Context, runID string, issue forge.Issue, trig
 	// gate_bypassed because no Gate adjudicated it (PRD §4.1 / §10.2). This is
 	// honest accounting, not bypass adjudication.
 	c.clock.Advance(time.Second)
-	if _, err := c.forge.MergeChange(c.config.Project, changeID, c.clock.Now()); err != nil {
+	if _, err := c.forge.InjectMerged(c.config.Project, changeID, c.clock.Now()); err != nil {
 		return out, fmt.Errorf("skeleton: inject merge fact: %w", err)
 	}
 	ch, err := c.forge.GetChange(ctx, c.config.Project, changeID)

@@ -300,7 +300,7 @@ func forgeIssue(chain *Chain) forge.Issue {
 }
 
 func forgeTrigger(chain *Chain) forge.LabelEvent {
-	events, err := chain.forge.ListLabelEvents(context.Background(), chain.config.Project, forgeIssue(chain).ID, "")
+	events, _, err := chain.forge.ListLabelEvents(context.Background(), chain.config.Project, forge.TargetRef{Kind: forge.TargetIssue, ID: forgeIssue(chain).ID}, "")
 	if err != nil || len(events) != 1 {
 		panic("skeleton test: expected exactly one scripted trigger label event")
 	}
