@@ -7,7 +7,7 @@ summary: 产品需求：问题、场景、状态模型、成功标准
 # Sift — 产品需求文档
 
 > **Sift**：本地多 Agent 任务编排与门禁中枢
-> **版本：V0.2（PoC / 从 0）** | **日期：2026-07-27**
+> **版本：V0.8（PoC / 从 0）** | **日期：2026-07-28**
 > **仓库：** https://github.com/miaoxiaoyong/sift
 
 本文档只定义**需求与边界**。技术设计、任务拆解、实现另文跟进。
@@ -54,8 +54,8 @@ Sift 不是通用任务管理系统，也不是又一个 coding agent IDE。它�
 |----|------|
 | 产品名 | **Sift** |
 | 含义 | 筛查、分辨优劣后再放行 |
-| CLI / 守护进程 | `sift` / `siftd`（实现阶段再定） |
-| 配置与数据目录 | `~/.sift/`（实现阶段再定） |
+| CLI / 守护进程 | `sift` / `siftd` |
+| 配置与数据目录 | `~/.sift/`（两平台同一约定，可由 `SIFT_HOME` 覆盖；见 DESIGN §7） |
 | **Forge** | 代码托管平台的统称：GitHub、GitLab |
 | **Change** | MR / PR 的中性称呼；平台原生词只出现在发给 forge 的文案里 |
 | **Checks** | Pipeline / Checks / Statuses 的中性称呼 |
@@ -85,7 +85,7 @@ Sift 不是通用任务管理系统，也不是又一个 coding agent IDE。它�
 
 | 方向 | 处置 |
 |------|------|
-| Push 下发 Task Spec、双层上报（MCP 时间线 + 退出码裁定） | **保留** |
+| Push 下发 Task Spec、双层上报（上报进时间线 + 退出码裁定） | **保留** |
 | Worktree 隔离、`protected_paths` 硬/软护栏 | **保留** |
 | 5 状态任务机 + HITL reason | **保留**（实现时禁止再叠隐式第二套状态机） |
 | 多 Agent 并存（Claude Code / Codex / Cursor 等）via 启动命令适配 | **保留**（但降级为配置可证，见 §3.2） |
@@ -102,6 +102,10 @@ Sift 不是通用任务管理系统，也不是又一个 coding agent IDE。它�
 唯一角色：**系统管理员兼唯一 Human 决策者**（熟悉 GitHub / GitLab / CI / CLI）。
 
 V0 范围：单用户、单机、可同时接入 GitHub 与 GitLab 项目。
+
+**「单用户单机」约束的是一个安装内的形态，不是安装数量。** V0 起即以对外分发为目标（§9.3 分发行）：每个使用者在自己的机器上跑一个独立实例，实例之间没有任何协调、共享存储或网络交互——这与「不做分布式与高可用」并不冲突，也不改变本文任何一条功能需求。
+
+初期唯一使用者虽是作者本人，V0 验证的却是**别人能安装并持续运行的本地产品**，不是只有仓库作者环境里能跑的脚本：代码仍不出机器；目标机不预装语言运行时；支持矩阵、安装、升级与恢复从第一版就形成可复现证据。若把这些延后，最容易把路径、进程托管和文件协议中的单平台假设固化进实现，届时再补会横切 Runtime、存储、验证与发布链。技术上为何选 Go 承接这些需求见 [ADR-009](decisions/009-tech-stack-go.md)。
 
 ### 2.2 核心场景
 
@@ -188,9 +192,10 @@ V0 范围：单用户、单机、可同时接入 GitHub 与 GitLab 项目。
 ### 4.1 Run 状态（5 个）
 
 ```
-queued → running → waiting_human ⇄（approve 后回到 running / queued）
+queued → running → waiting_human ⇄（approve，或迟到的执行事实，回到 running / queued）
               ↘ done
               ↘ failed
+queued → waiting_human（开工前审批；或启动阶段停滞需人裁决）
 failed → queued（仅人工 retry）
 waiting_human → failed（超时且过期策略为 auto_reject）
 ```
@@ -200,15 +205,19 @@ waiting_human → failed（超时且过期策略为 auto_reject）
 | `queued` | 等待分派或等待并发槽位 |
 | `running` | Agent 进程已启动 |
 | `waiting_human` | 卡在 HITL，附 `reason` 与 `expires_at` |
-| `done` | Change 已合并且门禁通过 |
+| `done` | **Change 已合并**（外部事实）。门禁结果是独立的审计属性，不参与 `done` 的定义 |
 | `failed` | 重试耗尽 / 硬护栏 / 人工关闭 / HITL 过期拒绝 |
 
 约束：
 
+- **`done` 只表示「Change 已合并」这一外部事实，门禁结论另记。** Sift **自己发起**的合并必须门禁全绿（这是 Sift 能保证的部分）；人在 forge 上手工合并属于事实源的既成事实，Run 照样收敛 `done`，但记 `gate_bypassed` 审计属性并按 §10.2 口径单列，**不计入自主闭环**。
+  - 为什么不把它判成 `failed`：Run 的结局与 Change 的结局是两件事，而 A2 规定 forge 是事实源——一个已经进了主干的变更，本地记成 `failed` 会让状态与事实脱同步，且 `failed` 的语义（保留 worktree 供排查、可 retry）在这里全是错的。
+  - 为什么不新增终态：§1.5 已禁止叠第二套状态机；表达「合并了但门禁没过」用**属性**而非**状态**，5 状态维持不变。
 - **重试不是独立状态**（`retry_count` 字段）。
 - **Agent 自报 phase 不进状态机**（只进事件时间线）。
 - 所有合法转移必须经唯一校验入口（实现约束，防止旁路改状态）。
 - **`waiting_human` 必须有超时**。V0.1 缺此项，导致「注意力调度器」名不副实——人三天不理，Run 就静默烂在队列里。
+- **`waiting_human` 不等于「执行体已停」。** 打扰只表示「需要人裁决」；如果被打扰的原因恰恰是「系统无法证明上一个执行体已消失」（§4.4 例外），那么该执行体可能仍在跑，其迟到的执行事实必须能收敛这条 Run——因此上图的回边不只由 `approve` 触发。事实与人的决定谁先落库谁生效，仲裁规则属实现层，见 DESIGN §10.1。
 
 ### 4.2 HITL 超时与升级
 
@@ -217,20 +226,22 @@ waiting_human → failed（超时且过期策略为 auto_reject）
 | `on_expire` | 行为 | 默认适用 |
 |-------------|------|----------|
 | `hold` | 继续等，但降低推送频率，进入「积压」计数 | `code_review` |
-| `escalate` | 提升 severity，换更强的通知通道再推一次 | `agent_blocked`、`merge_conflict` |
+| `escalate` | 提升 severity，以当前 Channel 的**强提醒投递档位**再推一次；Channel 不支持优先级时原通道重推，V0 不要求第二 Channel | `agent_blocked`、`merge_conflict`、**`startup_stall`** |
 | `auto_reject` | 转 `failed`，保留 worktree 与上下文 | 低价值的 `failure_review` |
+
+**`startup_stall` 禁用 `auto_reject`，且达升级上限后落 `hold` 而非终态。** 理由是终态表达不了这个场景的真实状态：这类打扰的前提就是「系统无法证明上一个执行体已消失」，把 Run 推进 `failed` 只是让系统不再看它，执行体该活着还活着——处置责任就此丢失。宁可让它留在积压里可见，也不要一个「已关闭但可能还在写仓库」的任务。
 
 **永不允许 `on_expire: auto_approve`。** 超时是人没看见，不是人同意了。
 
 `escalate` 会提升 severity，而 severity 由确定性映射产生（**唯一定义在 §5.5**，其输入含「已升级次数」）。两者不冲突——升级本身也是确定性的。
 
-**`escalate` 必须有次数上限与终态**，否则一个无人理会的 `agent_blocked` 会反复超时、升级、重推，在撞上 critical 熔断（§5.5）之前就把通知通道耗光：
+**`escalate` 必须有次数上限与封顶后的去向**，否则一个无人理会的 `agent_blocked` 会反复超时、升级、重推，在撞上 critical 熔断（§5.5）之前就把通知通道耗光。封顶后的去向不一定是 Run 终态：`startup_stall` 必须留在 `hold`：
 
 | 约束 | 规则 |
 |------|------|
 | `max_escalations` | 每个 Interrupt 的升级次数上限（配置项，见 §12 #14） |
 | 达上限后的 severity | **封顶**，不再随次数上升 |
-| 达上限后的去向 | 转终态：按 reason 默认落 `auto_reject`（→ `failed`）或 `hold`，**不得继续 `escalate`** |
+| 达上限后的去向 | 按 reason 落 `auto_reject`（→ `failed`）或 `hold`；后者保持待决，**不得继续 `escalate`** |
 
 熔断是最后一道网，不是第一道。**能在状态机层写死的上限，不要留给熔断去救。**
 
@@ -246,10 +257,13 @@ waiting_human → failed（超时且过期策略为 auto_reject）
 | `agent_blocked` | Agent 上报阻塞 / 需求不清 | **`voice`**（唯一可由语音承载**内容**的一类，不只是分诊——人口述澄清即可解开，见 §11） |
 | `merge_conflict` | 合并冲突需人处理 | `voice`（仅分诊） |
 | `failure_review` | 失败或 CI 异常后的人工裁决 | `voice`（仅分诊） |
+| `startup_stall` | 受控终止无法证明上一个执行体已消失（§4.4 例外） | `text`（需看 attempt 与进程信息才能裁决，且「放弃」有后果，不做语音放行） |
 
 ### 4.4 什么不必打扰人
 
 Issue 摄入与分派、worktree 生命周期、Agent 启停监督、Goal 自检汇总、Checks 等待、硬护栏直接失败、被判定为 flaky 的 CI 失败重试（§5.3 T5）、（若项目已通过影子门禁考核）低风险自动合并。
+
+**一处例外：Agent 启停监督不打扰人，但「系统无法证明上一个执行者已经消失」必须打扰。** 系统在这种情形下拒绝自行重启（那等于可能并行跑两个 Agent 写同一 worktree），于是任务会停住；停住而不通知等于把任务静默挂死，与 A3 冲突。因此这一类停滞按 `startup_stall`（§4.3）生成一次打扰交人裁决。**它需要独立 reason 而不能借用 `failure_review`**：后者默认 `auto_reject` 会把 Run 推进终态，而这里执行体可能仍在跑，终态会把处置责任一起丢掉（§4.2）。可选动作与「放弃」的确切含义见 DESIGN §10.1——注意「放弃」只表示人不再管这个 Run，不表示执行体已消失。
 
 ### 4.5 反向同步
 
@@ -258,7 +272,7 @@ forge 是事实源，因此 forge 侧的变化必须能收敛本地 Run。但**�
 | forge 侧发生 | 性质 | Run 收敛为 | 是否 actor 鉴权 |
 |-------------|------|-----------|----------------|
 | Issue 被关闭 | **事实** | 终止 Agent，`failed`（reason: `closed_upstream`），清理 worktree | 否 |
-| Change 被人手动合并 | **事实** | `done` | 否 |
+| Change 被人手动合并 | **事实** | `done`；若门禁未通过或未跑完，附 `gate_bypassed` 审计属性（§4.1） | 否 |
 | Change 被人手动关闭 | **事实** | `failed`（reason: `change_closed`） | 否 |
 | 触发标签被移除 | **指令** | 终止 Agent，`failed`（reason: `untriggered`） | **是**（§9.2） |
 
@@ -283,7 +297,7 @@ Task Spec = Description + Goals + Guardrails + Context
 
 **Agent 只负责在 worktree 内提交到分支，不负责创建 Change。**
 
-> V0.1 的漏洞：原文写「Agent 产出 MR」。但创建 Change 是确定性动作，交给概率性执行体既违反 A1，又迫使我们向 Agent 分发 forge 凭证。改由 Sift 在检测到分支有提交后创建 Change。
+> V0.1 的漏洞：原文写「Agent 产出 MR」。但创建 Change 是确定性动作，交给概率性执行体既违反 A1，又迫使我们向 Agent 分发 forge 凭证。改由 Sift 在取得 Layer 2 的**成功完成证据**、冻结最终 head 且确认分支有提交后创建 Change；运行中的中间提交或失败 attempt 的提交不得触发创建。
 
 ### 5.2 Forge 抽象层
 
@@ -295,10 +309,12 @@ Task Spec = Description + Goals + Guardrails + Context
 
 | 收益 | 说明 |
 |------|------|
-| 零凭证管理 | 复用 CLI 自身的 keychain / token 存储。**V0.1 中「Token 仅守护进程持有」的需求消失**。附带一条安全脚注：同用户下的 Agent 也能调用同一个已登录 CLI，见 §9.1 TM6 |
+| 零凭证管理\* | 复用 CLI 自身的 keychain / token 存储。**V0.1 中「Token 仅守护进程持有」的需求消失**。附带一条安全脚注：同用户下的 Agent 也能调用同一个已登录 CLI，见 §9.1 TM6 |
 | 稳定契约 | REST/GraphQL 响应结构远比人类可读的 porcelain 输出稳定 |
 | 双平台对称 | 两个 CLI 的 `api` 子命令行为高度一致 |
 | 免 SDK | 不引入平台 SDK 依赖，不处理分页/重试/鉴权刷新 |
+
+> **\* 「零凭证管理」只指 forge 侧，且不等于「Agent 取不到 forge 凭证」。** Sift 自身不落盘 forge 凭证成立；而同用户下的 Agent 可直接调用同一个已登录 CLI 继承鉴权——这条暴露面见 §9.1 TM6，收口方向（最小凭证沙箱，V0 不实施）见 [decisions/007](decisions/007-tm6-minimal-credential-sandbox-direction.md)。价值主张本身不退化：沙箱内挂的是 agent CLI 自己的凭证。
 
 代价与对策：
 
@@ -322,11 +338,14 @@ Task Spec = Description + Goals + Guardrails + Context
 | `commentIssue(id, body)` | 发决策简报 / 确认回执 |
 | `setLabels(id, add[], remove[])` | 状态投影与触发标签管理 |
 | `createChange(branch, base, title, body)` | **由 Sift 创建**（§5.1） |
+| `findChangeForCreateOperation(opKey, branch, base)` | 为创建操作做崩溃对账；跨开启 / 关闭 / 已合并状态查 operation marker，并返回同 base/head 的无 marker 冲突 |
 | `getChange(id)` | 状态、可合并性、head sha、审查状态 |
 | `getChangeDiff(id)` | 供 LLM 风险评分（T3） |
 | `listChangeComments(id, since)` | 读审批指令。**必须返回 `author`** |
 | `getChecks(headSha)` | CI 状态与失败任务清单 |
-| `mergeChange(id, method)` | 合并 |
+| `mergeChange(id, expectedHeadSha, method)` | **条件合并**：远端当前 head 必须仍等于 Gate 裁定的 `expectedHeadSha`，否则拒绝并重新过 Gate |
+
+> **`expectedHeadSha` 是门禁契约，不只是幂等键。** 本地在调用前重读 head 只能缩小竞态窗口，不能替代 merge 请求自身的远端条件检查；旧 operation 发现 head 已变化必须收敛为 stale/no-op。适配器无法提供该条件语义时，Sift 不得自动合并。
 
 > **actor 是契约的一部分，不是实现细节。** §9.2 规定所有驱动性事件必须解析 actor 且 fail closed；如果动词集不显式声明 actor 的可得性，实现阶段就会发现「要的闸门，抽象层没给铲子」。两个平台都有对应能力（GitHub issue events / timeline、GitLab resource label events），经 `api` 子命令均可取得，这纯粹是契约不能漏写。
 
@@ -545,12 +564,14 @@ Interrupt {
 
 | 层 | 来源 | 用途 |
 |----|------|------|
-| Layer 1 | Agent → MCP（进度 / blocker / goal / 声明完成） | 时间线与 HITL 触发 |
+| Layer 1 | Agent → **`sift report` CLI**（进度 / blocker / goal / 声明完成），Run 作用域 token | 时间线与 HITL 触发 |
 | Layer 2 | 进程退出码 + Gate | **最终裁定** |
 
-**MCP 是 Agent 唯一能主动影响系统的通道，因此必须限流。** Agent 可以靠反复上报 blocker 制造 Interrupt 洪水，耗尽注意力配额——这是针对最稀缺资源的可用性攻击（§9.1 TM5）。要求：
+> **通道形态由 DESIGN 定案**：Layer 1 走 `sift report` 子命令而非 MCP，理由与放弃 MCP 的取舍见 [decisions/006](decisions/006-report-via-cli-not-mcp.md)。本节的要求与 Agent 能力边界不因通道形态改变——**要求约束的是通道的性质，不是它的协议**。
 
-- MCP 上报做确定性去重与速率限制，**不由 LLM 判断是否该限**。
+**上报是 Agent 唯一能主动影响系统的通道，因此必须限流。** Agent 可以靠反复上报 blocker 制造 Interrupt 洪水，耗尽注意力配额——这是针对最稀缺资源的可用性攻击（§9.1 TM5）。要求：
+
+- 上报做确定性去重与速率限制，**不由 LLM 判断是否该限**。
 - 每个 Run 有 Interrupt 子配额；触顶本身即异常信号，转一次 HITL 或直接 `failed`，而不是继续放行上报。
 - Layer 1 永远不得越权：**「Agent 声明完成」不等于完成**，裁定只在 Layer 2。
 
@@ -659,6 +680,7 @@ Sift 在 Issue 或 Change 下发一条**决策简报评论**（Interrupt 的渲�
 - **鉴权由 forge 提供**：评论作者必须在 allowlist 内。V0.1 §8 中「审批动作需防误触（token / 本地绑定）」的需求随之删除。
 - **鉴权必须覆盖标签路径，不只是评论。** `sift:approved` 等价于 approve，任何有 triage 权限的人都能打——不校验打标人，手机端快捷通道就是审批绕过通道。统一规则见 §9.2。
 - **幂等**：每条 Interrupt 携带 `run_id + nonce`，指令必须匹配当前待决 Interrupt，防止重放历史指令。
+- **指令还必须属于该 Interrupt 的 `options[]`，nonce 匹配只是第一道。** 上表是全集，不是每条 Interrupt 都接受全集：例如「无法证明执行体已消失」（`startup_stall`）这类 Interrupt 不提供 `approve`——通用 approve 会把 Run 直接推回 `running`，而那正是当下无法保证的事实。校验动作是否在 options 内属服务端职责，评论路径与标签路径同一实现（§9.2）。
 - **审计**：Sift 对每条已执行指令回一条确认评论，形成完整留痕。
 - 标签是**状态投影**，不是权威。Run 状态权威在本地（A2）；标签只为让人在 forge 列表里一眼看到。
 
@@ -672,7 +694,6 @@ sift logs <run>         # Agent 输出
 sift kill <run>
 sift retry <run>
 sift worktree <run>     # 打印 worktree 路径
-sift speak <run>        # 朗读 Interrupt；遇 min_modality: visual 拒绝朗读（见 §11 红线）
 sift doctor             # 能力探测、策略 schema 校验与漂移对比
 ```
 
@@ -694,7 +715,7 @@ sift doctor             # 能力探测、策略 schema 校验与漂移对比
 | **Ledger** | 校准账本（§5.9）：富特征决策记录、语义原料留存、供 T7 生成两类提案 |
 | **Attention** | Interrupt 生成、超时与升级、打扰调度、**注意力配额与超额降级**、Channel 推送 |
 | **Command** | forge 驱动性事件（指令评论 / 标签）的确定性解析、actor 鉴权、幂等、回执 |
-| **MCP** | Agent 上报工具集（进度、goal、blocker、完成声明等）+ 确定性限流与去重 |
+| **Report** | Agent 上报通道（进度、goal、blocker、完成声明等）+ 确定性限流与去重。V0 通道形态见 §5.8 |
 | **CLI** | 本地运维命令与 `sift doctor` |
 
 实现阶段补充：配置 schema、数据表、技术选型——**不在本需求文档展开**。
@@ -715,7 +736,7 @@ sift doctor             # 能力探测、策略 schema 校验与漂移对比
 | **TM2** | **Agent 改写自己的门禁**：`{repo}/.sift/` 就在它的 worktree 里 | `.sift/**` 列入默认硬护栏（§5.4）；且**策略一律从 base 分支读取，不读 worktree** |
 | **TM3** | **Agent 改写 CI 定义**让 Checks 变绿 | CI 配置路径列入默认硬护栏（§5.4）。Checks 是门禁一环，定义 Checks 的文件就必须受保护 |
 | **TM4** | **审批绕过**：`sift:approved` 标签等价于 approve，但打标人未鉴权 | 所有驱动性事件解析 actor 并校验 allowlist（§9.2） |
-| **TM5** | **注意力耗尽攻击**：Agent 经 MCP 刷 blocker 制造 Interrupt 洪水 | MCP 确定性限流与去重；每 Run 设 Interrupt 子配额，触顶即异常信号（§5.8） |
+| **TM5** | **注意力耗尽攻击**：Agent 经上报通道刷 blocker 制造 Interrupt 洪水 | 上报确定性限流与去重；每 Run 设 Interrupt 子配额，触顶即异常信号（§5.8） |
 | **TM6** | **worktree 之外的一切都不受保护**（展开见下） | V0 只能缓解、无法闭合；边界如实声明 |
 
 **「策略从 base 分支读取」是 TM2 的关键**，比单纯保护路径更强：一个提议修改 `.sift/` 的变更，**仍然按旧策略受审**。配置变更由它所要替换的那份配置来把关，Agent 无法在同一次提交里既放宽护栏、又享受放宽后的护栏。
@@ -777,10 +798,12 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 
 | 项 | 要求 |
 |----|------|
-| 部署 | 单机单实例守护进程 |
+| 部署 | 单机单实例守护进程（每个安装一个实例，实例间无协调，§2.1）。macOS 由 launchd user agent 托管；采用 systemd 的 Linux 由 systemd user unit 托管；无 systemd 的 Linux 仍须支持前台运行，但 V0 不承诺自动常驻 |
+| **兼容性** | **macOS 与 Linux，arm64 与 amd64 四种运行组合**，不能只证明“能编译”。每组合至少跑安装与二进制级冒烟，每个 OS 至少跑一次完整闭环与恢复矩阵。平台差异只允许出现在常驻托管与沙箱后端两处；路径、文件契约、恢复逻辑两平台同行为 |
+| **分发** | `siftd`、`sift`、`sift-agent-wrapper` **三个同版本、自包含的原生二进制组成一个发布归档**，附版本 manifest 与校验和，目标机不需要安装语言运行时；Homebrew tap 与 Release 归档两条安装路径。安装与升级以整套归档为原子单位，校验后切换版本目录并重启托管单元；禁止逐文件覆盖。迁移只能前向执行，遇到比自己新的库版本拒绝启动 |
 | 依赖 | **被已配置项目引用到的** forge CLI 需已安装并登录；未被引用的不作要求。探测不通过则拒绝启动 |
 | 持久化 | 进程重启不丢 Run 状态与轮询游标；重启后核对 running 进程 / worktree |
-| 安全 | 无监听端口；Sift 自身不落盘凭证（凭证由 CLI 持有）；驱动性事件一律 actor 鉴权（§9.2）；默认硬护栏不可豁免（§5.4）；敏感配置不热加载 + 指纹校验（§9.1 TM6）。**权限收紧防的是别的用户，防不了同属主的 Agent——该边界 V0 不闭合** |
+| 安全 | 无监听端口；Sift 自身不落盘 **forge 凭证**（由 `gh` / `glab` 持有）；本地 operator / run / bootstrap capability 的落盘、权限与生命周期见 DESIGN，且同属主 Agent 可读取的边界归 TM6；驱动性事件一律 actor 鉴权（§9.2）；默认硬护栏不可豁免（§5.4）；敏感配置不热加载 + 指纹校验（§9.1 TM6）。**权限收紧防的是别的用户，防不了同属主的 Agent——该边界 V0 不闭合** |
 | 暴露面 | **零**。守护进程不监听任何网络端口 |
 | 延迟 | Issue 打标 → Agent 启动 **P50 < 60s**（含轮询等待与一次分派调用） |
 | 成本 | 三类预算并存：每日 LLM token 上限、每小时 forge API 调用上限、**每日注意力（Interrupt）配额**；均超限即降级并通知 |
@@ -802,10 +825,11 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 | **并发** | ≥3 个 Run 并行期间，打扰次数不突破注意力配额（§5.5），且触及配额时确实降级为合批摘要而非照发 |
 | **负样本** | 至少 1 次 Sift 拦下了一个本不该合并的变更（硬护栏或人审拒绝） |
 | 安全（**仅 repo 级**） | 至少验证一次 TM2/TM3：Agent 改动 `.sift/**` 或 CI 配置被硬护栏拦下，且不可软豁免。**注意：本条通过 ≠ 威胁模型闭合**——TM6 的全局级暴露（`~/.sift/`、已登录 CLI、共享 `.git`）V0 明确不闭合 |
-| 门禁 | 硬护栏违规任务不能进入 done |
+| 门禁 | **Sift 发起的合并**中，硬护栏违规任务一律不得合并（因此不进入 `done`）。人在 forge 上手工合并是 Sift 管不到的外部事实，以 `gate_bypassed` 审计属性与指标反映，**不作为本条的失败**——把 Sift 控制不了的事写成验收标准，只会换来一条永远无法诚实勾选的项 |
 | 注意力 | 至少一类 HITL 能推送并通过一条 forge 评论完成审批（含手机端验证一次） |
 | 多 Agent | 配置中存在 ≥2 个 Agent 定义且均通过校验；其中 1 个真实跑通 |
 | 恢复 | 杀死 `siftd` 后重启，不出现「幽灵 running」，轮询游标不回退不丢事件 |
+| **发布** | 在干净的 macOS 与采用 systemd 的 Linux 机器上分别从发布归档安装整套三二进制并跑通一次；四种 OS/架构组合均有安装与冒烟证据 |
 
 > **「负样本」在本文有两个不同含义，别混。** 这里的 PoC 负样本是**演示门禁会拦**，一次即可；§5.6 影子门禁生效条件里的负样本绝对数量下限是**统计意义上的阈值认证**，需要几十个量级。**PoC 拦下一次 ≠ `auto_merge` 可以开了**；开启 `auto_merge` 永远只看 §5.6 的硬门槛。
 
@@ -814,7 +838,8 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 | 指标 | 定义 | 地位 |
 |------|------|------|
 | **Human 分钟数 / 已合并 Change** | 人在该 Change 上的实际投入。**代理口径**见下 | **北极星** |
-| **误放行率** | 自动合并后被 revert 或紧急修复的比例 | **质量红线**——对一个叫筛子的产品，这比自主闭环率重要 |
+| **误放行率** | 自动合并后被 revert 或紧急修复的比例。**分母只含 Sift 发起的合并**；带 `gate_bypassed` 的手工合并不计入 | **质量红线**——对一个叫筛子的产品，这比自主闭环率重要 |
+| **门禁绕过率** | 带 `gate_bypassed` 的 `done` 占全部 `done` 的比例（§4.1） | 观察。它测的是**人绕过筛子的频率**，不是筛子失效——但若持续偏高，说明门禁太慢或太吵，是产品信号 |
 | **Gate 漏放率** | Gate 预判放行但人拒绝的比例，**仅在负样本上计算**（影子门禁产出） | 决定能否放开自动合并的唯一致命指标 |
 | Gate 误拦率 | Gate 预判拦截但人放行的比例 | 与注意力配额权衡 |
 | HITL 率 | 需人介入的 Run 占比 | 观察 |
@@ -842,14 +867,15 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 
 | 阶段 | 内容 | 前置条件 |
 |------|------|----------|
-| **0（V0 内）** | 落地 `min_modality` 字段与 `headline` 可朗读约束；`sift speak <run>` 用系统 TTS 朗读 Interrupt | 无。目的是 dogfood「可朗读性」这条设计约束，不是交付功能 |
-| 1 | 单向播报：Interrupt 转语音推到手机 | 阶段 0 证明 headline 确实可朗读 |
-| 2 | 有限选项的语音应答，仅对 `min_modality == voice` 的 Interrupt 开放（`agent_blocked` / `failure_review` / `merge_conflict` 分诊） | 阶段 1 + 语音识别置信度门槛 + 二次确认 |
-| 3 | 双向实时对话：口述澄清注入 Task Spec | 阶段 2 |
+| **0（V0 内）** | 落地 `min_modality` 字段与 `headline` 可朗读约束；用 schema、渲染快照与人工抽样 dogfood 可朗读性，**不交付 TTS 命令** | 无 |
+| 1 | 本地单向播报：`sift speak <run>`；macOS / Linux 的 TTS backend、依赖与发布形态先单独裁决 | 阶段 0 的结构稳定 + 两平台能力 spike |
+| 2 | 单向播报：Interrupt 转语音推到手机 | 阶段 1 证明 headline 确实可朗读 |
+| 3 | 有限选项的语音应答，仅对 `min_modality == voice` 的 Interrupt 开放（`agent_blocked` / `failure_review` / `merge_conflict` 分诊） | 阶段 2 + 语音识别置信度门槛 + 二次确认 |
+| 4 | 双向实时对话：口述澄清注入 Task Spec | 阶段 3 |
 
 **永久红线：`min_modality: visual` 的 Interrupt（含全部 `code_review`）永不开放语音放行。**
 
-红线从阶段 0 就要执行：`sift speak` 遇到 `min_modality: visual` 必须**拒绝朗读**并提示改用文字/视觉渠道。一个无差别朗读的 `sift speak`，等于在阶段 0 就给 `code_review` 开了语音通道。
+红线从阶段 0 就进入 renderer 契约：任何未来的 TTS renderer 遇到 `min_modality: visual` 必须**拒绝朗读**并提示改用文字/视觉渠道。一个无差别朗读的 renderer，等于给 `code_review` 开了语音通道。
 
 配套 **Availability 模型**（作为 T6 打扰调度的输入）：
 
@@ -878,9 +904,9 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 | 10 | 默认硬护栏中 CI 配置路径的完整清单（两平台的等价路径） | 实现 Gate 时 | 开放 |
 | 11 | 北极星代理口径中各 `reason` 的耗时权重初值 | 首次抽样校准时 | 开放 |
 | 12 | critical 熔断的窗口与阈值 | 首次 ≥3 Run 并发前 | 开放 |
-| 13 | **TM6 的收口方案**：候选含「完全沙箱」与「**最小凭证沙箱**」（只挂 agent CLI 凭证、不挂 forge 凭证，§9.1）。需一并回答共享 `.git` 如何处置、以及哪些 Agent 的鉴权形态可挂载 | **DESIGN 必须正面回答**（已从 Backlog 提前） | 开放。**V0 明确不闭合**。答案会反过来决定 §5.2「零凭证管理」的措辞是否要加星号——这是价值主张与威胁模型之间唯一可能无法两全的分叉 |
-| 14 | `max_escalations` 的取值与达上限后各 reason 的默认终态 | 实现状态机时 | 开放（§4.2） |
-| 15 | 技术栈（倾向 Bun + TypeScript 单进程，可推翻） | DESIGN 文档 | 开放 |
+| 13 | **TM6 的收口方案**：候选含「完全沙箱」与「**最小凭证沙箱**」（只挂 agent CLI 凭证、不挂 forge 凭证，§9.1）。需一并回答共享 `.git` 如何处置、以及哪些 Agent 的鉴权形态可挂载 | DESIGN | **已结案（[DESIGN §9.1](DESIGN.md) / [ADR-007](decisions/007-tm6-minimal-credential-sandbox-direction.md)）**：方向定为最小凭证沙箱，**V0 不实施**，只留 launcher 接缝并如实声明；共享 `.git` 的处置（沙箱内完整 clone）随沙箱立项再答；凭证形态 spike 是本方向的证伪条件。§5.2「零凭证管理」已加星号 |
+| 14 | `max_escalations` 的取值与达上限后各 reason 的默认去向 | 实现状态机时 | 开放（§4.2） |
+| 15 | 技术栈（倾向 Bun + TypeScript 单进程，可推翻） | DESIGN 文档 | **已结案（[ADR-009](decisions/009-tech-stack-go.md)）**：**Go** + SQLite(WAL)，单模块三二进制。原结案为 Bun + TypeScript（[ADR-001](decisions/001-tech-stack-bun-typescript.md)，已 `superseded`）；推翻原因是本次新增的分发与多平台需求（§9.3）使原决策的前提与其风险退路同时失效 |
 
 ---
 
@@ -891,8 +917,8 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 | 文档 | 状态 |
 |------|------|
 | `docs/PRD.md` | **本稿** |
-| `docs/DESIGN.md` | 待写（架构、数据、配置、Forge 适配层）。必须把 §3.4 的并行取证模型落成架构约束——影子门禁是 day-1 常驻记录器，不是某个阶段 |
-| `docs/WBS.md` | 待写（里程碑与验收）。回放集导出与 Gate 同期，见 §10.3 |
+| [`docs/DESIGN.md`](DESIGN.md) | **D0.10 · active · 已通过**。review-16 修订见 DESIGN §14.13；[review-18](reviews/2026-07-28-design-review-kimi-k3-06.md) 已独立核销全部阻断并允许进入 WBS，唯一非阻断遗留及后续处置见 DESIGN §14.14。§3.4 的并行取证模型已落成架构约束——影子门禁随 Gate 落地即常驻无开关 |
+| `docs/WBS.md` | 待写（方案已通过，可进入 WBS）。回放集导出与 Gate 同期，见 §10.3 |
 
 ### 13.1 已采纳的架构约束（PRD 层拍板，DESIGN 只展开不重议）
 
@@ -901,14 +927,13 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 | 约束 | 出处 | 它承载的需求 |
 |------|------|-------------|
 | Forge 集成走 CLI 的 `api` 子命令（plumbing），不用 porcelain | §5.2 | 契约稳定性、零凭证管理 |
-| Change 由 Sift 创建，Agent 只提交分支 | §5.1 | A1：确定性动作不交给概率性执行体 |
+| Change 由 Sift 在成功完成证据后创建，Agent 只提交分支 | §5.1 | A1：确定性动作不交给概率性执行体；失败 attempt 的中间提交不外泄为 Change |
+| merge 由 forge 对 Gate 裁定的 expected head 做条件检查 | §5.2 | 旧 Gate 结论不得合并后来更新的 head |
 | 策略从 base 分支读取，不读 worktree | §9.1 TM2 | Agent 不能改写自己的门禁 |
 | actor 经 events / timeline 接口回溯，取不到即忽略 | §9.2 | 驱动性事件的鉴权闸门 |
 | 敏感配置启动期读入 + 指纹校验，运行期不热加载 | §9.1 TM6 | 缓解 worktree 外的暴露 |
 
-仍属 DESIGN 自由度的（不要在 PRD 里替它决定）：技术栈（§12 #15）、存储形态、进程模型、Channel 实现。
-
-**DESIGN 的第一个议题是 §12 #13**（TM6 收口 / 最小凭证沙箱）——它不是普通开放问题，是唯一可能改写产品价值主张措辞的分叉，越晚回答代价越大。
+这些仍是 DESIGN 层的裁决范围，而不是 PRD 约束：技术栈（§12 #15）、存储形态、进程模型、Channel 实现。其中技术栈已由 ADR-009 结案；TM6 收口方向已由 DESIGN §9.1 / ADR-007 结案但 V0 不实施；其余现行结论以 DESIGN 与 ADR 为准，PRD 不复制。
 
 ### 13.2 文档卫生
 
@@ -916,4 +941,4 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 
 ---
 
-_文档版本：V0.2 | 2026-07-27_
+_文档版本：V0.8 | 2026-07-28_（版本间变更见 [CHANGELOG.md](CHANGELOG.md)）
