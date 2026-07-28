@@ -31,9 +31,10 @@ type Adapter struct {
 	Kind Kind
 	Run  Runner
 
-	// charger, when set, reserves one unit of forge API budget before each
-	// CLI subprocess (forge.md §9). A nil charger disables charging.
-	charger Charger
+	// charger reserves one unit of Forge API budget before each CLI subprocess.
+	// Production adapters set requireBudget; tests may omit it.
+	charger       Charger
+	requireBudget bool
 
 	mu                 sync.RWMutex
 	autoMergeSupported map[string]bool
@@ -62,6 +63,14 @@ func (a *Adapter) WithCharger(c Charger) *Adapter {
 	return a
 }
 
+// RequireBudget makes this adapter reject external calls unless the daemon has
+// installed a charger and the caller supplied a stable charge-key context.
+// Fake adapters intentionally leave this disabled.
+func (a *Adapter) RequireBudget() *Adapter {
+	a.requireBudget = true
+	return a
+}
+
 // WithAutoMergeCapabilityReader makes MergeChange consume the durable project
 // capability projection in addition to this process's startup probe result.
 func (a *Adapter) WithAutoMergeCapabilityReader(r AutoMergeCapabilityReader) *Adapter {
@@ -78,10 +87,16 @@ func (a *Adapter) WithAutoMergeCapabilityReader(r AutoMergeCapabilityReader) *Ad
 // with no charger or no charge-key base it is a no-op.
 func (a *Adapter) chargeAPICall(ctx context.Context, p ProjectRef) error {
 	if a.charger == nil {
+		if a.requireBudget {
+			return &ClassifiedError{Class: ErrContractViolation, Summary: "production forge adapter requires a charger"}
+		}
 		return nil
 	}
 	base, ok := chargeKeyBaseFrom(ctx)
 	if !ok || base == "" {
+		if a.requireBudget {
+			return &ClassifiedError{Class: ErrContractViolation, Summary: "forge call requires a stable charge key"}
+		}
 		return nil
 	}
 	a.mu.Lock()
@@ -159,6 +174,16 @@ func unsupportedCAS(err error) bool {
 }
 func NewGitHub(c string, r Runner) *Adapter { return NewAdapter(KindGitHub, c, r) }
 func NewGitLab(c string, r Runner) *Adapter { return NewAdapter(KindGitLab, c, r) }
+
+// NewProductionAdapter is the daemon-only constructor. Unlike NewAdapter,
+// which remains useful for contract tests and fakes, it cannot be used
+// without the storage-backed budget charger.
+func NewProductionAdapter(k Kind, cli string, r Runner, charger Charger) (*Adapter, error) {
+	if charger == nil {
+		return nil, errors.New("forge: production adapter requires charger")
+	}
+	return NewAdapter(k, cli, r).WithCharger(charger).RequireBudget(), nil
+}
 
 var retryAfterPattern = regexp.MustCompile(`(?i)(?:retry-after|x-ratelimit-reset|rate-limit-reset)[:= ]+([0-9]+)`)
 

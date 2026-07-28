@@ -67,6 +67,9 @@ func (p *Poller) pollProject(ctx context.Context, project Project, now time.Time
 	if err != nil {
 		return err
 	}
+	// The cursor is frozen for this poll transaction, so it is also a stable
+	// replay identity for every Forge call in the tick.
+	ctx = forge.WithChargeKey(ctx, "intake:"+project.ID+":"+cur.Cursor)
 	issues, next, err := p.Forge.ListIssuesByLabel(ctx, project.Ref, project.TriggerLabel, forge.Cursor(cur.Cursor))
 	if err != nil {
 		return err

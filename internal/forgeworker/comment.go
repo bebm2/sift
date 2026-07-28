@@ -46,7 +46,7 @@ func (w *CommentWorker) RunOnce(ctx context.Context) error {
 	if now.IsZero() {
 		now = time.UnixMilli(1)
 	}
-	c, err := w.DB.ClaimOutboxOperation(ctx, w.WorkerID, now.UnixMilli(), w.Lease.Milliseconds())
+	c, err := w.DB.ClaimOutboxOperationKind(ctx, w.WorkerID, storage.OperationForgeComment, now.UnixMilli(), w.Lease.Milliseconds())
 	if err != nil || c == nil {
 		return err
 	}
@@ -59,9 +59,17 @@ func (w *CommentWorker) RunOnce(ctx context.Context) error {
 	}
 	ref := forge.ProjectRef{Kind: forge.Kind(p.ForgeKind), Host: p.ForgeHost, ProjectKey: p.ForgeProjectKey}
 	target := forge.TargetRef{Kind: forge.TargetKind(p.TargetKind), ID: p.TargetID}
+	// An outbox attempt is the replay identity for all Forge calls made here.
+	ctx = forge.WithChargeKey(ctx, "forge-call:"+c.AttemptID)
 	digest := stringDigest(c.Payload)
 	marker := forge.OperationMarker(c.Key, digest)
-	comments, next, err := w.Client.ListIssueComments(ctx, ref, p.TargetID, "")
+	var comments []forge.Comment
+	var next forge.Cursor
+	if target.Kind == forge.TargetChange {
+		comments, next, err = w.Client.ListChangeComments(ctx, ref, p.TargetID, "")
+	} else {
+		comments, next, err = w.Client.ListIssueComments(ctx, ref, p.TargetID, "")
+	}
 	_ = next
 	if err == nil {
 		for _, comment := range comments {

@@ -1,0 +1,84 @@
+// Package daemon assembles the production siftd workers. Keeping construction
+// here makes it difficult for a command entry point to accidentally create a
+// Forge adapter without the budget and stable-key policy.
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/miaoxiaoyong/sift/internal/brain"
+	"github.com/miaoxiaoyong/sift/internal/config"
+	"github.com/miaoxiaoyong/sift/internal/forge"
+	"github.com/miaoxiaoyong/sift/internal/forgebudget"
+	"github.com/miaoxiaoyong/sift/internal/forgeworker"
+	"github.com/miaoxiaoyong/sift/internal/intake"
+	"github.com/miaoxiaoyong/sift/internal/storage"
+)
+
+type Daemon struct {
+	DB       *storage.DB
+	Pollers  []*intake.Poller
+	Comments []*forgeworker.CommentWorker
+	Now      func() time.Time
+	mu       sync.Mutex
+}
+
+// Assemble creates one production Forge adapter, Intake poller/T1 evaluator,
+// and kind-scoped comment worker per enabled project. The caller owns DB.
+func Assemble(db *storage.DB, cfg *config.Config, now func() time.Time) (*Daemon, error) {
+	if db == nil || cfg == nil {
+		return nil, errors.New("daemon: database and config are required")
+	}
+	if now == nil {
+		now = time.Now
+	}
+	d := &Daemon{DB: db, Now: now}
+	for _, p := range cfg.Projects {
+		if !p.Enabled {
+			continue
+		}
+		ref := forge.ProjectRef{Kind: forge.Kind(p.Forge.Kind), Host: p.Forge.Host, ProjectKey: p.Forge.Project}
+		charger := &forgebudget.Charger{DB: db, Limit: int64(cfg.Forge.HourlyAPILimit), WarningRatio: cfg.Forge.WarningRatio, Now: now}
+		adapter, err := forge.NewProductionAdapter(ref.Kind, p.Forge.CLI, nil, charger)
+		if err != nil {
+			return nil, fmt.Errorf("project %s: %w", p.ID, err)
+		}
+		adapter.WithAutoMergeCapabilityReader(db)
+		project := intake.Project{ID: p.ID, Ref: ref, TriggerLabel: cfg.Labels.Trigger, OperatorAllowlist: operators(cfg.Operators, ref.Kind)}
+		evaluator := &intake.T1Evaluator{DB: db, Brain: brain.NewShell(db, cfg.Brain, brain.SubprocessProvider{Executable: cfg.Brain.Executable, Args: cfg.Brain.Args}, now), Now: now}
+		poller := &intake.Poller{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now, Idle: cfg.Scheduler.IntakeIdleInterval, Active: cfg.Scheduler.IntakeActiveInterval, Slow: cfg.Forge.SlowPollInterval, HourlyLimit: int64(cfg.Forge.HourlyAPILimit), WarningRatio: cfg.Forge.WarningRatio, OnIssue: evaluator.EvaluateIssue}
+		d.Pollers = append(d.Pollers, poller)
+		d.Comments = append(d.Comments, &forgeworker.CommentWorker{DB: db, Client: adapter, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:comment:" + p.ID})
+	}
+	return d, nil
+}
+
+func operators(o config.Operators, k forge.Kind) []string {
+	if k == forge.KindGitLab {
+		return append([]string(nil), o.GitLab...)
+	}
+	return append([]string(nil), o.GitHub...)
+}
+
+// Tick advances Intake and then one comment operation per project. A project
+// failure is returned with its identity; the scheduler may continue other
+// projects on the next tick.
+func (d *Daemon) Tick(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i, p := range d.Pollers {
+		if err := p.PollOnce(ctx); err != nil {
+			return fmt.Errorf("intake[%d]: %w", i, err)
+		}
+	}
+	for i, w := range d.Comments {
+		if err := w.RunOnce(ctx); err != nil {
+			return fmt.Errorf("comment[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
