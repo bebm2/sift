@@ -216,7 +216,8 @@ type rawIssue struct {
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
-	Pull *json.RawMessage `json:"pull_request"`
+	UpdatedAt time.Time        `json:"updated_at"`
+	Pull      *json.RawMessage `json:"pull_request"`
 }
 
 func (a *Adapter) issue(x rawIssue) (Issue, error) {
@@ -238,9 +239,17 @@ func (a *Adapter) issue(x rawIssue) (Issue, error) {
 	return Issue{ID: id, Title: x.Title, Body: x.Body, Author: author, URL: link, State: state, Labels: sortDedupe(labels)}, nil
 }
 func (a *Adapter) ListIssuesByLabel(ctx context.Context, p ProjectRef, label string, since Cursor) ([]Issue, Cursor, error) {
+	tracker, err := newCursorTracker(since)
+	if err != nil {
+		return nil, "", err
+	}
 	path := a.base(p) + "/issues?labels=" + url.QueryEscape(label)
-	if since != "" {
-		path += "&since=" + url.QueryEscape(string(since))
+	if tracker.queryTime() != "" {
+		key := "since"
+		if a.Kind == KindGitLab {
+			key = "updated_after"
+		}
+		path += "&" + key + "=" + url.QueryEscape(tracker.queryTime())
 	}
 	if a.Kind == KindGitHub {
 		path += "&state=open&sort=updated&direction=asc"
@@ -248,13 +257,11 @@ func (a *Adapter) ListIssuesByLabel(ctx context.Context, p ProjectRef, label str
 		path += "&state=opened&order_by=updated_at&sort=asc"
 	}
 	out := []Issue{}
-	n := 0
 	e := a.pages(ctx, p, path, func(raw []byte) error {
 		var xs []rawIssue
 		if json.Unmarshal(raw, &xs) != nil {
 			return &ClassifiedError{Class: ErrContractViolation, Summary: "invalid issue list"}
 		}
-		n += len(xs)
 		for _, x := range xs {
 			if a.Kind == KindGitHub && x.Pull != nil {
 				continue
@@ -263,11 +270,17 @@ func (a *Adapter) ListIssuesByLabel(ctx context.Context, p ProjectRef, label str
 			if e != nil {
 				return e
 			}
-			out = append(out, i)
+			newItem, e := tracker.add(i.ID, x.UpdatedAt)
+			if e != nil {
+				return e
+			}
+			if newItem {
+				out = append(out, i)
+			}
 		}
 		return nil
 	})
-	return out, Cursor(strconv.Itoa(n)), e
+	return out, tracker.next(), e
 }
 func (a *Adapter) GetIssue(ctx context.Context, p ProjectRef, id string) (Issue, error) {
 	var x rawIssue
@@ -290,33 +303,44 @@ type rawComment struct {
 }
 
 func (a *Adapter) listComments(ctx context.Context, p ProjectRef, id string, since Cursor) ([]Comment, Cursor, error) {
-	path := a.base(p) + "/issues/" + pathPart(id) + "/comments"
-	if since != "" {
-		path += "?since=" + url.QueryEscape(string(since))
+	tracker, err := newCursorTracker(since)
+	if err != nil {
+		return nil, "", err
 	}
+	path := a.base(p) + "/issues/" + pathPart(id) + "/comments"
 	if a.Kind == KindGitLab {
 		path = a.base(p) + "/issues/" + pathPart(id) + "/notes"
 	}
+	if tracker.queryTime() != "" {
+		key := "since"
+		if a.Kind == KindGitLab {
+			key = "created_after"
+		}
+		path += "?" + key + "=" + url.QueryEscape(tracker.queryTime())
+	}
 	out := []Comment{}
-	n := 0
 	e := a.pages(ctx, p, path, func(raw []byte) error {
 		var xs []rawComment
 		if json.Unmarshal(raw, &xs) != nil {
 			return &ClassifiedError{Class: ErrContractViolation, Summary: "invalid comment list"}
 		}
-		n += len(xs)
 		for _, x := range xs {
-			author := x.User.Login
-			if a.Kind == KindGitLab {
-				author = x.Author.Username
+			comment := Comment{ID: strconv.FormatInt(x.ID, 10), Body: x.Body, CreatedAt: x.CreatedAt}
+			newItem, e := tracker.add(comment.ID, comment.CreatedAt)
+			if e != nil {
+				return e
 			}
-			if author != "" {
-				out = append(out, Comment{ID: strconv.FormatInt(x.ID, 10), Author: author, Body: x.Body, CreatedAt: x.CreatedAt})
+			comment.Author = x.User.Login
+			if a.Kind == KindGitLab {
+				comment.Author = x.Author.Username
+			}
+			if newItem && comment.Author != "" {
+				out = append(out, comment)
 			}
 		}
 		return nil
 	})
-	return out, Cursor(strconv.Itoa(n)), e
+	return out, tracker.next(), e
 }
 func (a *Adapter) ListIssueComments(c context.Context, p ProjectRef, id string, s Cursor) ([]Comment, Cursor, error) {
 	return a.listComments(c, p, id, s)
@@ -615,6 +639,10 @@ func targetPath(a *Adapter, p ProjectRef, t TargetRef, suffix string) (string, e
 	return a.base(p) + "/" + name + "/" + pathPart(t.ID) + suffix, nil
 }
 func (a *Adapter) ListLabelEvents(ctx context.Context, p ProjectRef, t TargetRef, since Cursor) ([]LabelEvent, Cursor, error) {
+	tracker, err := newCursorTracker(since)
+	if err != nil {
+		return nil, "", err
+	}
 	path, e := targetPath(a, p, t, "")
 	if e != nil {
 		return nil, "", e
@@ -624,10 +652,17 @@ func (a *Adapter) ListLabelEvents(ctx context.Context, p ProjectRef, t TargetRef
 	} else {
 		path += "/resource_label_events"
 	}
+	if tracker.queryTime() != "" {
+		key := "since"
+		if a.Kind == KindGitLab {
+			key = "created_after"
+		}
+		path += "?" + key + "=" + url.QueryEscape(tracker.queryTime())
+	}
 	out := []LabelEvent{}
-	n := 0
 	e = a.pages(ctx, p, path, func(raw []byte) error {
 		var xs []struct {
+			ID    int64 `json:"id"`
 			Label struct {
 				Name string `json:"name"`
 			} `json:"label"`
@@ -644,8 +679,11 @@ func (a *Adapter) ListLabelEvents(ctx context.Context, p ProjectRef, t TargetRef
 		if json.Unmarshal(raw, &xs) != nil {
 			return &ClassifiedError{Class: ErrContractViolation, Summary: "invalid label event list"}
 		}
-		n += len(xs)
 		for _, x := range xs {
+			newItem, e := tracker.add(strconv.FormatInt(x.ID, 10), x.Created)
+			if e != nil {
+				return e
+			}
 			actor := x.Actor.Login
 			if a.Kind == KindGitLab {
 				actor = x.User.Username
@@ -664,11 +702,13 @@ func (a *Adapter) ListLabelEvents(ctx context.Context, p ProjectRef, t TargetRef
 			} else {
 				continue
 			}
-			out = append(out, LabelEvent{TargetID: t.ID, Label: x.Label.Name, Action: LabelAction(act), Actor: actor, ObservedAt: x.Created})
+			if newItem {
+				out = append(out, LabelEvent{TargetID: t.ID, Label: x.Label.Name, Action: LabelAction(act), Actor: actor, ObservedAt: x.Created})
+			}
 		}
 		return nil
 	})
-	return out, Cursor(strconv.Itoa(n)), e
+	return out, tracker.next(), e
 }
 func (a *Adapter) CommentTarget(ctx context.Context, p ProjectRef, t TargetRef, body string) (string, error) {
 	path, e := targetPath(a, p, t, "/comments")

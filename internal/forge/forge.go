@@ -92,7 +92,6 @@ type Change struct {
 	IsDraft          bool
 	MergedAt         time.Time
 }
-type Cursor string
 type Comment struct {
 	ID, Author, Body string
 	CreatedAt        time.Time

@@ -122,8 +122,8 @@ func runV3Suite(t *testing.T, p v3Platform) {
 		if calls != 2 {
 			t.Fatalf("subprocess calls=%d, want 2 (one per page)", calls)
 		}
-		if string(cur) != "101" {
-			t.Fatalf("cursor=%q, want 101", cur)
+		if cur == "" || string(cur) == "101" {
+			t.Fatalf("cursor=%q, want opaque timestamp/id cursor", cur)
 		}
 		if issues[0].Author == "" || issues[0].URL == "" {
 			t.Fatalf("first issue not normalized: %+v", issues[0])
@@ -296,10 +296,10 @@ func v3Page(k Kind, first, count int) []byte {
 	for i := 0; i < count; i++ {
 		n := first + i
 		if k == KindGitLab {
-			rows[i] = fmt.Sprintf(`{"iid":%d,"title":"t","body":"b","web_url":"https://x/%d","state":"opened","author":{"username":"a"},"labels":[{"name":"sift"}]}`, n, n)
+			rows[i] = fmt.Sprintf(`{"iid":%d,"title":"t","body":"b","web_url":"https://x/%d","state":"opened","updated_at":"2026-01-01T00:00:%02dZ","author":{"username":"a"},"labels":[{"name":"sift"}]}`, n, n, n%60)
 			continue
 		}
-		rows[i] = fmt.Sprintf(`{"number":%d,"title":"t","body":"b","html_url":"https://x/%d","state":"open","user":{"login":"a"},"labels":[{"name":"sift"}]}`, n, n)
+		rows[i] = fmt.Sprintf(`{"number":%d,"title":"t","body":"b","html_url":"https://x/%d","state":"open","updated_at":"2026-01-01T00:00:%02dZ","user":{"login":"a"},"labels":[{"name":"sift"}]}`, n, n, n%60)
 	}
 	return []byte("[" + strings.Join(rows, ",") + "]")
 }

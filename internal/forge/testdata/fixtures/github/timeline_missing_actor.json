@@ -1,11 +1,13 @@
 [
   {
+    "id": 1,
     "event": "labeled",
     "actor": { "login": "trusted-operator" },
     "label": { "name": "sift" },
     "created_at": "2026-01-01T00:00:00Z"
   },
   {
+    "id": 2,
     "event": "labeled",
     "actor": {},
     "label": { "name": "sift" },
