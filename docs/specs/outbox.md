@@ -133,11 +133,13 @@ min(retry_max_delay, retry_initial_delay * retry_multiplier^(n-1))
 - `forge_alert.purpose = channel_failure | project_isolated | config_drift | token_budget_exceeded`；
 - payload 不存 marker，避免 digest 自引用；worker 在执行时由 operation key + 已冻结 payload digest 重算并追加 marker。
 
-intake 目的的 comment payload 额外携带 `intake_id` 与 `generation`，outbox 行 `run_id` 保持 NULL，不伪造 run 关联；marker 与查询协议不变。
+intake 目的的 comment payload 额外携带 `intake_id` 与 `generation`，outbox 行 `run_id` 保持 NULL，不伪造 run 关联；marker 与查询协议不变。该契约在 M1 冻结；真实 Forge comment worker、Intake 写端口接线及 crash marker 验收归属 [WBS M2 §2.3/§2.5](../WBS.md)，不能以 operation key/schema 已存在代替实现证据。
 
 `token_budget_exceeded` 告警：按通用 key 格式 `alert:<alert_kind>:<subject_id>:<generation>` 取 `alert:token_budget_exceeded:global:<bucket_start_ms>:1`（subject_id 为 `global:<bucket_start_ms>`，generation 固定 1），每 UTC 日桶最多一个 operation；它仍走正常 attention 预算扣费，不得因 token 告警突破注意力配额。语义见 [`brain.md` §6](brain.md)。
 
 ### 5.2 执行
+
+本执行协议随 M2 Forge 适配层落地；其中 Intake 澄清/确认评论的“远端成功、本地提交前崩溃”窗口是 M2 门禁。
 
 1. 按 marker 查询目标评论；唯一命中则 succeeded 并保存 remote comment id。
 2. 无命中才创建评论。
