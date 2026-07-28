@@ -168,8 +168,10 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] T2：生成 kind/agent/goals/开工前审批建议；失败兜底为人工分派（`T2Contract`，fallback 留待人工分派）
 - [x] 组装 Task Spec（Description + Goals + Guardrails + Context）；Context 从 base/全局/任务附注组合（`internal/brain/taskspec.go`）
 - [x] token 收费口只在调用壳；超限后所有触点走各自兜底并产生告警事件（`Shell.Call` 唯一收费口 + preflight fallback）
-- [ ] intake crash/replay 验收：澄清/确认评论「远端成功、本地提交前崩溃」按 outbox marker 收敛不重复发；旧 generation 回复只记审计不推进状态；replay JSONL 单条 `brain_call` record 内携有序 attempts
+- [x] replay JSONL 单条 `brain_call` record 内携有序 attempts（`ExportBrainCallsJSONL` + `TestExportBrainCallsJSONL`）
 - [x] M1 fake 链使用 fake provider 的合法 T2 输出；真实 CLI 壳通过 fixture/子进程测试（`FakeProvider.ValidT2ResultText` + `TestShellWithRealCLIFixture`）
+
+> Intake 澄清/确认评论的 crash marker 收敛与旧 generation 回复仲裁迁至 M2 §2.3/§2.5：两者依赖 M2 的真实 Forge comment worker、回复 receipt 消费与 `PersistIntakeDecision` 写端口。M1 只保留已实现、可独立验证的 Brain replay JSONL，不以 schema 或 outbox 通用框架冒充 Intake 实现。
 
 ### 先写 spec
 
@@ -217,6 +219,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] 每项目独立自适应轮询，游标在整批持久化后推进；幂等键 `(forge, project, issue_id)`
 - [ ] 触发标签事件先回溯 actor；不可信作者被可信 actor 触发时强制开工前审批
 - [ ] T1 接在归一 Issue 后；T1 不可用时直接入队
+- [ ] 实现 `intake_items` 投影/CAS、回复 receipt 消费与 `PersistIntakeDecision` 写端口；澄清/重复确认评论与 intake 状态变更由同一领域事务创建 outbox operation
+- [ ] 澄清/确认评论在「远端成功、本地提交前崩溃」后按 marker 查询收敛，不重复发送；覆盖真实 Forge comment worker 的崩溃重放测试
+- [ ] 回复按当前 clarification generation 仲裁；旧 generation 回复只追加审计事件，不推进 intake 状态
 - [ ] 逐项实现 PRD §4.5 反向同步；事实观测不套 actor 鉴权，移除触发标签必须鉴权
 - [ ] 运行期 `AuthOrCapability` 只隔离对应项目并告警一次；健康项目继续调度
 
@@ -228,6 +233,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 #### 2.5 契约与事实收敛测试
 
 - [ ] 双平台 fixture 跑同一契约套件：分页、actor 缺失、限流、平台差异、marker、merge CAS
+- [ ] intake 评论 worker 的远端成功/本地提交前崩溃重放不重复发送；旧 generation 回复只审计、不推进状态
 - [ ] V11 首段：fake/fixture 中让 `waiting_human` Run 的 Change 被外部合并，断言 `done + gate_bypassed`
 - [ ] V11 在 M4 闭合 Gate/审计/Ledger 分类，在 M5 闭合指标分母
 
@@ -240,6 +246,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [ ] V3 通过；V7 的 Forge/marker/CAS 部分通过
 - [ ] 条件合并能力缺失时 `auto_merge` 被结构性禁用
 - [ ] actor 缺失事件被忽略；坏项目不影响健康项目
+- [ ] Intake crash marker 与旧 generation 回复仲裁测试通过
 - [ ] V11 外部事实收敛首段通过
 
 ---
@@ -623,11 +630,11 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 | 文档 | 首次完成里程碑 | 后续同步 |
 |------|----------------|----------|
-| `specs/storage.md` | M1 | M3 resolution/隔离；M4 Ledger |
+| `specs/storage.md` | M1 | M2 Intake 投影/写端口；M3 resolution/隔离；M4 Ledger |
 | `specs/control-plane.md` | M1 | M3 wrapper；M5 Report |
 | `specs/config.md` | M1 | M3 时限；M5 预算/权重；M8 托管模板 |
-| `specs/outbox.md` | M1 | M2 marker/CAS；M3 启动；M5 发布/回执 |
-| `specs/brain.md` | M1（壳/T1/T2） | M4 T3/T5；M5 T4/T6/T7 |
+| `specs/outbox.md` | M1 | M2 Forge worker、Intake 评论 marker/CAS；M3 启动；M5 发布/回执 |
+| `specs/brain.md` | M1（壳/T1/T2、Brain replay） | M2 T1 Intake 接线/回复仲裁；M4 T3/T5；M5 T4/T6/T7 |
 | `specs/forge.md` | M2 | 随适配器契约同步 |
 | `specs/interrupt.md` | M3（全部 reason 最小契约） | M5 T4/T6、Channel、调度/renderer |
 | `specs/policy.md` | M4 | 随 Gate 策略同步 |

@@ -197,6 +197,8 @@ disposition 互斥矩阵（schema 层表达，领域后校验复核）：
 
 ### 7.3 pre-Run intake 投影与消费协议
 
+本节契约在 M1 冻结；投影/CAS、真实 Forge comment worker、回复 receipt 消费以及 crash/generation 验收在 [WBS M2 §2.3/§2.5](../WBS.md) 实现。它们必须随真实 Forge 适配层交付，不能用 M1 的 schema 或通用 outbox 框架代替实现证据。
+
 `needs_clarification`/`possible_duplicate` 不创建 Run，也不能只靠 event/trace 推导当前待办。权威投影为 [`storage.md` §7.5–§7.6](storage.md) 的 `intake_items`（可变）与 `intake_assessments`（不可变），唯一键 `(forge_kind, normalized_host, forge_project_key, issue_id)`。
 
 状态机：
@@ -300,24 +302,33 @@ T2 valid 后由确定性 assembler 生成：
 
 整份 canonical JSON 与 digest 写 immutable snapshot；初始版本为 1。`/sift ask` 创建下一版本并保留旧 snapshot，已启动 attempt 继续引用旧版本。
 
-## 10. M1 验收
+## 10. 分阶段验收
+
+### 10.1 M1：调用壳、T1/T2 与 Brain replay
 
 1. fixture 覆盖 valid first、invalid→valid、invalid→fallback、timeout、nonzero exit、oversize、usage missing、usage invalid、spawn failed。
 2. 两次 provider attempt 的 prompt bytes/request digest 完全相同；attempt identity 只差 provider_attempt；call 只经一次终结。
 3. 内层触点输出的 unknown field/type/enum/fenced JSON/尾随文本均拒绝，不尽力解析；外层 envelope 未知诊断字段接受、重复键拒绝。
 4. provider disabled 与 token threshold 写 `provider_attempt=0` attempt 行并走触点兜底。
 5. token：attempt 1 用量越界后禁止 attempt 2；越界 post-charge 全额入账；跨 UTC 日界按 attempt 开始冻结的桶收费；零 token usage 不写 budget entry；重复 operation key 不重复收费。
-6. T1：fallback 直接入队且不静默丢 Issue；LLM duplicate 建议不能绕过确定性确认；澄清评论在“远端成功、本地提交前崩溃”后按 outbox marker 收敛不重复发；旧 generation 回复只记审计、不推进状态。
+6. T1：fallback 直接入队且不静默丢 Issue；LLM duplicate 建议不能绕过确定性确认。
 7. T2 unknown/noncandidate Agent 触发同 prompt retry，最终进入人工分派；硬护栏不从 LLM 输出读取；hitl 强制规则不被 LLM `false` 降级；批准前 Run 不可 launch。
 8. Task Spec 的四段来源/hash 可重建；worktree 中 context/policy 修改不进入 snapshot。
 9. fake provider 合法 T2 输出可跑 M1 skeleton；真实 CLI 用 fixture 子进程测试，不依赖线上模型。
 10. replay JSONL 一条 `brain_call` record 内携有序 attempts，可区分两个 provider attempt 并还原最终 fallback。
 11. input 超过 `max_input_bytes` 时不调用 provider，走触点确定性兜底。
 
+### 10.2 M2：T1 Intake crash/generation
+
+以下验收依赖 M2 的真实 Forge comment worker、回复 receipt 消费与 `PersistIntakeDecision` 写端口，因此不属于 M1 退出条件：
+
+1. 澄清/确认评论在“远端成功、本地提交前崩溃”后按 outbox marker 查询收敛，不重复发送。
+2. 回复按当前 `clarification_generation` 仲裁；旧 generation 回复只追加审计事件，不推进 intake 状态。
+
 ## 11. 自查结果
 
 - [x] B1：call/attempt 拆表、一次性终结与 `provider_error_code` 枚举落 storage §10.1/§13；replay 单 record 携有序 attempts。
-- [x] B2：intake 投影、状态机、回复 generation 协议与 outbox 目的/key 完整；无未实现的悬空分支。
+- [x] B2：intake 投影、状态机、回复 generation 协议与 outbox 目的/key 的规格完整；实现与 crash/generation 验收明确归属 M2。
 - [x] B3：T1/T2 输入输出逐字段冻结，含枚举、长度、互斥矩阵与总输入上限；`.schema.json` 单一来源。
 - [x] B4–B7：token per-attempt 阈值与越界 post-charge、open-envelope 边界、截断/stderr 语义、T2 审批单事务均已写死。
 - [x] Task Spec 来源、hash、不可变版本与 control-plane transport 对齐；路径事实只引用 config.md。

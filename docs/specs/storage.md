@@ -496,6 +496,8 @@ T1 pre-Run 摄入投影，回答「该 Issue 正在等什么、哪组问题已�
 
 字段约束与 T1 output 互斥矩阵同源：ready 时 questions 空且 duplicate 为空；needs_clarification 时 questions 非空且 duplicate 为空；possible_duplicate 时 duplicate 非空且 questions 空。声明候选键 `(intake_id, id)` 供 intake_items 组合外键使用。
 
+M1 冻结上述表与约束，并仅实现 fake 骨架链所需的 Forge Run/receipt 原子写入；`intake_items` 投影 CAS、`PersistIntakeBatch`/`PersistIntakeDecision` 完整写端口、回复 receipt 消费与旧 generation 审计在 [WBS M2 §2.3](../WBS.md) 交付。数据库 schema 存在不作为这些 M2 行为的实现证据。
+
 ## 8. Transactional outbox
 
 ### 8.1 `outbox_operations`
@@ -814,8 +816,8 @@ Gate record 来自同一 snapshot/evaluation；Brain record 一条 logical recor
 | `TransitionRun(expectedVersion, command)` | runs + events + 可选 outbox/幂等记录 |
 | `SetInitialTaskSpec(expectedRunVersion, callIdentity)` | 幂等插入初始 Task Spec snapshot + Run 当前指针 + event |
 | `CommitT2Assignment` | T2 valid 的单事务提交：初始 Task Spec snapshot + Run kind/agent/status + 可选 `design_approval` Interrupt/预算/event/outbox；不得先 queued 再补 Interrupt |
-| `PersistIntakeBatch` | forge receipts、`pending_evaluation` intake 投影、Run/事实投影、events，最后推进 cursor |
-| `PersistIntakeDecision` | intake assessment + intake state CAS + event + 必要 outbox operation；ready/fallback 同事务幂等创建 Run 并写 `linked_run_id` |
+| `PersistIntakeBatch`（M2 Intake） | forge receipts、`pending_evaluation` intake 投影、Run/事实投影、events，最后推进 cursor |
+| `PersistIntakeDecision`（M2 Intake） | intake assessment + intake state CAS + event + 必要 outbox operation；ready/fallback 同事务幂等创建 Run 并写 `linked_run_id` |
 | `ChargeForgeAPICall(callAttemptKey)` | forge_api budget counter + entry；适配器每次外部调用尝试前预留且不退款，崩溃可能保守计费但不得超支 |
 | `ClaimOutboxOperation` | operation + immutable attempt start；reclaim 时先为旧 attempt 写 `retry/transient:lease_expired` result |
 | `PrepareLaunchDispatch` | lease/generation CAS + dispatch id + bootstrap/run token hash；提交后才可写 bootstrap/spawn wrapper |
