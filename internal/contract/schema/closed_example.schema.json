@@ -1,0 +1,34 @@
+{
+  "$id": "https://sift.dev/decode/closed_example.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "severity": {
+      "enum": [
+        "low",
+        "normal",
+        "high"
+      ],
+      "type": "string"
+    },
+    "timeout": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "name",
+    "severity"
+  ],
+  "title": "ClosedExample",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "closed",
+    "sourceType": "contract.ClosedExample"
+  }
+}

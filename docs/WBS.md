@@ -105,11 +105,11 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 1.1 Decode gateway、schema 与 CI
 
-- [ ] 单一 decode gateway，调用方显式选 `closed` 或 `open-envelope`
-- [ ] 配置、LLM 输出、socket 请求用 `closed`；Forge envelope 用 `open-envelope`，必需语义仍 fail closed
-- [ ] 结构体生成 JSON Schema 并入 git；schema 漂移使 CI 失败
-- [ ] V14 golden tests 覆盖缺失字段、额外字段、类型/枚举变型
-- [ ] 从本片起在 CI 构建 darwin/linux × arm64/amd64，保持 `CGO_ENABLED=0`
+- [x] 单一 decode gateway，调用方显式选 `closed` 或 `open-envelope`（`internal/decode`；调用方传 `decode.Closed`/`decode.OpenEnvelope`）
+- [ ] 配置、LLM 输出、socket 请求用 `closed`；Forge envelope 用 `open-envelope`，必需语义仍 fail closed（gateway 与两种模式已落；各消费者类型随各自切片接线）
+- [x] 结构体生成 JSON Schema 并入 git；schema 漂移使 CI 失败（`internal/contract/genschema` + CI `schema-drift` job）
+- [x] V14 golden tests 覆盖缺失字段、额外字段、类型/枚举变型（`internal/contract/contract_test.go`）
+- [x] 从本片起在 CI 构建 darwin/linux × arm64/amd64，保持 `CGO_ENABLED=0`（`build-matrix` job）
 
 #### 1.2 SQLite、事件与迁移
 

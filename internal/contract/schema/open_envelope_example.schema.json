@@ -1,0 +1,36 @@
+{
+  "$id": "https://sift.dev/decode/open_envelope_example.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "author": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "number": {
+      "type": "integer"
+    },
+    "state": {
+      "enum": [
+        "open",
+        "closed"
+      ],
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "number",
+    "state",
+    "title"
+  ],
+  "title": "OpenEnvelopeExample",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "open-envelope",
+    "sourceType": "contract.OpenEnvelopeExample"
+  }
+}
