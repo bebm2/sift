@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,6 +159,9 @@ func unsupportedCAS(err error) bool {
 }
 func NewGitHub(c string, r Runner) *Adapter { return NewAdapter(KindGitHub, c, r) }
 func NewGitLab(c string, r Runner) *Adapter { return NewAdapter(KindGitLab, c, r) }
+
+var retryAfterPattern = regexp.MustCompile(`(?i)(?:retry-after|x-ratelimit-reset|rate-limit-reset)[:= ]+([0-9]+)`)
+
 func classify(s string, e error) error {
 	q := strings.ToLower(s)
 	cl := ErrTransient
@@ -179,7 +183,19 @@ func classify(s string, e error) error {
 	if len(s) > 2048 {
 		s = s[:2048]
 	}
-	return &ClassifiedError{Class: cl, Summary: strings.TrimSpace(s)}
+	ce := &ClassifiedError{Class: cl, Summary: strings.TrimSpace(s)}
+	if cl == ErrRateLimited {
+		if m := retryAfterPattern.FindStringSubmatch(s); len(m) == 2 {
+			if n, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+				if strings.Contains(strings.ToLower(m[0]), "retry-after") {
+					ce.RetryAt = time.Now().Add(time.Duration(n) * time.Second)
+				} else {
+					ce.RetryAt = time.Unix(n, 0)
+				}
+			}
+		}
+	}
+	return ce
 }
 func (a *Adapter) call(ctx context.Context, p ProjectRef, path, method string, in []byte, v any) error {
 	if p.Kind != a.Kind {
@@ -269,8 +285,22 @@ func (a *Adapter) issue(x rawIssue) (Issue, error) {
 		return Issue{}, &ClassifiedError{Class: ErrContractViolation, Summary: "issue missing required field"}
 	}
 	state := IssueOpen
-	if x.State == "closed" {
-		state = IssueClosed
+	if a.Kind == KindGitHub {
+		switch x.State {
+		case "open":
+		case "closed":
+			state = IssueClosed
+		default:
+			return Issue{}, &ClassifiedError{Class: ErrContractViolation, Summary: "issue has unknown state"}
+		}
+	} else {
+		switch x.State {
+		case "opened":
+		case "closed":
+			state = IssueClosed
+		default:
+			return Issue{}, &ClassifiedError{Class: ErrContractViolation, Summary: "issue has unknown state"}
+		}
 	}
 	labels := []string{}
 	for _, l := range x.Labels {
@@ -416,13 +446,23 @@ func (a *Adapter) change(x rawChange) (Change, error) {
 	state := ChangeOpen
 	if a.Kind == KindGitLab {
 		id, url, sha = strconv.Itoa(x.IID), x.WebURL, x.DiffRefs.HeadSHA
-		if x.State == "merged" {
+		switch x.State {
+		case "opened":
+		case "merged":
 			state = ChangeMerged
-		} else if x.State == "closed" {
+		case "closed":
 			state = ChangeClosed
+		default:
+			return Change{}, &ClassifiedError{Class: ErrContractViolation, Summary: "change has unknown state"}
 		}
-	} else if x.State == "closed" {
-		state = ChangeClosed
+	} else {
+		switch x.State {
+		case "open":
+		case "closed":
+			state = ChangeClosed
+		default:
+			return Change{}, &ClassifiedError{Class: ErrContractViolation, Summary: "change has unknown state"}
+		}
 	}
 	if x.MergedAt != nil {
 		state = ChangeMerged
@@ -464,7 +504,45 @@ func (a *Adapter) change(x rawChange) (Change, error) {
 	}
 	return c, nil
 }
+
+func (a *Adapter) reviewState(ctx context.Context, p ProjectRef, id string) (ReviewState, error) {
+	if a.Kind == KindGitHub {
+		var reviews []struct {
+			State string `json:"state"`
+		}
+		if err := a.call(ctx, p, a.base(p)+"/pulls/"+pathPart(id)+"/reviews", "GET", nil, &reviews); err != nil {
+			return ReviewUnknown, err
+		}
+		for _, r := range reviews {
+			if r.State == "APPROVED" {
+				return Approved, nil
+			}
+			if r.State != "CHANGES_REQUESTED" && r.State != "COMMENTED" && r.State != "DISMISSED" && r.State != "PENDING" {
+				return ReviewUnknown, &ClassifiedError{Class: ErrContractViolation, Summary: "review has unknown state"}
+			}
+		}
+		return NotApproved, nil
+	}
+	var approvals struct {
+		ApprovedBy    []json.RawMessage `json:"approved_by"`
+		ApprovalsLeft *int              `json:"approvals_left"`
+	}
+	if err := a.call(ctx, p, a.base(p)+"/merge_requests/"+pathPart(id)+"/approvals", "GET", nil, &approvals); err != nil {
+		return ReviewUnknown, err
+	}
+	if len(approvals.ApprovedBy) > 0 {
+		return Approved, nil
+	}
+	if approvals.ApprovalsLeft != nil {
+		return NotApproved, nil
+	}
+	return ReviewUnknown, nil
+}
 func (a *Adapter) GetChange(ctx context.Context, p ProjectRef, id string) (Change, error) {
+	return a.getChange(ctx, p, id, true)
+}
+
+func (a *Adapter) getChange(ctx context.Context, p ProjectRef, id string, fetchReview bool) (Change, error) {
 	var x rawChange
 	path := a.base(p) + "/pulls/" + pathPart(id)
 	if a.Kind == KindGitLab {
@@ -473,7 +551,18 @@ func (a *Adapter) GetChange(ctx context.Context, p ProjectRef, id string) (Chang
 	if e := a.call(ctx, p, path, "GET", nil, &x); e != nil {
 		return Change{}, e
 	}
-	return a.change(x)
+	c, e := a.change(x)
+	if e != nil {
+		return Change{}, e
+	}
+	if fetchReview {
+		if review, err := a.reviewState(ctx, p, c.ID); err == nil {
+			c.ReviewState = review
+		} else if !errors.Is(err, ErrAuthOrCapability) && !errors.Is(err, ErrContractViolation) {
+			return Change{}, err
+		}
+	}
+	return c, nil
 }
 func (a *Adapter) CreateChange(ctx context.Context, p ProjectRef, branch, base, title, body string) (Change, error) {
 	path := a.base(p) + "/pulls"
@@ -596,28 +685,82 @@ func (a *Adapter) GetChecks(ctx context.Context, p ProjectRef, sha string) (Chec
 		if len(ps) == 0 {
 			return CheckSuite{Conclusion: "unknown"}, nil
 		}
-		return CheckSuite{Conclusion: normalizeCI(ps[0].Status), ExternalURL: ps[0].WebURL}, nil
-	}
-	var x struct {
-		CheckRuns []struct {
-			Name, Conclusion, HTMLURL string `json:"name"`
-		} `json:"check_runs"`
-	}
-	if e := a.call(ctx, p, a.base(p)+"/commits/"+pathPart(sha)+"/check-runs", "GET", nil, &x); e != nil {
-		return CheckSuite{}, e
-	}
-	result := "success"
-	for _, r := range x.CheckRuns {
-		switch r.Conclusion {
-		case "failure", "cancelled", "timed_out":
-			result = "failure"
-		case "":
-			if result != "failure" {
-				result = "pending"
+		var jobs []struct {
+			Name         string `json:"name"`
+			WebURL       string `json:"web_url"`
+			Status       string `json:"status"`
+			AllowFailure bool   `json:"allow_failure"`
+		}
+		if e := a.call(ctx, p, a.base(p)+"/pipelines/"+strconv.FormatInt(ps[0].ID, 10)+"/jobs", "GET", nil, &jobs); e != nil {
+			return CheckSuite{}, e
+		}
+		result := normalizeCI(ps[0].Status)
+		suite := CheckSuite{Conclusion: result, ExternalURL: ps[0].WebURL}
+		for _, j := range jobs {
+			if (j.Status == "failed" || j.Status == "canceled") && !j.AllowFailure {
+				suite.FailedJobs = append(suite.FailedJobs, CheckJob{Name: j.Name, WebURL: j.WebURL, AllowFailure: j.AllowFailure})
+				suite.Conclusion = "failure"
 			}
 		}
+		if suite.Conclusion == "failure" && len(suite.FailedJobs) == 0 {
+			suite.Conclusion = "success"
+		}
+		return suite, nil
 	}
-	return CheckSuite{Conclusion: result}, nil
+	var checks struct {
+		CheckRuns []struct {
+			Name       string `json:"name"`
+			Conclusion string `json:"conclusion"`
+			HTMLURL    string `json:"html_url"`
+			DetailsURL string `json:"details_url"`
+		} `json:"check_runs"`
+	}
+	if e := a.call(ctx, p, a.base(p)+"/commits/"+pathPart(sha)+"/check-runs", "GET", nil, &checks); e != nil {
+		return CheckSuite{}, e
+	}
+	var statuses []struct {
+		State     string `json:"state"`
+		Context   string `json:"context"`
+		TargetURL string `json:"target_url"`
+	}
+	if e := a.call(ctx, p, a.base(p)+"/commits/"+pathPart(sha)+"/status", "GET", nil, &statuses); e != nil {
+		return CheckSuite{}, e
+	}
+	suite := CheckSuite{Conclusion: "success"}
+	for _, r := range checks.CheckRuns {
+		if r.DetailsURL != "" && suite.ExternalURL == "" {
+			suite.ExternalURL = r.DetailsURL
+		}
+		switch r.Conclusion {
+		case "failure", "cancelled", "timed_out":
+			suite.Conclusion = "failure"
+			suite.FailedJobs = append(suite.FailedJobs, CheckJob{Name: r.Name, WebURL: r.HTMLURL})
+		case "":
+			if suite.Conclusion != "failure" {
+				suite.Conclusion = "pending"
+			}
+		case "success":
+		default:
+			suite.Conclusion = "unknown"
+		}
+	}
+	for _, s := range statuses {
+		if suite.ExternalURL == "" {
+			suite.ExternalURL = s.TargetURL
+		}
+		switch s.State {
+		case "failure", "error":
+			suite.Conclusion = "failure"
+		case "pending":
+			if suite.Conclusion == "success" {
+				suite.Conclusion = "pending"
+			}
+		case "success":
+		default:
+			suite.Conclusion = "unknown"
+		}
+	}
+	return suite, nil
 }
 func normalizeCI(s string) string {
 	switch s {
@@ -625,7 +768,7 @@ func normalizeCI(s string) string {
 		return "success"
 	case "failed", "failure":
 		return "failure"
-	case "running", "pending", "created":
+	case "running", "pending", "created", "queued", "in_progress":
 		return "pending"
 	}
 	return "unknown"
@@ -665,7 +808,7 @@ func (a *Adapter) MergeChange(ctx context.Context, p ProjectRef, id, expected, m
 	// GitHub's merge response is not a pull-request projection. Re-read the
 	// Change rather than accepting a successful transport response as merge
 	// evidence; this also gives both platforms the same neutral result.
-	c, e := a.GetChange(ctx, p, id)
+	c, e := a.getChange(ctx, p, id, false)
 	if e != nil {
 		return Change{}, e
 	}
@@ -802,10 +945,43 @@ func (a *Adapter) SetLabels(ctx context.Context, p ProjectRef, t TargetRef, add,
 				return e
 			}
 		}
-		return nil
+		return a.verifyLabels(ctx, p, t, add, remove)
 	}
 	in, _ := json.Marshal(map[string]string{"add_labels": strings.Join(add, ","), "remove_labels": strings.Join(remove, ",")})
-	return a.call(ctx, p, path, "PUT", in, nil)
+	if e = a.call(ctx, p, path, "PUT", in, nil); e != nil {
+		return e
+	}
+	return a.verifyLabels(ctx, p, t, add, remove)
+}
+
+func (a *Adapter) verifyLabels(ctx context.Context, p ProjectRef, t TargetRef, add, remove []string) error {
+	var x struct {
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	path, err := targetPath(a, p, t, "")
+	if err != nil {
+		return err
+	}
+	if err = a.call(ctx, p, path, "GET", nil, &x); err != nil {
+		return err
+	}
+	got := map[string]bool{}
+	for _, l := range x.Labels {
+		got[l.Name] = true
+	}
+	for _, l := range add {
+		if !got[l] {
+			return &ClassifiedError{Class: ErrSemanticConflict, Summary: "label add not observed: " + l}
+		}
+	}
+	for _, l := range remove {
+		if got[l] {
+			return &ClassifiedError{Class: ErrSemanticConflict, Summary: "label removal not observed: " + l}
+		}
+	}
+	return nil
 }
 
 var _ Client = (*Adapter)(nil)
