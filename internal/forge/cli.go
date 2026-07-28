@@ -239,6 +239,9 @@ func (a *Adapter) issue(x rawIssue) (Issue, error) {
 }
 func (a *Adapter) ListIssuesByLabel(ctx context.Context, p ProjectRef, label string, since Cursor) ([]Issue, Cursor, error) {
 	path := a.base(p) + "/issues?labels=" + url.QueryEscape(label)
+	if since != "" {
+		path += "&since=" + url.QueryEscape(string(since))
+	}
 	if a.Kind == KindGitHub {
 		path += "&state=open&sort=updated&direction=asc"
 	} else {
@@ -286,8 +289,11 @@ type rawComment struct {
 	} `json:"author"`
 }
 
-func (a *Adapter) listComments(ctx context.Context, p ProjectRef, id string) ([]Comment, Cursor, error) {
+func (a *Adapter) listComments(ctx context.Context, p ProjectRef, id string, since Cursor) ([]Comment, Cursor, error) {
 	path := a.base(p) + "/issues/" + pathPart(id) + "/comments"
+	if since != "" {
+		path += "?since=" + url.QueryEscape(string(since))
+	}
 	if a.Kind == KindGitLab {
 		path = a.base(p) + "/issues/" + pathPart(id) + "/notes"
 	}
@@ -313,10 +319,10 @@ func (a *Adapter) listComments(ctx context.Context, p ProjectRef, id string) ([]
 	return out, Cursor(strconv.Itoa(n)), e
 }
 func (a *Adapter) ListIssueComments(c context.Context, p ProjectRef, id string, s Cursor) ([]Comment, Cursor, error) {
-	return a.listComments(c, p, id)
+	return a.listComments(c, p, id, s)
 }
 func (a *Adapter) ListChangeComments(c context.Context, p ProjectRef, id string, s Cursor) ([]Comment, Cursor, error) {
-	return a.listComments(c, p, id)
+	return a.listComments(c, p, id, s)
 }
 
 type rawChange struct {

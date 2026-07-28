@@ -97,6 +97,10 @@ func (d *DB) wakeOutbox() {
 // Path returns the database file path this handle opened.
 func (d *DB) Path() string { return d.path }
 
+// NewID returns a storage-shaped opaque identifier for callers assembling a
+// restricted write-port command.
+func NewID() string { return newID() }
+
 // Close closes the underlying pool.
 func (d *DB) Close() error { return d.db.Close() }
 
