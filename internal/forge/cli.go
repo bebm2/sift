@@ -30,8 +30,13 @@ type Adapter struct {
 	Kind Kind
 	Run  Runner
 
+	// charger, when set, reserves one unit of forge API budget before each
+	// CLI subprocess (forge.md §9). A nil charger disables charging.
+	charger Charger
+
 	mu             sync.RWMutex
 	unsupportedCAS map[string]bool
+	chargeSeqs     map[string]int64
 }
 
 func NewAdapter(k Kind, cli string, r Runner) *Adapter {
@@ -44,7 +49,45 @@ func NewAdapter(k Kind, cli string, r Runner) *Adapter {
 	if r == nil {
 		r = ExecRunner
 	}
-	return &Adapter{CLI: cli, Kind: k, Run: r, unsupportedCAS: map[string]bool{}}
+	return &Adapter{CLI: cli, Kind: k, Run: r, unsupportedCAS: map[string]bool{}, chargeSeqs: map[string]int64{}}
+}
+
+// WithCharger installs the forge API budget charger. Without it the adapter
+// does not charge, preserving the M1 fake/no-budget behaviour. Returns the
+// adapter for constructor chaining.
+func (a *Adapter) WithCharger(c Charger) *Adapter {
+	a.charger = c
+	return a
+}
+
+// chargeAPICall reserves one unit of forge API budget before a CLI subprocess
+// launches (forge.md §9: the sole charging point is inside the adapter). The
+// stable charge key is the caller-supplied base (WithChargeKey) plus an
+// incrementing per-base sequence, so each request is distinct yet
+// replay-stable across crash recovery. When the budget is exhausted it
+// returns an ErrRateLimited classified error and the subprocess is not run;
+// with no charger or no charge-key base it is a no-op.
+func (a *Adapter) chargeAPICall(ctx context.Context, p ProjectRef) error {
+	if a.charger == nil {
+		return nil
+	}
+	base, ok := chargeKeyBaseFrom(ctx)
+	if !ok || base == "" {
+		return nil
+	}
+	a.mu.Lock()
+	a.chargeSeqs[base]++
+	seq := a.chargeSeqs[base]
+	a.mu.Unlock()
+	key := base + ":" + strconv.FormatInt(seq, 10)
+	res, err := a.charger.Charge(ctx, p, key)
+	if err != nil {
+		return &ClassifiedError{Class: ErrTransient, Summary: "forge api budget charge failed: " + err.Error()}
+	}
+	if res.Exhausted {
+		return &ClassifiedError{Class: ErrRateLimited, Summary: "forge api budget exhausted for project"}
+	}
+	return nil
 }
 
 // AutoMergeSupported reports whether this project has a proven expected-head
@@ -101,6 +144,9 @@ func classify(s string, e error) error {
 func (a *Adapter) call(ctx context.Context, p ProjectRef, path, method string, in []byte, v any) error {
 	if p.Kind != a.Kind {
 		return &ClassifiedError{Class: ErrAuthOrCapability, Summary: "adapter kind mismatch"}
+	}
+	if err := a.chargeAPICall(ctx, p); err != nil {
+		return err
 	}
 	args := []string{"api", path, "--hostname", p.Host}
 	if method != "GET" {
@@ -443,6 +489,9 @@ func (a *Adapter) GetChangeDiff(ctx context.Context, p ProjectRef, id string) (s
 		path = a.base(p) + "/merge_requests/" + pathPart(id) + "/changes"
 	}
 	if a.Kind == KindGitHub {
+		if err := a.chargeAPICall(ctx, p); err != nil {
+			return "", err
+		}
 		out, stderr, err := a.Run(ctx, a.CLI, []string{"api", path, "--hostname", p.Host, "-H", "Accept: application/vnd.github.v3.diff"}, nil)
 		if err != nil {
 			return "", classify(string(stderr), err)
