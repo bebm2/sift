@@ -148,7 +148,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] V10b：V0 以 Agent 身份读取 operator token 并调用运维 RPC 预期成功，同时 `doctor` 必须报告此未闭合边界（`TestV10bUnsafeLocalAttackReproduces` 以同 UID Agent 读取 token 后成功调用 `ops.doctor`，严格断言 `unsafe-local` + `operator-token-readable-by-agent`；M8 最终闭合）
 - [x] 实现薄 CLI 的 `ps/logs/worktree/doctor` 与 `kill/retry` 请求壳；所有运维命令只走 daemon，不直连 DB（`cmd/sift/main.go`）
 - [x] daemon 不可用时只允许明确标记为 offline 的只读诊断；`kill/retry` 等写操作拒绝，绝不离线改库（`sift doctor --offline` + `OperatorRequest` 失败拒绝）
-- [ ] `doctor` 基线检查 runtime、SQLite、Agent CLI、相关 forge CLI 登录/版本、按配置启用的 tmux、目录/socket 权限；后续片增补策略、hooks、积压与安全姿态
+- [x] `doctor` 基线检查 runtime、SQLite、Agent CLI、相关 forge CLI 登录/版本、按配置启用的 tmux、目录/socket 权限，且 CLI 进程退出状态映射 doctor `exit_code` 0/1/2（config.md §7；`cmd/sift/main_test.go` 覆盖 online/offline）；后续片增补策略、hooks、积压与安全姿态
 
 #### 1.6 Reconciler 与 fake 骨架链
 
