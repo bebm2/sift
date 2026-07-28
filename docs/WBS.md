@@ -127,7 +127,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] CAS 拒绝过期命令；非法转移报错并记审计事件（`ErrRejectedStale` + `auditIllegalTransition`）
 - [x] transactional outbox、稳定 operation key、提交唤醒与退避框架（`internal/storage/outbox.go` + `wakeOutbox` + `BackoffPolicy`）
 - [x] 三组具名调度器骨架；禁止散落 ticker（`scheduler.go`：Intake/Reconciler/Supervisor，wakeup-driven 无 ticker）
-- [ ] V1 与 V2 核心崩溃注入；逐项覆盖 `specs/storage.md` §11 的可变写入族，含项目健康、Task Spec、Forge 收费、Interrupt 推进与 delivery
+- [ ] V1 与 V2 核心崩溃注入；当前已实现的状态、Forge Run/receipt、Task Spec、Brain trace/token、outbox claim/completion 写入族均以末写入点 abort 注入验证全有或全无（`TestV1RunTransitionGraphAndCAS`、`TestV2TransitionCrashAtomicity`、`TestV2CurrentWritePortsCrashAtomicity`）；项目健康、Forge 收费、Interrupt 推进与 delivery 在各自写端口实现时补入同一门禁，不得以 schema 代替崩溃证据
 
 #### 1.4 配置与启动生命周期
 
@@ -143,9 +143,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] `siftd.sock` 与 `run.sock` 分离；operator capability 只授权运维端点（`internal/controlplane/server.go` + `TestV10aEndpointCapabilitiesAndSockets`）
 - [x] RPC envelope 携协议/二进制版本；主版本不一致拒绝（`protocol.go` `validateEnvelope`：`ProtocolMajor`/`ClientVersion` 主版本校验）
 - [x] 单实例互斥，第二个 daemon 明确拒启（`acquireLock` flock + `TestSecondDaemonRefusesLock`）
-- [ ] 只创建 Unix socket，不创建 TCP/UDP listener；集成测试检查零网络监听
+- [x] 只创建 Unix socket，不创建 TCP/UDP listener；Linux 集成测试枚举本进程 socket inode 与 `/proc/self/net/{tcp,tcp6,udp,udp6}`，严格断言零 TCP/UDP listener（`TestV10ZeroNetworkListeners`）
 - [x] V10a 首段：无 operator token 的运维请求被拒、`run.sock` 无运维动词、run token 不能调用 wrapper handoff 动词（`TestV10aEndpointCapabilitiesAndSockets`）
-- [x] V10b：V0 以 Agent 身份读取 operator token 并调用运维 RPC 预期成功，同时 `doctor` 必须报告此未闭合边界（`doctor` 报 `unsafe-local` + `operator-token-readable-by-agent`；M8 最终闭合）
+- [x] V10b：V0 以 Agent 身份读取 operator token 并调用运维 RPC 预期成功，同时 `doctor` 必须报告此未闭合边界（`TestV10bUnsafeLocalAttackReproduces` 以同 UID Agent 读取 token 后成功调用 `ops.doctor`，严格断言 `unsafe-local` + `operator-token-readable-by-agent`；M8 最终闭合）
 - [x] 实现薄 CLI 的 `ps/logs/worktree/doctor` 与 `kill/retry` 请求壳；所有运维命令只走 daemon，不直连 DB（`cmd/sift/main.go`）
 - [x] daemon 不可用时只允许明确标记为 offline 的只读诊断；`kill/retry` 等写操作拒绝，绝不离线改库（`sift doctor --offline` + `OperatorRequest` 失败拒绝）
 - [ ] `doctor` 基线检查 runtime、SQLite、Agent CLI、相关 forge CLI 登录/版本、按配置启用的 tmux、目录/socket 权限；后续片增补策略、hooks、积压与安全姿态
@@ -181,10 +181,10 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 ### M1 门禁
 
-- [x] V1、V2 核心、V9 骨架段、V10a 端点段、V10b、V12、V14 通过（`TestV1`/`TestV2`/`TestV9FirstSegmentSkeletonChain`/`TestV10a`/V10b doctor/`TestV12Scenario*`/`TestV14*`；`CGO_ENABLED=0 go test ./...` 绿）
-- [x] Brain fixture 覆盖 schema 失败后同 prompt 重试一次、逐触点兜底、trace 持久化与 token 收费（`TestShellInvalidThenValidSamePrompt`/`TestShellInvalidThenFallback`/`TestShellRecovery`/`TestShellZeroUsageNoCharge`）
-- [x] V15 四组合构建段通过（CI `build-matrix` job darwin/linux × amd64/arm64 `CGO_ENABLED=0` 绿）
-- [ ] 第二实例拒启且进程无网络 listener
+- [x] V1、已实现写端口的 V2 核心、V9 骨架段、V10a 端点段、V10b、V12、V14 通过（`TestV1RunTransitionGraphAndCAS`/`TestV2*`/`TestV9FirstSegmentSkeletonChain`/`TestV10aEndpointCapabilitiesAndSockets`/`TestV10bUnsafeLocalAttackReproduces`/`TestV12Scenario*` + `TestV12ZeroConfigStartsDaemon`/`TestV14*`；`CGO_ENABLED=0 go test ./...` 绿）
+- [x] Brain 测试夹具与门禁对账：真实子进程 fixture 覆盖 schema 失败后同 prompt 重试、冻结 prompt 与逐 attempt token 收费（`TestShellWithRealCLIFixture`）；fake provider 覆盖逐触点兜底与 trace 恢复（`TestShellInvalidThenFallback`/`TestShellRecovery`/`TestShellZeroUsageNoCharge`）
+- [x] V15 四组合构建段通过（CI `build-matrix` job darwin/linux × amd64/arm64 `CGO_ENABLED=0`，`check` job 同样以 `CGO_ENABLED=0 go vet ./...` 和 `go test ./...` 运行）
+- [x] 第二实例拒启且进程无网络 listener（`TestSecondDaemonRefusesLock` + Linux `TestV10ZeroNetworkListeners`）
 - [x] 敏感配置磁盘漂移不热生效；零配置启动通过（`internal/config` DriftChecker warn-only + V12 两种场景）
 
 ---
