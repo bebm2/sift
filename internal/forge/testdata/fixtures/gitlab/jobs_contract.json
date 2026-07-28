@@ -1,0 +1,1 @@
+[{"name":"unit","web_url":"https://gitlab/jobs/1","status":"failed","allow_failure":false},{"name":"lint","web_url":"https://gitlab/jobs/2","status":"failed","allow_failure":true}]

@@ -558,7 +558,7 @@ func (a *Adapter) getChange(ctx context.Context, p ProjectRef, id string, fetchR
 	if fetchReview {
 		if review, err := a.reviewState(ctx, p, c.ID); err == nil {
 			c.ReviewState = review
-		} else if !errors.Is(err, ErrAuthOrCapability) && !errors.Is(err, ErrContractViolation) {
+		} else if !errors.Is(err, ErrAuthOrCapability) {
 			return Change{}, err
 		}
 	}

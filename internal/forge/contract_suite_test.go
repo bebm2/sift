@@ -180,7 +180,15 @@ func runV3Suite(t *testing.T, p v3Platform) {
 	// draft bool vs Draft: prefix, and mergeability all collapse to the same
 	// neutral Change projection.
 	t.Run("platform_difference_normalized", func(t *testing.T) {
-		a := p.newAdapter("", constRunner(p.changeNormal))
+		a := p.newAdapter("", func(ctx context.Context, cli string, args []string, in []byte) ([]byte, []byte, error) {
+			if strings.Contains(args[1], "/reviews") {
+				return []byte(`[]`), nil, nil
+			}
+			if strings.Contains(args[1], "/approvals") {
+				return []byte(`{}`), nil, nil
+			}
+			return constRunner(p.changeNormal)(ctx, cli, args, in)
+		})
 		c, err := a.GetChange(ctx, p.project, p.wantID)
 		if err != nil {
 			t.Fatalf("err=%v", err)
@@ -315,9 +323,14 @@ func v3Page(k Kind, first, count int) []byte {
 	return []byte("[" + strings.Join(rows, ",") + "]")
 }
 
-// constRunner always returns the same fixture bytes regardless of path.
+// constRunner returns the fixture for ordinary requests and an empty review set.
 func constRunner(b []byte) Runner {
-	return func(context.Context, string, []string, []byte) ([]byte, []byte, error) {
+	return func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		// GetChange also reads the platform review endpoint. Keep this helper
+		// focused on the requested fixture while supplying an empty review set.
+		if strings.Contains(args[1], "/reviews") || strings.Contains(args[1], "/approvals") {
+			return []byte(`[]`), nil, nil
+		}
 		return b, nil, nil
 	}
 }
