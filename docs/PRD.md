@@ -918,7 +918,7 @@ Agent 能力边界（V0 实际状态）：Sift 不向 Agent 传递 forge 凭证�
 |------|------|
 | `docs/PRD.md` | **本稿** |
 | [`docs/DESIGN.md`](DESIGN.md) | **D0.10 · active · 已通过**。review-16 修订见 DESIGN §14.13；[review-18](reviews/2026-07-28-design-review-kimi-k3-06.md) 已独立核销全部阻断并允许进入 WBS，唯一非阻断遗留及后续处置见 DESIGN §14.14。§3.4 的并行取证模型已落成架构约束——影子门禁随 Gate 落地即常驻无开关 |
-| `docs/WBS.md` | 待写（方案已通过，可进入 WBS）。回放集导出与 Gate 同期，见 §10.3 |
+| `docs/WBS.md` | **D0.3 · active**（已落地）。M1 实现可派工。回放集导出与 Gate 同期，见 §10.3 |
 
 ### 13.1 已采纳的架构约束（PRD 层拍板，DESIGN 只展开不重议）
 

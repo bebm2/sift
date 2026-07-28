@@ -160,7 +160,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 1.7 Brain 调用壳、T1/T2 与 Task Spec
 
-- [ ] 编写 `specs/brain.md` 的统一调用与 T1/T2 契约
+- [x] 编写 `specs/brain.md` 的统一调用与 T1/T2 契约
 - [ ] 本机 agent CLI 调用壳：stdin/临时文件输入 → schema 校验 → 同 prompt 重试一次 → 逐触点确定性兜底
 - [ ] 提示词与 schema 版本化并入 git；调用身份与各触点作用域以 `specs/brain.md`、`specs/storage.md` §10.1 为准
 - [ ] 每次调用按 `specs/storage.md` §10.1 持久化 call/attempt（`brain_calls` 一次终结 + 有序 `brain_attempts`）；具体调用、兜底与 Gate 关联契约由 `specs/brain.md` 定义
