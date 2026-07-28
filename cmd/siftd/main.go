@@ -1,13 +1,35 @@
-// Command siftd is the Sift daemon.
-//
-// This is a WBS M1 bootstrap stub; see docs/plans/2026-07-29-s1-m1-bootstrap-decode.md.
+// Command siftd runs the local Sift control-plane daemon.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/miaoxiaoyong/sift/internal/config"
+	"github.com/miaoxiaoyong/sift/internal/controlplane"
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "siftd: daemon stub — not implemented (WBS M1 bootstrap)")
+	home, err := config.ResolveHome()
+	if err != nil {
+		fatal(err)
+	}
+	if _, err := config.Load(home, time.Now()); err != nil {
+		fatal(err)
+	}
+	s, err := controlplane.Start(home)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := s.Serve(ctx); err != nil {
+		fatal(err)
+	}
 }
+func fatal(err error) { fmt.Fprintln(os.Stderr, "siftd:", err); os.Exit(1) }
