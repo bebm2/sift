@@ -17,11 +17,11 @@ func TestAdapterPaginationAndActorFailClosed(t *testing.T) {
 		if !strings.Contains(args[1], "page=2") {
 			rows := make([]string, 100)
 			for i := range rows {
-				rows[i] = fmt.Sprintf(`{"number":%d,"title":"t","body":"b","html_url":"https://x/%d","state":"open","user":{"login":"a"},"labels":[{"name":"sift"}]}`, i+1, i+1)
+				rows[i] = fmt.Sprintf(`{"number":%d,"title":"t","body":"b","html_url":"https://x/%d","state":"open","updated_at":"2026-01-01T00:00:%02dZ","user":{"login":"a"},"labels":[{"name":"sift"}]}`, i+1, i+1, i%60)
 			}
 			return []byte("[" + strings.Join(rows, ",") + "]"), nil, nil
 		}
-		return []byte(`[{"number":101,"title":"t","body":"b","html_url":"https://x/101","state":"open","user":{"login":"a"},"labels":[{"name":"sift"}]}]`), nil, nil
+		return []byte(`[{"number":101,"title":"t","body":"b","html_url":"https://x/101","state":"open","updated_at":"2026-01-01T00:01:00Z","user":{"login":"a"},"labels":[{"name":"sift"}]}]`), nil, nil
 	}
 	a := NewGitHub("gh", run)
 	issues, _, err := a.ListIssuesByLabel(context.Background(), ProjectRef{Kind: KindGitHub, Host: "github.com", ProjectKey: "o/r"}, "sift", "")

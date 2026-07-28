@@ -137,7 +137,7 @@ func TestChargePerPaginationPage(t *testing.T) {
 		if pages < 2 {
 			rows := make([]string, 100)
 			for i := range rows {
-				rows[i] = `{"number":1,"title":"t","body":"b","html_url":"https://x/1","state":"open","user":{"login":"a"},"labels":[{"name":"sift"}]}`
+				rows[i] = `{"number":1,"title":"t","body":"b","html_url":"https://x/1","state":"open","updated_at":"2026-01-01T00:00:00Z","user":{"login":"a"},"labels":[{"name":"sift"}]}`
 			}
 			return []byte("[" + strings.Join(rows, ",") + "]"), nil, nil
 		}

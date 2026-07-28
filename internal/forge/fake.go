@@ -12,6 +12,7 @@ import (
 type Fake struct {
 	mu           sync.Mutex
 	issues       map[string][]Issue
+	issueTimes   map[string]time.Time
 	events       map[string][]LabelEvent
 	changes      map[string]map[string]Change
 	changeBodies map[string]map[string]string
@@ -21,7 +22,7 @@ type Fake struct {
 }
 
 func NewFake() *Fake {
-	return &Fake{issues: map[string][]Issue{}, events: map[string][]LabelEvent{}, changes: map[string]map[string]Change{}, changeBodies: map[string]map[string]string{}, comments: map[string][]Comment{}, labels: map[string]map[string]map[string]bool{}, diffs: map[string]string{}}
+	return &Fake{issues: map[string][]Issue{}, issueTimes: map[string]time.Time{}, events: map[string][]LabelEvent{}, changes: map[string]map[string]Change{}, changeBodies: map[string]map[string]string{}, comments: map[string][]Comment{}, labels: map[string]map[string]map[string]bool{}, diffs: map[string]string{}}
 }
 func projectKey(p ProjectRef) string { return string(p.Kind) + ":" + p.Host + ":" + p.ProjectKey }
 func (f *Fake) AddIssue(p ProjectRef, i Issue) Issue {
@@ -30,7 +31,9 @@ func (f *Fake) AddIssue(p ProjectRef, i Issue) Issue {
 	}
 	i.Labels = sortDedupe(i.Labels)
 	f.mu.Lock()
-	f.issues[projectKey(p)] = append(f.issues[projectKey(p)], i)
+	k := projectKey(p)
+	f.issues[k] = append(f.issues[k], i)
+	f.issueTimes[k+"\x00"+i.ID] = time.Unix(int64(len(f.issues[k])), 0)
 	f.mu.Unlock()
 	return i
 }
@@ -84,18 +87,26 @@ func (f *Fake) changeLocked(p ProjectRef, id string) (Change, error) {
 	return c, nil
 }
 func (f *Fake) ListIssuesByLabel(_ context.Context, p ProjectRef, label string, since Cursor) ([]Issue, Cursor, error) {
+	tracker, err := newCursorTracker(since)
+	if err != nil {
+		return nil, "", err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	start := 0
-	fmt.Sscan(string(since), &start)
-	all := f.issues[projectKey(p)]
 	out := []Issue{}
-	for _, i := range all[start:] {
-		if hasLabel(i.Labels, label) {
+	for _, i := range f.issues[projectKey(p)] {
+		if !hasLabel(i.Labels, label) {
+			continue
+		}
+		newItem, err := tracker.add(i.ID, f.issueTimes[projectKey(p)+"\x00"+i.ID])
+		if err != nil {
+			return nil, "", err
+		}
+		if newItem {
 			out = append(out, i)
 		}
 	}
-	return out, Cursor(fakeNumber(len(all))), nil
+	return out, tracker.next(), nil
 }
 func fakeNumber(i int) string { return fmt.Sprintf("%d", i) }
 func (f *Fake) GetIssue(_ context.Context, p ProjectRef, id string) (Issue, error) {
@@ -117,24 +128,40 @@ func (f *Fake) ListChangeComments(_ context.Context, p ProjectRef, id string, si
 func (f *Fake) listComments(p ProjectRef, id string, since Cursor) ([]Comment, Cursor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	all := f.comments[projectKey(p)+"\x00"+id]
-	start := 0
-	fmt.Sscan(string(since), &start)
-	if start > len(all) {
-		start = len(all)
+	tracker, err := newCursorTracker(since)
+	if err != nil {
+		return nil, "", err
 	}
-	return append([]Comment(nil), all[start:]...), Cursor(fakeNumber(len(all))), nil
+	out := []Comment{}
+	for _, comment := range f.comments[projectKey(p)+"\x00"+id] {
+		newItem, err := tracker.add(comment.ID, comment.CreatedAt)
+		if err != nil {
+			return nil, "", err
+		}
+		if newItem {
+			out = append(out, comment)
+		}
+	}
+	return out, tracker.next(), nil
 }
 func (f *Fake) ListLabelEvents(_ context.Context, p ProjectRef, t TargetRef, since Cursor) ([]LabelEvent, Cursor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	all := f.events[projectKey(p)+"\x00"+t.ID]
-	start := 0
-	fmt.Sscan(string(since), &start)
-	if start > len(all) {
-		start = len(all)
+	tracker, err := newCursorTracker(since)
+	if err != nil {
+		return nil, "", err
 	}
-	return append([]LabelEvent(nil), all[start:]...), Cursor(fakeNumber(len(all))), nil
+	out := []LabelEvent{}
+	for n, event := range f.events[projectKey(p)+"\x00"+t.ID] {
+		newItem, err := tracker.add(fakeNumber(n+1), event.ObservedAt)
+		if err != nil {
+			return nil, "", err
+		}
+		if newItem {
+			out = append(out, event)
+		}
+	}
+	return out, tracker.next(), nil
 }
 func (f *Fake) CommentTarget(_ context.Context, p ProjectRef, t TargetRef, body string) (string, error) {
 	f.mu.Lock()

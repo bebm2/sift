@@ -31,9 +31,9 @@ func TestFakeClientContract(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "1" {
 		t.Fatalf("ListIssuesByLabel = %+v", got)
 	}
-	// The cursor drains the queue: a second call returns no new issues.
+	// Boundary records may be replayed; callers deduplicate by remote ID.
 	got2, _, err := f.ListIssuesByLabel(ctx, p, "sift", next)
-	if err != nil || len(got2) != 0 {
+	if err != nil || len(got2) != 1 || got2[0].ID != "1" {
 		t.Fatalf("second ListIssuesByLabel = %+v %v", got2, err)
 	}
 	// Filtering by a label no issue carries returns nothing.
