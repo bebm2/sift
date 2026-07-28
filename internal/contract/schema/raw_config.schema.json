@@ -1,0 +1,848 @@
+{
+  "$id": "https://sift.dev/decode/raw_config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agents": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "backend": {
+            "enum": [
+              "process",
+              "tmux"
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "executable": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "max_concurrent": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "task_transport": {
+            "enum": [
+              "stdin",
+              "file"
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version_args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "executable",
+          "id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "attention": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_failure_alert_after": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "critical_fuse": {
+          "additionalProperties": false,
+          "properties": {
+            "per_run_limit": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "total_limit": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "window": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "daily_quota": {
+          "additionalProperties": false,
+          "properties": {
+            "high": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "low": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "normal": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "daily_summary_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "day_timezone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hold_max_duration": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_escalations": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "brain": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "call_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "daily_token_limit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "executable": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_input_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_raw_output_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "protocol": {
+          "enum": [
+            "claude-json-v1"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_retries": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "version_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "certification": {
+      "additionalProperties": false,
+      "properties": {
+        "false_block_rate_max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "leak_rate_max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "negative_samples_min": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_samples_min": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "window": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "forge": {
+      "additionalProperties": false,
+      "properties": {
+        "command_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hourly_api_limit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "slow_poll_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warning_ratio": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "gate_defaults": {
+      "additionalProperties": false,
+      "properties": {
+        "auto_merge": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "checks_pending_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flaky_retry_limit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "review_policy": {
+          "enum": [
+            "always",
+            "risky-only",
+            "never"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "labels": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "done": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queued": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "running": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trigger": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "waiting_human": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "logging": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retained_files": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "system_max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "metrics": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_blocked": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "code_review": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "design_approval": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "failure_review": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "guardrail_violation": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "merge_conflict": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "startup_stall": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "operators": {
+      "additionalProperties": false,
+      "properties": {
+        "github": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "gitlab": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "outbox": {
+      "additionalProperties": false,
+      "properties": {
+        "lease_ttl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_advance_delay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_attempts": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry_initial_delay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry_max_delay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry_multiplier": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "worker_batch_size": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "projects": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "forge": {
+            "additionalProperties": false,
+            "properties": {
+              "cli": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "host": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "github",
+                  "gitlab"
+                ],
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "project"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "forge",
+          "id",
+          "repo"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "report": {
+      "additionalProperties": false,
+      "properties": {
+        "burst": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "dedupe_window": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "events_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "interrupts_per_run_daily_quota": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_payload_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "not_ready_initial_delay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not_ready_max_delay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not_ready_total_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_interrupt_quota_exceeded": {
+          "enum": [
+            "failure_review_once"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "absence_recheck_count": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "absence_recheck_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_silence_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attempt_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "enum": [
+            "process",
+            "tmux"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default_agent_max_concurrent": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "heartbeat_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heartbeat_stale_after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_attempts": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_concurrent_total": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry_initial_delay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry_max_delay": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry_multiplier": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "spawn_operation_lease_ttl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spawning_started_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "starting_permit_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "termination_kill_grace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "termination_term_grace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "scheduler": {
+      "additionalProperties": false,
+      "properties": {
+        "config_drift_check_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intake_active_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intake_idle_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intake_interrupt_burst_duration": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intake_interrupt_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "per_class_tick_limit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "supervisor_interval": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "version": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "title": "RawConfig",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "closed",
+    "sourceType": "config.RawConfig"
+  }
+}

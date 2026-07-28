@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/miaoxiaoyong/sift/internal/config"
 	"github.com/miaoxiaoyong/sift/internal/contract"
 	"github.com/miaoxiaoyong/sift/internal/decode"
 )
@@ -42,6 +43,7 @@ func main() {
 	targets := []reflect.Type{
 		typeOf(contract.ClosedExample{}),
 		typeOf(contract.OpenEnvelopeExample{}),
+		typeOf(config.RawConfig{}),
 	}
 
 	if err := os.MkdirAll(*out, 0o755); err != nil {
