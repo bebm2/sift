@@ -246,7 +246,7 @@ func (s *Server) operatorRequest(req Request) Response {
 		if !onlyKeys(req.Params) {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)
 		}
-		return success(req.RequestID, doctor(false, s.Home.Path))
+		return success(req.RequestID, doctor(context.Background(), false, s.Home))
 	case "ops.kill", "ops.retry":
 		if !onlyKeys(req.Params, "run_id", "expected_version", "request_key") {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)
@@ -284,11 +284,6 @@ func onlyKeys(m map[string]any, keys ...string) bool {
 	}
 	return true
 }
-func doctor(offline bool, home string) map[string]any {
-	checks := []map[string]any{{"id": "operator-token-readable-by-agent", "level": "warning", "message": "V0 same-UID agents can read the operator token", "details": map[string]any{}}}
-	return map[string]any{"offline": offline, "exit_code": 1, "security_posture": "unsafe-local", "checks": checks}
-}
-
 func readFrame(r io.Reader) ([]byte, error) {
 	var h [4]byte
 	if _, err := io.ReadFull(r, h[:]); err != nil {
@@ -321,4 +316,6 @@ func writeFrame(w io.Writer, v any) error {
 
 // OfflineDoctor performs only read-only local diagnostics; it never creates a
 // home directory, token, socket, lock, or database.
-func OfflineDoctor(home config.Home) map[string]any { return doctor(true, home.Path) }
+func OfflineDoctor(home config.Home) map[string]any {
+	return doctor(context.Background(), true, home)
+}

@@ -110,6 +110,33 @@ func (d *DB) SchemaVersion(ctx context.Context) (int, error) {
 	return int(v.Int64), nil
 }
 
+// CheckReadOnly verifies that an existing database can be read without creating,
+// migrating, or modifying it. It is used by offline diagnostics.
+func CheckReadOnly(ctx context.Context, path string) error {
+	if path == "" {
+		return errors.New("storage: database path is required")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("storage: stat %s: %w", path, err)
+	}
+	pool, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return fmt.Errorf("storage: open read-only %s: %w", path, err)
+	}
+	defer pool.Close()
+	if err := pool.PingContext(ctx); err != nil {
+		return fmt.Errorf("storage: read-only connect %s: %w", path, err)
+	}
+	var result string
+	if err := pool.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
+		return fmt.Errorf("storage: quick_check: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("storage: quick_check = %q", result)
+	}
+	return nil
+}
+
 // Open opens (creating if necessary) the database at cfg.Path, enforces file
 // and directory permissions, sets and verifies the §2 PRAGMA contract, and
 // applies pending forward migrations. It refuses to start when any critical
