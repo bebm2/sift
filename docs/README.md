@@ -81,8 +81,13 @@ summary: 一句话说明本文档回答什么问题（30 字以内）
 - `decisions/`：`NNN-短横线标题.md`（`001-forge-via-cli-plumbing.md`），编号即排序。
 - `plans/`：`YYYY-MM-DD-短横线标题.md`，日期即排序。
 - `analysis/`：`YYYY-MM-DD-主题.md`，日期 + 主题（如 `2026-07-27-design-proposals-comparison.md`）。
-- `drafts/`：`YYYY-MM-DD-主题-作者.md`，日期 + 作者名（如 `2026-07-27-design-hex.md`）。
-- `reviews/`：`YYYY-MM-DD-主题-作者.md`，日期 + 作者名（如 `2026-07-27-prd-review-hex.md`）。多人同日对同一主题出 review 时用作者名自然区分，无需序号抢占。
+- `drafts/`：`YYYY-MM-DD-主题-作者.md`，日期 + 作者标识。
+- `reviews/`：`YYYY-MM-DD-主题-作者.md`，日期 + 作者标识。多人同日对同一主题出 review 时用作者标识自然区分，无需序号抢占。
+
+  **作者标识规则**：
+  - **人类作者**用个人代号（如 `hex`）。
+  - **AI 代理**用 `代理名-模型名` 格式，如 `pi-k3`（pi × Kimi K3）、`pi-gpt-5.6`（pi × GPT-5.6）、`cursor-opus5`（Cursor × Opus 5）、`codex-gpt5` 等。
+  - 示例：`2026-07-27-design-hex.md`、`2026-07-27-prd-review-pi-k3.md`、`2026-07-28-design-review-codex-gpt5.md`。
 - `specs/`、`testing/`：`模块名.md` 或 `模块名-主题.md`，与代码模块同名，便于对照。
 
 ### 内容纪律

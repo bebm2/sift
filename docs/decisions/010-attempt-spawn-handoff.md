@@ -18,6 +18,8 @@ summary: Agent 启动用会话绑定的一次性 spawn handoff，running 只认�
 4. **`spawning` 期间禁止换 owner**：只要旧 wrapper 或其进程组仍存在，恢复与人工 kill/retry 都不得释放/替换 claim。要换代必须先经 DESIGN §10.1 的**受控终止流程**终止身份确认过的 wrapper / 进程组并确认消失。fencing generation 继续递增，但不能替代“旧 owner 已失去 spawn 能力”的证明。**证明不了就必须打扰人**：身份不可确认或进程组在有界升级后仍存在时，attempt 冻结、发一次 `startup_stall` Interrupt、Run 转 `waiting_human`（PRD §4.1–4.4），不得让 Run 静默停在 `queued`。
 5. **`claim:started` 才进入 `running`**：wrapper 以进程内 one-shot guard 确保同一 permit 至多进入一次 spawn 路径；spawn 成功后原子写入 Agent PID / 启动时间 / 可执行路径，再携 session + permit + Agent 身份调用 started。daemon 验证后 CAS `spawning → running`，并经唯一 `transition()` 推进 Run `queued → running`。响应丢失时同一请求幂等返回，permit 响应重放不得再次 spawn。Agent 若在 started 落库前极快退出，身份一致的原子 `result.json` 可证明“已启动并结束”，恢复先补 started 再按结果推进，不重发 operation。
 
+> **名称修订**：[ADR-013](013-startup-stall-retry-convergence.md) 已将下述 `attempt_decision` 更名为规范名称 `attempt_resolution`；本条保留旧名以维持历史论证，后续 spec 与代码只使用新名。
+
 6. **人工态与迟到启动事实的仲裁**：受控终止无法证明旧执行体消失时，Run 进 `waiting_human`（`startup_stall`），claim 与 session / permit **继续冻结有效**——作废它们并不安全，因为 OS `spawn` 不消费 fencing token。因此旧执行体醒来提交合法 `claim:started` 是**必须建模的正常输入**，仲裁点是单一的 `attempt_decision` marker（CAS，不可逆）：人的决定未提交前**事实优先**（同一事务推进 attempt、Run `waiting_human → running`、把该 Interrupt 标 `superseded_by_fact` 关闭、接管监督）；决定已提交则**由决定吸收事实**（不推进 Run，但把迟到的 Agent 身份登记为可终止身份，回 wrapper `superseded_by_decision`，继续执行该决定的终止）。`claim:started`、恢复补 started、迟到 `result.json`、Interrupt 指令四个入口共享同一套 CAS 前置与幂等结果。
 
 attempt 生命周期因此是：

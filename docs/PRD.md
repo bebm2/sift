@@ -192,13 +192,13 @@ V0 范围：单用户、单机、可同时接入 GitHub 与 GitLab 项目。
 ### 4.1 Run 状态（5 个）
 
 ```
-queued → running → waiting_human ⇄（approve，或迟到的执行事实，回到 running / queued）
-              ↘ done
-              ↘ failed
-queued → waiting_human（开工前审批；或启动阶段停滞需人裁决）
+queued → running | waiting_human | failed
+running → waiting_human | done | failed
+waiting_human → running | queued | done | failed
 failed → queued（仅人工 retry）
-waiting_human → failed（超时且过期策略为 auto_reject）
 ```
+
+其中 `queued → failed` 与 `waiting_human → done` 是 forge 外部事实的直接收敛：前者覆盖排队期间 Issue 关闭或可信 actor 移除触发标签，后者覆盖等待审批期间 Change 被人手工合并。二者都不得伪造中间状态来绕过唯一转移入口。
 
 | 状态 | 含义 |
 |------|------|
@@ -215,7 +215,7 @@ waiting_human → failed（超时且过期策略为 auto_reject）
   - 为什么不新增终态：§1.5 已禁止叠第二套状态机；表达「合并了但门禁没过」用**属性**而非**状态**，5 状态维持不变。
 - **重试不是独立状态**（`retry_count` 字段）。
 - **Agent 自报 phase 不进状态机**（只进事件时间线）。
-- 所有合法转移必须经唯一校验入口（实现约束，防止旁路改状态）。
+- 所有合法转移必须经唯一校验入口（实现约束，防止旁路改状态）；§4.5 的外部事实观测也不例外。
 - **`waiting_human` 必须有超时**。V0.1 缺此项，导致「注意力调度器」名不副实——人三天不理，Run 就静默烂在队列里。
 - **`waiting_human` 不等于「执行体已停」。** 打扰只表示「需要人裁决」；如果被打扰的原因恰恰是「系统无法证明上一个执行体已消失」（§4.4 例外），那么该执行体可能仍在跑，其迟到的执行事实必须能收敛这条 Run——因此上图的回边不只由 `approve` 触发。事实与人的决定谁先落库谁生效，仲裁规则属实现层，见 DESIGN §10.1。
 
