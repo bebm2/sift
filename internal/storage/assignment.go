@@ -53,7 +53,8 @@ func (d *DB) SetInitialTaskSpec(ctx context.Context, cmd SetInitialTaskSpecCmd) 
 
 	var status string
 	var version int64
-	if err := tx.QueryRowContext(ctx, `SELECT status, version FROM runs WHERE id=?`, cmd.RunID).Scan(&status, &version); err != nil {
+	var forcedHITL int
+	if err := tx.QueryRowContext(ctx, `SELECT status, version, hitl_before_start FROM runs WHERE id=?`, cmd.RunID).Scan(&status, &version, &forcedHITL); err != nil {
 		return Run{}, err
 	}
 	if version != cmd.ExpectedVersion {
@@ -75,10 +76,11 @@ func (d *DB) SetInitialTaskSpec(ctx context.Context, cmd SetInitialTaskSpecCmd) 
 		return Run{}, fmt.Errorf("storage: insert initial task spec snapshot: %w", err)
 	}
 
+	hitlBeforeStart := cmd.HITLBeforeStart || forcedHITL != 0
 	res, err := tx.ExecContext(ctx, `UPDATE runs
 		SET kind=?, agent_id=?, hitl_before_start=?, current_task_spec_id=?, version=version+1, updated_at_ms=?
 		WHERE id=? AND version=? AND status='queued'`,
-		cmd.Kind, cmd.AgentID, boolInt(cmd.HITLBeforeStart), cmd.TaskSpecID, cmd.OccurredAtMS, cmd.RunID, cmd.ExpectedVersion)
+		cmd.Kind, cmd.AgentID, boolInt(hitlBeforeStart), cmd.TaskSpecID, cmd.OccurredAtMS, cmd.RunID, cmd.ExpectedVersion)
 	if err != nil {
 		return Run{}, fmt.Errorf("storage: assign run: %w", err)
 	}
@@ -93,7 +95,7 @@ func (d *DB) SetInitialTaskSpec(ctx context.Context, cmd SetInitialTaskSpecCmd) 
 	payload, _ := json.Marshal(map[string]any{
 		"kind":              cmd.Kind,
 		"agent":             cmd.AgentID,
-		"hitl_before_start": cmd.HITLBeforeStart,
+		"hitl_before_start": hitlBeforeStart,
 		"task_spec_id":      cmd.TaskSpecID,
 	})
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events

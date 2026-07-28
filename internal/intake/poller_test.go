@@ -37,6 +37,15 @@ type routingClient struct {
 	bad forge.ProjectRef
 }
 
+type labelEventClient struct {
+	*forge.Fake
+	events map[string][]forge.LabelEvent
+}
+
+func (c *labelEventClient) ListLabelEvents(_ context.Context, _ forge.ProjectRef, target forge.TargetRef, _ forge.Cursor) ([]forge.LabelEvent, forge.Cursor, error) {
+	return c.events[target.ID], "", nil
+}
+
 func (r *routingClient) ListIssuesByLabel(ctx context.Context, p forge.ProjectRef, label string, since forge.Cursor) ([]forge.Issue, forge.Cursor, error) {
 	if p == r.bad {
 		return nil, "", &forge.ClassifiedError{Class: forge.ErrAuthOrCapability, Summary: "403 forbidden: token revoked"}
@@ -55,7 +64,7 @@ func TestPollerIsolatesBadProjectHealthyProjectUnaffected(t *testing.T) {
 	}
 
 	healthy := Project{
-		ID: "healthy", TriggerLabel: "sift",
+		ID: "healthy", TriggerLabel: "sift", OperatorAllowlist: []string{"alice"},
 		Ref: forge.ProjectRef{Kind: forge.KindGitHub, Host: "github.com", ProjectKey: "org/repo-healthy"},
 	}
 	poisoned := Project{
@@ -68,6 +77,7 @@ func TestPollerIsolatesBadProjectHealthyProjectUnaffected(t *testing.T) {
 		ID: "1", Title: "healthy issue", Body: "b", Author: "alice",
 		URL: "https://github.com/org/repo-healthy/issues/1", Labels: []string{"sift"},
 	})
+	fc.AddLabelEvent(healthy.Ref, forge.LabelEvent{TargetID: "1", Label: "sift", Action: forge.LabelAdded, Actor: "alice", ObservedAt: time.UnixMilli(pollNow)})
 	client := &routingClient{Fake: fc, bad: poisoned.Ref}
 
 	var seen []string
@@ -132,13 +142,59 @@ func TestPollerIsolatesBadProjectHealthyProjectUnaffected(t *testing.T) {
 // TestPollerAdvancesCursorOnlyAfterPersist proves the intake cursor does not
 // move past a batch that failed to persist: replaying the same forge page is
 // harmless (WBS §2.3 cursor invariant).
+func TestPollerGatesOnTrustedTriggerActor(t *testing.T) {
+	ctx := context.Background()
+	db := openPollerDB(t)
+	if err := db.SeedProjectForTest(ctx, "cfg", "p1", pollNow); err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: "p1", TriggerLabel: "sift", OperatorAllowlist: []string{"operator"}, Ref: forge.ProjectRef{Kind: forge.KindGitHub, Host: "github.com", ProjectKey: "org/repo"}}
+	fake := forge.NewFake()
+	for _, id := range []string{"missing", "unknown", "untrusted", "trusted"} {
+		fake.AddIssue(project.Ref, forge.Issue{ID: id, Title: id, Author: "author", URL: "https://example.test/" + id, Labels: []string{"sift"}})
+	}
+	triggerTime := time.UnixMilli(pollNow)
+	client := &labelEventClient{Fake: fake, events: map[string][]forge.LabelEvent{
+		"missing":   {{TargetID: "missing", Label: "sift", Action: forge.LabelAdded, ObservedAt: triggerTime}},
+		"unknown":   {{TargetID: "unknown", Label: "sift", Action: forge.LabelAdded, Actor: "unknown", ObservedAt: triggerTime}},
+		"untrusted": {{TargetID: "untrusted", Label: "sift", Action: forge.LabelAdded, Actor: "outsider", ObservedAt: triggerTime}},
+		"trusted":   {{TargetID: "trusted", Label: "sift", Action: forge.LabelAdded, Actor: "operator", ObservedAt: triggerTime}},
+	}}
+	var seen []string
+	poller := &Poller{DB: db, Forge: client, Projects: []Project{project}, Now: func() time.Time { return triggerTime }, Idle: time.Minute, Active: time.Second, OnIssue: func(_ context.Context, _ Project, issue forge.Issue) error {
+		seen = append(seen, issue.ID)
+		return nil
+	}}
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != "trusted" {
+		t.Fatalf("accepted issues = %v, want [trusted]", seen)
+	}
+	items, err := db.PendingIntake(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].IssueID != "trusted" || !items[0].ForceHITLBeforeStart {
+		t.Fatalf("pending intake = %+v, want trusted issue with forced HITL", items)
+	}
+	trigger := client.events["trusted"][0]
+	receipt, err := db.ForgeEventReceipt(ctx, project.ID, "label:"+labelEventDigest("trusted", trigger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Actor != "operator" {
+		t.Fatalf("receipt actor = %q, want trigger actor operator", receipt.Actor)
+	}
+}
+
 func TestPollerAdvancesCursorOnlyAfterPersist(t *testing.T) {
 	ctx := context.Background()
 	db := openPollerDB(t)
 	if err := db.SeedProjectForTest(ctx, "cfg1", "p1", pollNow); err != nil {
 		t.Fatal(err)
 	}
-	pr := Project{ID: "p1", TriggerLabel: "sift",
+	pr := Project{ID: "p1", TriggerLabel: "sift", OperatorAllowlist: []string{"alice"},
 		Ref: forge.ProjectRef{Kind: forge.KindGitHub, Host: "github.com", ProjectKey: "org/repo-p1"}}
 
 	fc := forge.NewFake()
@@ -146,6 +202,7 @@ func TestPollerAdvancesCursorOnlyAfterPersist(t *testing.T) {
 		ID: "9", Title: "t", Body: "b", Author: "alice",
 		URL: "https://github.com/org/repo-p1/issues/9", Labels: []string{"sift"},
 	})
+	fc.AddLabelEvent(pr.Ref, forge.LabelEvent{TargetID: "9", Label: "sift", Action: forge.LabelAdded, Actor: "alice", ObservedAt: time.UnixMilli(pollNow)})
 
 	p := &Poller{
 		DB: db, Forge: fc, Projects: []Project{pr},

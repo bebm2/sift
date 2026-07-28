@@ -72,6 +72,34 @@ func TestCreateForgeRunRejectsIncomplete(t *testing.T) {
 	}
 }
 
+func TestForcedIntakeHITLProjectsToRun(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	insertConfigSnapshot(t, db, "cfg1")
+	insertProject(t, db, "p1", "cfg1")
+	if err := db.PersistIntakeBatch(ctx, PersistIntakeBatchCmd{ProjectID: "p1", Stream: "issues", Cursor: "next", NowMS: testNow, Items: []IntakeItemInput{{IssueID: "42", IssueURL: "u", IssueDigest: "issue", ForgeKind: "github", Host: "github.com", ProjectKey: "org/repo", EventID: "label:event", EventKind: "trigger_label_added", Actor: "operator", ForceHITLBeforeStart: true, ObservedAtMS: testNow, RawDigest: "event"}}}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := db.FindPendingIntake(ctx, "p1", "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := db.ReserveBrainCall(ctx, ReserveBrainCallCmd{Scope: BrainScopeIntake, SubjectKey: "forge:github:github.com:org/repo:issue:42", ProjectID: "p1", Touchpoint: "T1", PromptVersion: "T1/v1", OutputSchemaVersion: 1, InputJSON: []byte(`{}`), InputDigest: "input", StartedAtMS: testNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistIntakeDecision(ctx, IntakeDecisionCmd{IntakeID: item.ID, AssessmentID: "assessment", LogicalCallID: call.ID, ExpectedVersion: item.Version, Disposition: "ready", Rationale: "ready", RunID: "run", NowMS: testNow}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.Run(ctx, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.HITLBeforeStart {
+		t.Fatal("forced intake HITL was not projected to the Run")
+	}
+}
+
 func TestSetInitialTaskSpecAssignsRun(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
@@ -79,8 +107,8 @@ func TestSetInitialTaskSpecAssignsRun(t *testing.T) {
 	insertProject(t, db, "p1", "cfg1")
 	mustExec(t, db, `INSERT INTO runs
 		(id, source_kind, project_id, config_snapshot_id, forge_kind, forge_host, forge_project_key,
-		 issue_id, status, max_attempts, created_at_ms, updated_at_ms)
-		VALUES ('r1','forge','p1','cfg1','github','github.com','org/repo-p1','42','queued',3,?,?)`, testNow, testNow)
+		 issue_id, status, hitl_before_start, max_attempts, created_at_ms, updated_at_ms)
+		VALUES ('r1','forge','p1','cfg1','github','github.com','org/repo-p1','42','queued',1,3,?,?)`, testNow, testNow)
 
 	r, err := db.SetInitialTaskSpec(ctx, SetInitialTaskSpecCmd{
 		RunID: "r1", ExpectedVersion: 1, TaskSpecID: "spec1",
@@ -90,7 +118,7 @@ func TestSetInitialTaskSpecAssignsRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Kind != "feature" || r.AgentID != "fake-agent" || r.Version != 2 {
+	if r.Kind != "feature" || r.AgentID != "fake-agent" || !r.HITLBeforeStart || r.Version != 2 {
 		t.Fatalf("assigned run = %+v", r)
 	}
 	// Re-applying the same snapshot version is stale (version moved to 2).

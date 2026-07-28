@@ -466,6 +466,7 @@ T1 pre-Run 摄入投影，回答「该 Issue 正在等什么、哪组问题已�
 | `issue_id` | TEXT | NOT NULL |
 | `issue_url` | TEXT | NOT NULL |
 | `issue_digest` | TEXT | NOT NULL |
+| `force_hitl_before_start` | INTEGER | NOT NULL；可信 trigger actor 与不在该平台 operator allowlist 的 Issue 作者组合时为 1，后续 T2 不得清除 |
 | `state` | TEXT | `pending_evaluation \| evaluating \| awaiting_clarification \| awaiting_duplicate_confirmation \| ready \| consumed` |
 | `version` | INTEGER | NOT NULL，CAS |
 | `latest_assessment_id` | TEXT | NULL；非空时与 id 组成 intake_assessments 组合 FK |
@@ -480,6 +481,7 @@ T1 pre-Run 摄入投影，回答「该 Issue 正在等什么、哪组问题已�
 - `consumed` 必须有 `linked_run_id`；其他 state 不得有。
 - 两个 awaiting 状态必须有 `latest_assessment_id` 且 `clarification_generation >= 1`；`awaiting_duplicate_confirmation` 还必须有 `duplicate_candidate_run_id`。
 - 遗留 `evaluating` 由 Brain call 的持久状态恢复（见 [`brain.md` §5](brain.md)），不靠内存超时猜测。
+- `force_hitl_before_start=1` 在创建 Run 时投影到 `runs.hitl_before_start`；后续 T2 只能额外要求 HITL，不能清除该强制值。
 
 ### 7.6 `intake_assessments`（不可变）
 
