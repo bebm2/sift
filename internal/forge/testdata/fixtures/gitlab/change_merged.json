@@ -1,0 +1,9 @@
+{
+  "iid": 7,
+  "web_url": "https://gitlab.example/owner/repo/-/merge_requests/7",
+  "state": "merged",
+  "diff_refs": { "head_sha": "head-7" },
+  "merged_at": "2026-01-01T00:00:00Z",
+  "title": "Add feature",
+  "body": "real change body"
+}

@@ -77,6 +77,18 @@ func (d *DB) SetProjectHealth(ctx context.Context, projectID, reason string, now
 	return tx.Commit()
 }
 
+// ProjectIsolated reports whether a project has been quarantined by a runtime
+// auth/capability failure. Pollers skip isolated projects so a bad credential
+// is neither re-probed nor re-alerted every tick (WBS §2.3: alert once, no
+// hammering).
+func (d *DB) ProjectIsolated(ctx context.Context, projectID string) (bool, error) {
+	var health string
+	if err := d.db.QueryRowContext(ctx, `SELECT health FROM projects WHERE id=?`, projectID).Scan(&health); err != nil {
+		return false, err
+	}
+	return health == "isolated", nil
+}
+
 type PendingIntake struct {
 	ID, ProjectID, ForgeKind, Host, ProjectKey, IssueID, IssueURL, IssueDigest string
 	Version                                                                    int
@@ -153,7 +165,7 @@ func (d *DB) PersistIntakeBatch(ctx context.Context, cmd PersistIntakeBatchCmd) 
 		if _, err = tx.ExecContext(ctx, `INSERT INTO events (id,project_id,type,source,actor,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES (?,?, 'intake.issue_observed','forge',?,1,?,?,?)`, domainEventID, cmd.ProjectID, nullable(item.Actor), string(payload), item.ObservedAtMS, cmd.NowMS); err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO forge_event_receipts (id,project_id,forge_event_id,event_kind,target_kind,target_id,actor,raw_digest,disposition,domain_event_id,observed_at_ms) VALUES (?,?,?,?,?,?,?,?, 'accepted',?,?)`, newID(), cmd.ProjectID, item.EventID, valueOr(item.TargetKind, "issue"), item.IssueID, nullable(item.Actor), item.RawDigest, domainEventID, item.ObservedAtMS); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO forge_event_receipts (id,project_id,forge_event_id,event_kind,target_kind,target_id,actor,raw_digest,disposition,domain_event_id,observed_at_ms) VALUES (?,?,?,?,?,?,?,?, 'accepted',?,?)`, newID(), cmd.ProjectID, item.EventID, item.EventKind, valueOr(item.TargetKind, "issue"), item.IssueID, nullable(item.Actor), item.RawDigest, domainEventID, item.ObservedAtMS); err != nil {
 			return err
 		}
 	}

@@ -1,0 +1,10 @@
+[
+  {
+    "iid": 10,
+    "web_url": "https://gitlab.example/owner/repo/-/merge_requests/10",
+    "state": "opened",
+    "diff_refs": { "head_sha": "head-10" },
+    "title": "human change",
+    "body": "unrelated human change with no sift marker"
+  }
+]
