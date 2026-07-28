@@ -99,34 +99,34 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 - [x] ADR-010 决策 6 前已增加 ADR-013 名称修订指针
 - [x] 新规范名称确定为 `attempt_resolution`，V0 枚举为 `reject | retry_after_absence`
-- [ ] 创建单 Go module 与三个命令：`siftd`、`sift`、`sift-agent-wrapper`
+- [x] 创建单 Go module 与三个命令：`siftd`、`sift`、`sift-agent-wrapper`（`go.mod` + `cmd/{siftd,sift,sift-agent-wrapper}`，#8）
 
 ### 任务
 
 #### 1.1 Decode gateway、schema 与 CI
 
 - [x] 单一 decode gateway，调用方显式选 `closed` 或 `open-envelope`（`internal/decode`；调用方传 `decode.Closed`/`decode.OpenEnvelope`）
-- [ ] 配置、LLM 输出、socket 请求用 `closed`；Forge envelope 用 `open-envelope`，必需语义仍 fail closed（gateway 与两种模式已落；各消费者类型随各自切片接线）
+- [x] 配置、LLM 输出、socket 请求用 `closed`；Forge envelope 用 `open-envelope`，必需语义仍 fail closed（gateway 与两种模式已落；config/LLM/socket 已接 `decode.Closed`、Brain provider envelope 接 `decode.OpenEnvelope`，各消费者类型随各自切片接线；#9 + #16/#18/#20）
 - [x] 结构体生成 JSON Schema 并入 git；schema 漂移使 CI 失败（`internal/contract/genschema` + CI `schema-drift` job）
 - [x] V14 golden tests 覆盖缺失字段、额外字段、类型/枚举变型（`internal/contract/contract_test.go`）
 - [x] 从本片起在 CI 构建 darwin/linux × arm64/amd64，保持 `CGO_ENABLED=0`（`build-matrix` job）
 
 #### 1.2 SQLite、事件与迁移
 
-- [ ] `modernc.org/sqlite`，WAL、foreign keys、busy timeout，写连接池上限 1
-- [ ] 前向迁移与 `schema_version`；数据库版本较新时拒启
-- [ ] 按 DESIGN §7 数据组落当前投影、attempt、只追加事件、Intake、outbox、校准/Brain trace、认证、预算、配置快照
-- [ ] attempt 数据包含 `attempt_resolution` 与独立隔离标记；隔离期 worktree 不清理、不复用
-- [ ] Interrupt 数据包含生成键、nonce、投递状态、升级计数及 `superseded_by_fact | superseded_by_decision` 等关闭原因
-- [ ] 事件与投影同事务；事件存储无 update/delete 业务入口
+- [x] `modernc.org/sqlite`，WAL、foreign keys、busy timeout，写连接池上限 1（`internal/storage/storage.go`：`SetMaxOpenConns(1)`、PRAGMA 验证）
+- [x] 前向迁移与 `schema_version`；数据库版本较新时拒启（`internal/storage/migrate.go`：`ErrDatabaseTooNew`/`ErrMigrationMismatch` + checksum）
+- [x] 按 DESIGN §7 数据组落当前投影、attempt、只追加事件、Intake、outbox、校准/Brain trace、认证、预算、配置快照（`migrations/0001_initial_schema.sql`）
+- [x] attempt 数据包含 `attempt_resolution` 与独立隔离标记；隔离期 worktree 不清理、不复用（attempts 表 `attempt_resolution`/`isolation_state`）
+- [x] Interrupt 数据包含生成键、nonce、投递状态、升级计数及 `superseded_by_fact | superseded_by_decision` 等关闭原因（interrupts/interrupt_deliveries 表）
+- [x] 事件与投影同事务；事件存储无 update/delete 业务入口（§13 append-only triggers；#12）
 
 #### 1.3 状态机与事务核心
 
-- [ ] 实现 PRD §4.1 当前完整转移图，含外部事实的 `queued → failed` 与 `waiting_human → done`
-- [ ] `Recommendation → DomainCommand → Transition` 类型隔离；只有 `transition()` 写 Run 状态
-- [ ] CAS 拒绝过期命令；非法转移报错并记审计事件
-- [ ] transactional outbox、稳定 operation key、提交唤醒与退避框架
-- [ ] 三组具名调度器骨架；禁止散落 ticker
+- [x] 实现 PRD §4.1 当前完整转移图，含外部事实的 `queued → failed` 与 `waiting_human → done`（`legalTransition`；`TestV1RunTransitionGraphAndCAS`）
+- [x] `Recommendation → DomainCommand → Transition` 类型隔离；只有 `transition()` 写 Run 状态（`internal/storage/transition.go`）
+- [x] CAS 拒绝过期命令；非法转移报错并记审计事件（`ErrRejectedStale` + `auditIllegalTransition`）
+- [x] transactional outbox、稳定 operation key、提交唤醒与退避框架（`internal/storage/outbox.go` + `wakeOutbox` + `BackoffPolicy`）
+- [x] 三组具名调度器骨架；禁止散落 ticker（`scheduler.go`：Intake/Reconciler/Supervisor，wakeup-driven 无 ticker）
 - [ ] V1 与 V2 核心崩溃注入；逐项覆盖 `specs/storage.md` §11 的可变写入族，含项目健康、Task Spec、Forge 收费、Interrupt 推进与 delivery
 
 #### 1.4 配置与启动生命周期
@@ -140,14 +140,14 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 1.5 控制面与进程边界
 
-- [ ] `siftd.sock` 与 `run.sock` 分离；operator capability 只授权运维端点
-- [ ] RPC envelope 携协议/二进制版本；主版本不一致拒绝
-- [ ] 单实例互斥，第二个 daemon 明确拒启
+- [x] `siftd.sock` 与 `run.sock` 分离；operator capability 只授权运维端点（`internal/controlplane/server.go` + `TestV10aEndpointCapabilitiesAndSockets`）
+- [x] RPC envelope 携协议/二进制版本；主版本不一致拒绝（`protocol.go` `validateEnvelope`：`ProtocolMajor`/`ClientVersion` 主版本校验）
+- [x] 单实例互斥，第二个 daemon 明确拒启（`acquireLock` flock + `TestSecondDaemonRefusesLock`）
 - [ ] 只创建 Unix socket，不创建 TCP/UDP listener；集成测试检查零网络监听
-- [ ] V10a 首段：无 operator token 的运维请求被拒、`run.sock` 无运维动词、run token 不能调用 wrapper handoff 动词
-- [ ] V10b：V0 以 Agent 身份读取 operator token 并调用运维 RPC 预期成功，同时 `doctor` 必须报告此未闭合边界
-- [ ] 实现薄 CLI 的 `ps/logs/worktree/doctor` 与 `kill/retry` 请求壳；所有运维命令只走 daemon，不直连 DB
-- [ ] daemon 不可用时只允许明确标记为 offline 的只读诊断；`kill/retry` 等写操作拒绝，绝不离线改库
+- [x] V10a 首段：无 operator token 的运维请求被拒、`run.sock` 无运维动词、run token 不能调用 wrapper handoff 动词（`TestV10aEndpointCapabilitiesAndSockets`）
+- [x] V10b：V0 以 Agent 身份读取 operator token 并调用运维 RPC 预期成功，同时 `doctor` 必须报告此未闭合边界（`doctor` 报 `unsafe-local` + `operator-token-readable-by-agent`；M8 最终闭合）
+- [x] 实现薄 CLI 的 `ps/logs/worktree/doctor` 与 `kill/retry` 请求壳；所有运维命令只走 daemon，不直连 DB（`cmd/sift/main.go`）
+- [x] daemon 不可用时只允许明确标记为 offline 的只读诊断；`kill/retry` 等写操作拒绝，绝不离线改库（`sift doctor --offline` + `OperatorRequest` 失败拒绝）
 - [ ] `doctor` 基线检查 runtime、SQLite、Agent CLI、相关 forge CLI 登录/版本、按配置启用的 tmux、目录/socket 权限；后续片增补策略、hooks、积压与安全姿态
 
 #### 1.6 Reconciler 与 fake 骨架链
@@ -161,15 +161,15 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 #### 1.7 Brain 调用壳、T1/T2 与 Task Spec
 
 - [x] 编写 `specs/brain.md` 的统一调用与 T1/T2 契约
-- [ ] 本机 agent CLI 调用壳：stdin/临时文件输入 → schema 校验 → 同 prompt 重试一次 → 逐触点确定性兜底
-- [ ] 提示词与 schema 版本化并入 git；调用身份与各触点作用域以 `specs/brain.md`、`specs/storage.md` §10.1 为准
-- [ ] 每次调用按 `specs/storage.md` §10.1 持久化 call/attempt（`brain_calls` 一次终结 + 有序 `brain_attempts`）；具体调用、兜底与 Gate 关联契约由 `specs/brain.md` 定义
-- [ ] T1：Issue 体检，失败兜底为直接入队
-- [ ] T2：生成 kind/agent/goals/开工前审批建议；失败兜底为人工分派
-- [ ] 组装 Task Spec（Description + Goals + Guardrails + Context）；Context 从 base/全局/任务附注组合
-- [ ] token 收费口只在调用壳；超限后所有触点走各自兜底并产生告警事件
+- [x] 本机 agent CLI 调用壳：stdin/临时文件输入 → schema 校验 → 同 prompt 重试一次 → 逐触点确定性兜底（`internal/brain/shell.go` + `provider.go` `SubprocessProvider`）
+- [x] 提示词与 schema 版本化并入 git；调用身份与各触点作用域以 `specs/brain.md`、`specs/storage.md` §10.1 为准（`assets.go` `PromptVersion`/`OutputSchemaVersion`）
+- [x] 每次调用按 `specs/storage.md` §10.1 持久化 call/attempt（`brain_calls` 一次终结 + 有序 `brain_attempts`）；具体调用、兜底与 Gate 关联契约由 `specs/brain.md` 定义（`ReserveBrainCall`/`RecordBrainAttempt`/`FinalizeBrainCall`）
+- [x] T1：Issue 体检，失败兜底为直接入队（`T1Contract` + `T1FallbackOutput` = ready 直接入队）
+- [x] T2：生成 kind/agent/goals/开工前审批建议；失败兜底为人工分派（`T2Contract`，fallback 留待人工分派）
+- [x] 组装 Task Spec（Description + Goals + Guardrails + Context）；Context 从 base/全局/任务附注组合（`internal/brain/taskspec.go`）
+- [x] token 收费口只在调用壳；超限后所有触点走各自兜底并产生告警事件（`Shell.Call` 唯一收费口 + preflight fallback）
 - [ ] intake crash/replay 验收：澄清/确认评论「远端成功、本地提交前崩溃」按 outbox marker 收敛不重复发；旧 generation 回复只记审计不推进状态；replay JSONL 单条 `brain_call` record 内携有序 attempts
-- [ ] M1 fake 链使用 fake provider 的合法 T2 输出；真实 CLI 壳通过 fixture/子进程测试
+- [x] M1 fake 链使用 fake provider 的合法 T2 输出；真实 CLI 壳通过 fixture/子进程测试（`FakeProvider.ValidT2ResultText` + `TestShellWithRealCLIFixture`）
 
 ### 先写 spec
 
@@ -181,9 +181,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 ### M1 门禁
 
-- [ ] V1、V2 核心、V9 骨架段、V10a 端点段、V10b、V12、V14 通过
-- [ ] Brain fixture 覆盖 schema 失败后同 prompt 重试一次、逐触点兜底、trace 持久化与 token 收费
-- [ ] V15 四组合构建段通过
+- [x] V1、V2 核心、V9 骨架段、V10a 端点段、V10b、V12、V14 通过（`TestV1`/`TestV2`/`TestV9FirstSegmentSkeletonChain`/`TestV10a`/V10b doctor/`TestV12Scenario*`/`TestV14*`；`CGO_ENABLED=0 go test ./...` 绿）
+- [x] Brain fixture 覆盖 schema 失败后同 prompt 重试一次、逐触点兜底、trace 持久化与 token 收费（`TestShellInvalidThenValidSamePrompt`/`TestShellInvalidThenFallback`/`TestShellRecovery`/`TestShellZeroUsageNoCharge`）
+- [x] V15 四组合构建段通过（CI `build-matrix` job darwin/linux × amd64/arm64 `CGO_ENABLED=0` 绿）
 - [ ] 第二实例拒启且进程无网络 listener
 - [x] 敏感配置磁盘漂移不热生效；零配置启动通过（`internal/config` DriftChecker warn-only + V12 两种场景）
 
