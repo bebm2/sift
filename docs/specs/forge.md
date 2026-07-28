@@ -24,7 +24,7 @@ summary: Forge 适配层的最小动词集签名、中性类型、平台归一�
 6. 错误分类只暴露五种语义：`Transient` | `RateLimited` | `AuthOrCapability` | `ContractViolation` | `SemanticConflict`。平台 HTTP 状态码 / 退出码 / stderr 细节锁定在适配器内部。
 7. API 预算只在 Forge 适配层收费；上层不感知 `gh`/`glab` 的速率限制细节。
 8. 副作用对账是端口能力，不是上层自行查询：`FindChangeForCreateOperation`（跨全状态 marker 搜索与冲突检测）、`MergeChange`（expected-head CAS）由适配器实现，outbox worker 不得用 raw API 旁路。
-9. 能力探测只探测**已配置项目实际引用到的** forge；探测失败拒绝启动 daemon，不做运行时降级（PRD §9.3 / DESIGN §11）。
+9. 自动合并能力只探测**已配置项目实际引用到的** forge，且在任何 merge worker 启动前执行。探测把 `capabilities_json.auto_merge` 与检查时间、审计事件一同持久化；初值、缺字段、探测歧义和重启后的未重探状态一律为 `false`。探测只验证 CLI 能以 request body 提交 expected-head CAS 字段，禁止用首次真实 merge 当探测；merge 路径必须同时消费本进程探测结果和持久化项目状态。
 10. 所有动词签名以本规格为准。M1 fake 的三个骨架动词中，`ListLabelEvents` 尚缺 `TargetRef` 与返回游标，`Issue`/`Change` 投影也缺 M2 必需事实；M2 扩展 fake 时必须同步迁移。
 
 ## 2. 基础类型
@@ -323,7 +323,7 @@ MergeChange(ctx, project, changeID, expectedHeadSHA, method string) → (Change,
 - V0 的 `method` **只能为 `"merge"`**，与 [`outbox.md` §8](outbox.md) 一致；其他值为 `ErrContractViolation`。平台差异表中的 squash/rebase/ff 不是可直接原样映射的共同枚举，后续开放方法必须版本化本契约并逐平台验证语义。
 - GitHub：`gh api /repos/{org}/{repo}/pulls/{number}/merge -f sha='{expectedHeadSHA}' -f merge_method='merge'`。`sha` 参数提供原子 CAS。
 - GitLab：`glab api projects/{id}/merge_requests/{iid}/merge -f sha='{expectedHeadSHA}'`。GitLab merge API 没有与 GitHub `merge_method` 同义的字段；项目的 fast-forward 策略由远端配置决定。`merge when pipeline succeeds` 不适用。
-- **适配器无法提供 `sha` 参数的条件语义时**（如 Glab 的某些旧版本 `merge` 子命令缺少该参数，或该平台不支持 head CAS），`MergeChange` 返回 `ErrAuthOrCapability` 并标注 `capability_unsupported`。**上层接到该错误后将该项目 `auto_merge` capability 置为不可用，不得降级为无条件 merge**（ADR-011 / DESIGN §8.1）。
+- **适配器无法提供 `sha` 参数的条件语义时**（如 CLI 无法提交 request body，或平台不支持 head CAS），`MergeChange` 返回 `ErrAuthOrCapability` 并标注 `capability_unsupported`。启动期未证明或持久化 capability 为不可用时均不得自动合并；运行期发现该错误也不得降级为无条件 merge（ADR-011 / DESIGN §8.1）。
 - 远端返回非 200 且原因是 head SHA 不匹配 → `ErrSemanticConflict`。
 - 合并成功后返回更新后的 `Change`（`State=ChangeMerged`、`MergedAt` 取自远端响应）。
 

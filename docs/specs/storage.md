@@ -134,8 +134,8 @@ PRAGMA wal_autocheckpoint = 1000;
 | `enabled` | INTEGER | NOT NULL boolean |
 | `health` | TEXT | `active \| isolated` |
 | `isolation_reason` | TEXT | NULL 或 `config_invalid \| repo_invalid \| agent_unavailable \| forge_auth_or_capability \| policy_invalid` |
-| `capabilities_json` | TEXT | NOT NULL，默认 `{}` |
-| `capabilities_checked_at_ms` | INTEGER | NULL |
+| `capabilities_json` | TEXT | NOT NULL，默认 `{}`；已证明的 expected-head CAS 写为 `{"auto_merge":true}`，缺失/false 均不得自动合并 |
+| `capabilities_checked_at_ms` | INTEGER | NULL；最近一次 capability probe（包括未证明）时间 |
 | `created_at_ms` | INTEGER | NOT NULL |
 | `updated_at_ms` | INTEGER | NOT NULL |
 
@@ -813,7 +813,7 @@ Gate record 来自同一 snapshot/evaluation；Brain record 一条 logical recor
 | `ApplyMigration` | schema，仅启动期 |
 | `ActivateConfig` | config snapshot、daemon boot、projects 当前投影 |
 | `FinishDaemonBoot` | daemon boot 的一次性停止补全 |
-| `UpdateProjectRuntime` | project health/isolation/capabilities + event + 可选唯一告警 outbox；供持续能力探测 |
+| `UpdateProjectRuntime` / `UpdateProjectAutoMergeCapability` | project health/isolation/capabilities + event + 可选唯一告警 outbox；供启动期和持续能力探测 |
 | `RecordHookBaseline(expectedDigest)` | hook baseline CAS + 漂移安全事件 + 可选 Run transition/Interrupt/预算/outbox |
 | `TransitionRun(expectedVersion, command)` | runs + events + 可选 outbox/幂等记录 |
 | `SetInitialTaskSpec(expectedRunVersion, callIdentity)` | 幂等插入初始 Task Spec snapshot + Run 当前指针 + event |

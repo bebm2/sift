@@ -34,9 +34,10 @@ type Adapter struct {
 	// CLI subprocess (forge.md §9). A nil charger disables charging.
 	charger Charger
 
-	mu             sync.RWMutex
-	unsupportedCAS map[string]bool
-	chargeSeqs     map[string]int64
+	mu                 sync.RWMutex
+	autoMergeSupported map[string]bool
+	chargeSeqs         map[string]int64
+	capabilities       AutoMergeCapabilityReader
 }
 
 func NewAdapter(k Kind, cli string, r Runner) *Adapter {
@@ -49,7 +50,7 @@ func NewAdapter(k Kind, cli string, r Runner) *Adapter {
 	if r == nil {
 		r = ExecRunner
 	}
-	return &Adapter{CLI: cli, Kind: k, Run: r, unsupportedCAS: map[string]bool{}, chargeSeqs: map[string]int64{}}
+	return &Adapter{CLI: cli, Kind: k, Run: r, autoMergeSupported: map[string]bool{}, chargeSeqs: map[string]int64{}}
 }
 
 // WithCharger installs the forge API budget charger. Without it the adapter
@@ -57,6 +58,13 @@ func NewAdapter(k Kind, cli string, r Runner) *Adapter {
 // adapter for constructor chaining.
 func (a *Adapter) WithCharger(c Charger) *Adapter {
 	a.charger = c
+	return a
+}
+
+// WithAutoMergeCapabilityReader makes MergeChange consume the durable project
+// capability projection in addition to this process's startup probe result.
+func (a *Adapter) WithAutoMergeCapabilityReader(r AutoMergeCapabilityReader) *Adapter {
+	a.capabilities = r
 	return a
 }
 
@@ -90,13 +98,45 @@ func (a *Adapter) chargeAPICall(ctx context.Context, p ProjectRef) error {
 	return nil
 }
 
-// AutoMergeSupported reports whether this project has a proven expected-head
-// CAS path. A capability rejection permanently disables automatic merging for
-// the adapter instance; callers must not retry with an unconditional merge.
+// AutoMergeSupported reports whether this process has proved the project's
+// expected-head CAS path during startup. The zero value is deliberately false:
+// a first real merge must never be capability discovery.
 func (a *Adapter) AutoMergeSupported(p ProjectRef) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return !a.unsupportedCAS[projectCapabilityKey(p)]
+	return a.autoMergeSupported[projectCapabilityKey(p)]
+}
+
+// ProbeAndRecordAutoMergeCapability is the startup handoff: probe before any
+// worker can merge, then persist both result and audit evidence. Recording an
+// unproven result is intentional and must not be skipped.
+func (a *Adapter) ProbeAndRecordAutoMergeCapability(ctx context.Context, projectID string, p ProjectRef, recorder AutoMergeCapabilityRecorder, now time.Time) error {
+	if recorder == nil {
+		return errors.New("forge: auto-merge capability recorder is required")
+	}
+	proven, evidence := a.ProbeAutoMergeCapability(ctx, p)
+	return recorder.UpdateProjectAutoMergeCapability(ctx, projectID, proven, evidence, now.UnixMilli())
+}
+
+// ProbeAutoMergeCapability performs a non-mutating startup proof that this CLI
+// can submit a JSON request body to the platform API. Both supported forge
+// merge endpoints accept expected-head SHA in that body; the actual endpoint
+// is not called, so no Change is used as a probe. Any ambiguity remains false.
+func (a *Adapter) ProbeAutoMergeCapability(ctx context.Context, p ProjectRef) (proven bool, evidence string) {
+	if p.Kind != a.Kind {
+		return false, "adapter kind mismatch"
+	}
+	out, stderr, err := a.Run(ctx, a.CLI, []string{"api", "--help"}, nil)
+	if err != nil {
+		return false, "api help failed: " + strings.TrimSpace(string(stderr))
+	}
+	if !strings.Contains(string(out), "--input") {
+		return false, "api command does not advertise --input"
+	}
+	a.mu.Lock()
+	a.autoMergeSupported[projectCapabilityKey(p)] = true
+	a.mu.Unlock()
+	return true, "api --input supports expected-head CAS request body"
 }
 
 func projectCapabilityKey(p ProjectRef) string {
@@ -105,7 +145,7 @@ func projectCapabilityKey(p ProjectRef) string {
 
 func (a *Adapter) disableAutoMerge(p ProjectRef) {
 	a.mu.Lock()
-	a.unsupportedCAS[projectCapabilityKey(p)] = true
+	a.autoMergeSupported[projectCapabilityKey(p)] = false
 	a.mu.Unlock()
 }
 
@@ -592,7 +632,13 @@ func normalizeCI(s string) string {
 }
 func (a *Adapter) MergeChange(ctx context.Context, p ProjectRef, id, expected, method string) (Change, error) {
 	if !a.AutoMergeSupported(p) {
-		return Change{}, &ClassifiedError{Class: ErrAuthOrCapability, Summary: "capability_unsupported: expected-head CAS"}
+		return Change{}, &ClassifiedError{Class: ErrAuthOrCapability, Summary: "capability_unsupported: expected-head CAS is unproven"}
+	}
+	if a.capabilities != nil {
+		enabled, err := a.capabilities.AutoMergeEnabled(ctx, p)
+		if err != nil || !enabled {
+			return Change{}, &ClassifiedError{Class: ErrAuthOrCapability, Summary: "capability_unsupported: persisted auto_merge capability is unavailable"}
+		}
 	}
 	if id == "" || expected == "" {
 		return Change{}, &ClassifiedError{Class: ErrContractViolation, Summary: "change id and expected head sha are required"}
