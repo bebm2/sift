@@ -113,6 +113,19 @@ const (
 	SemanticConflict FindResult = "semantic_conflict"
 )
 
+// AutoMergeCapabilityReader supplies the persisted, per-project capability
+// projection. It lets the merge boundary fail closed even if a caller forgot
+// to carry a startup-probe result through its own policy code.
+type AutoMergeCapabilityReader interface {
+	AutoMergeEnabled(context.Context, ProjectRef) (bool, error)
+}
+
+// AutoMergeCapabilityRecorder is the startup write port for the durable
+// capability projection. The caller supplies its configured project id.
+type AutoMergeCapabilityRecorder interface {
+	UpdateProjectAutoMergeCapability(context.Context, string, bool, string, int64) error
+}
+
 type Client interface {
 	ListIssuesByLabel(context.Context, ProjectRef, string, Cursor) ([]Issue, Cursor, error)
 	GetIssue(context.Context, ProjectRef, string) (Issue, error)

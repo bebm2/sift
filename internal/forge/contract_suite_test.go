@@ -238,6 +238,7 @@ func runV3Suite(t *testing.T, p v3Platform) {
 	// the transport ack.
 	t.Run("merge_expected_head_cas_success", func(t *testing.T) {
 		a := p.newAdapter("", mergeRunner(p.changeMerged))
+		proveAutoMerge(t, a, p.project)
 		c, err := a.MergeChange(ctx, p.project, p.wantID, "head-7", "merge")
 		if err != nil {
 			t.Fatalf("err=%v", err)
@@ -253,6 +254,7 @@ func runV3Suite(t *testing.T, p v3Platform) {
 	// Stale head → SemanticConflict (forge.md §4.13).
 	t.Run("merge_stale_head_semantic_conflict", func(t *testing.T) {
 		a := p.newAdapter("", mergeErrRunner("409 head SHA does not match"))
+		proveAutoMerge(t, a, p.project)
 		_, err := a.MergeChange(ctx, p.project, p.wantID, "head-7", "merge")
 		if !errors.Is(err, ErrSemanticConflict) {
 			t.Fatalf("err=%v, want ErrSemanticConflict", err)
@@ -264,9 +266,10 @@ func runV3Suite(t *testing.T, p v3Platform) {
 	// project; it must not downgrade to an unconditional merge.
 	t.Run("merge_capability_structurally_disabled", func(t *testing.T) {
 		a := p.newAdapter("", mergeErrRunner("unknown parameter: sha; capability_unsupported"))
-		if !a.AutoMergeSupported(p.project) {
-			t.Fatal("auto_merge must be supported before the first capability failure")
+		if a.AutoMergeSupported(p.project) {
+			t.Fatal("auto_merge must be disabled before startup proof")
 		}
+		proveAutoMerge(t, a, p.project)
 		if _, err := a.MergeChange(ctx, p.project, p.wantID, "head-7", "merge"); !errors.Is(err, ErrAuthOrCapability) {
 			t.Fatalf("first err=%v, want ErrAuthOrCapability", err)
 		}
@@ -282,10 +285,18 @@ func runV3Suite(t *testing.T, p v3Platform) {
 	// Only the V0 "merge" method is accepted (forge.md §4.13).
 	t.Run("merge_rejects_non_merge_method", func(t *testing.T) {
 		a := p.newAdapter("", mergeRunner(p.changeMerged))
+		proveAutoMerge(t, a, p.project)
 		if _, err := a.MergeChange(ctx, p.project, p.wantID, "head-7", "squash"); !errors.Is(err, ErrContractViolation) {
 			t.Fatalf("err=%v, want ErrContractViolation", err)
 		}
 	})
+}
+
+func proveAutoMerge(t *testing.T, a *Adapter, p ProjectRef) {
+	t.Helper()
+	if proven, evidence := a.ProbeAutoMergeCapability(context.Background(), p); !proven {
+		t.Fatalf("startup capability probe = false: %s", evidence)
+	}
 }
 
 // v3Page builds a full page of platform-shaped issue JSON for the pagination
@@ -324,6 +335,9 @@ func matchRunner(key string, b []byte) Runner {
 // mergeRunner serves the merge PUT ack, then the merged-Change re-read.
 func mergeRunner(merged []byte) Runner {
 	return func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if len(args) == 2 && args[1] == "--help" {
+			return []byte("--input file"), nil, nil
+		}
 		if strings.HasSuffix(args[1], "/merge") {
 			return []byte(`{"merged":true}`), nil, nil
 		}
@@ -335,6 +349,9 @@ func mergeRunner(merged []byte) Runner {
 // classified error is derived from it (classify keys off stderr).
 func mergeErrRunner(stderr string) Runner {
 	return func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if len(args) == 2 && args[1] == "--help" {
+			return []byte("--input file"), nil, nil
+		}
 		if strings.HasSuffix(args[1], "/merge") {
 			return nil, []byte(stderr), errors.New("exit status 1")
 		}

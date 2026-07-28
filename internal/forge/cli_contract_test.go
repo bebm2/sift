@@ -90,10 +90,40 @@ func TestFindChangeForCreateOperationMarkerAndConflict(t *testing.T) {
 	}
 }
 
+type capabilityReader bool
+
+func (r capabilityReader) AutoMergeEnabled(context.Context, ProjectRef) (bool, error) {
+	return bool(r), nil
+}
+
+func TestAutoMergeFailsClosedUntilStartupProbeAndPersistedCapability(t *testing.T) {
+	project := ProjectRef{Kind: KindGitHub, Host: "github.com", ProjectKey: "owner/repo"}
+	calls := 0
+	a := NewGitHub("gh", func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		calls++
+		if len(args) == 2 && args[1] == "--help" {
+			return []byte("--input file"), nil, nil
+		}
+		return []byte(`{"merged":true}`), nil, nil
+	}).WithAutoMergeCapabilityReader(capabilityReader(false))
+	if _, err := a.MergeChange(context.Background(), project, "7", "head-a", "merge"); !errors.Is(err, ErrAuthOrCapability) || calls != 0 {
+		t.Fatalf("unproven merge err=%v calls=%d; want fail closed without a CLI call", err, calls)
+	}
+	if proven, evidence := a.ProbeAutoMergeCapability(context.Background(), project); !proven {
+		t.Fatalf("startup proof = false: %s", evidence)
+	}
+	if _, err := a.MergeChange(context.Background(), project, "7", "head-a", "merge"); !errors.Is(err, ErrAuthOrCapability) || calls != 1 {
+		t.Fatalf("persisted disabled merge err=%v calls=%d; want fail closed", err, calls)
+	}
+}
+
 func TestMergeChangeExpectedHeadCASAndCapabilityFailure(t *testing.T) {
 	project := ProjectRef{Kind: KindGitHub, Host: "github.com", ProjectKey: "owner/repo"}
 	calls := 0
 	a := NewGitHub("gh", func(_ context.Context, _ string, args []string, input []byte) ([]byte, []byte, error) {
+		if len(args) == 2 && args[1] == "--help" {
+			return []byte("--input file"), nil, nil
+		}
 		calls++
 		if calls == 1 {
 			if !strings.Contains(args[1], "/pulls/7/merge") {
@@ -107,14 +137,21 @@ func TestMergeChangeExpectedHeadCASAndCapabilityFailure(t *testing.T) {
 		}
 		return []byte(`{"number":7,"html_url":"https://x/7","state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"sha":"head-a"}}`), nil, nil
 	})
+	if proven, evidence := a.ProbeAutoMergeCapability(context.Background(), project); !proven {
+		t.Fatalf("startup probe failed: %s", evidence)
+	}
 	change, err := a.MergeChange(context.Background(), project, "7", "head-a", "merge")
 	if err != nil || change.State != ChangeMerged || calls != 2 {
 		t.Fatalf("merge=%+v calls=%d err=%v", change, calls, err)
 	}
 
-	a = NewGitHub("gh", func(context.Context, string, []string, []byte) ([]byte, []byte, error) {
+	a = NewGitHub("gh", func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if len(args) == 2 && args[1] == "--help" {
+			return []byte("--input file"), nil, nil
+		}
 		return nil, []byte("unknown parameter: sha; capability_unsupported"), errors.New("exit status 1")
 	})
+	a.ProbeAutoMergeCapability(context.Background(), project)
 	_, err = a.MergeChange(context.Background(), project, "7", "head-a", "merge")
 	if !errors.Is(err, ErrAuthOrCapability) || a.AutoMergeSupported(project) {
 		t.Fatalf("missing expected-head CAS capability error=%v supported=%v", err, a.AutoMergeSupported(project))
@@ -124,9 +161,13 @@ func TestMergeChangeExpectedHeadCASAndCapabilityFailure(t *testing.T) {
 		t.Fatalf("disabled auto-merge error=%v", err)
 	}
 
-	a = NewGitHub("gh", func(context.Context, string, []string, []byte) ([]byte, []byte, error) {
+	a = NewGitHub("gh", func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if len(args) == 2 && args[1] == "--help" {
+			return []byte("--input file"), nil, nil
+		}
 		return nil, []byte("409 head SHA does not match"), errors.New("exit status 1")
 	})
+	a.ProbeAutoMergeCapability(context.Background(), project)
 	_, err = a.MergeChange(context.Background(), project, "7", "head-a", "merge")
 	if !errors.Is(err, ErrSemanticConflict) {
 		t.Fatalf("stale head error=%v", err)
