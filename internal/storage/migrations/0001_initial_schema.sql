@@ -286,7 +286,7 @@ CREATE TABLE interrupts (
         'responded', 'expired_auto_reject', 'superseded_by_fact',
         'superseded_by_decision', 'external_fact')),
     closed_at_ms            INTEGER,
-    charged_budget_entry_id TEXT UNIQUE REFERENCES budget_entries (id),
+    charged_budget_entry_id TEXT NOT NULL UNIQUE REFERENCES budget_entries (id),
     created_at_ms           INTEGER NOT NULL,
     updated_at_ms           INTEGER NOT NULL,
     FOREIGN KEY (run_id, attempt_no) REFERENCES attempts (run_id, attempt_no),
