@@ -341,12 +341,24 @@ func BuildT7Input(in T7Input) ([]byte, error) {
 	return decode.Canonical(in)
 }
 
+func validTaskKinds(kinds []TaskKind) bool {
+	if len(kinds) == 0 {
+		return false
+	}
+	for i, kind := range kinds {
+		if !validTaskKind(kind) || (i > 0 && kinds[i-1] >= kind) {
+			return false
+		}
+	}
+	return true
+}
+
 func sameTaskKinds(categories []T7CategoryEvidence, expected []TaskKind) bool {
-	if len(categories) != len(expected) || len(expected) == 0 {
+	if len(categories) != len(expected) || !validTaskKinds(expected) {
 		return false
 	}
 	for i, kind := range expected {
-		if !validTaskKind(kind) || (i > 0 && expected[i-1] >= kind) || categories[i].TaskKind != kind {
+		if categories[i].TaskKind != kind {
 			return false
 		}
 	}
@@ -399,21 +411,34 @@ type T7Output struct {
 // deterministically selected evidence IDs. It deliberately has no action,
 // Gate, Interrupt, or policy-write capability.
 func T7Contract(aggregateKey, traceProjectID string, allCategoryKinds []TaskKind, evidenceIDs []string) TouchpointContract {
-	return TouchpointContract{Touchpoint: "T7", Asset: T7Asset(), ValidateInput: func(input []byte) error {
+	return TouchpointContract{Touchpoint: "T7", Asset: T7Asset(), ValidateInput: func(p CallParams) error {
 		var in T7Input
-		if err := decode.Decode(input, &in, decode.Closed); err != nil {
+		if err := decode.Decode(p.Input, &in, decode.Closed); err != nil {
 			return err
 		}
-		if in.AggregateKey != aggregateKey {
+		if p.Scope != storage.BrainScopeAggregate {
+			return errors.New("brain: T7 scope does not match aggregate trace")
+		}
+		if p.SubjectKey != aggregateKey || in.AggregateKey != p.SubjectKey {
 			return errors.New("brain: T7 aggregate key does not match trace subject")
 		}
-		in.TraceProjectID = traceProjectID
+		if p.ProjectID != traceProjectID {
+			return errors.New("brain: T7 project does not match trace")
+		}
+		parts, ok := aggregateParts(p.SubjectKey)
+		if !ok {
+			return errors.New("brain: invalid T7 aggregate key")
+		}
+		if parts.kind == "all" && !validTaskKinds(allCategoryKinds) {
+			return errors.New("brain: T7 all categories require deterministic expected kinds")
+		}
+		in.TraceProjectID = p.ProjectID
 		in.AllCategoryKinds = allCategoryKinds
 		canonical, err := BuildT7Input(in)
 		if err != nil {
 			return err
 		}
-		if string(canonical) != string(input) {
+		if string(canonical) != string(p.Input) {
 			return errors.New("brain: T7 input is not canonical")
 		}
 		return nil

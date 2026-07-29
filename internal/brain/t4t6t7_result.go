@@ -40,8 +40,12 @@ type T4CallResult struct {
 
 func T4ResultFromCall(result CallResult, in T4Input) (T4CallResult, BrainSource, error) {
 	if result.Status == "valid" {
+		canonical, err := T4Contract(in).ValidateOutput(result.Output)
+		if err != nil {
+			return T4CallResult{}, BrainSource{}, err
+		}
 		var out T4Output
-		if err := decode.Decode(result.Output, &out, decode.Closed); err != nil {
+		if err := decode.Decode(canonical, &out, decode.Closed); err != nil {
 			return T4CallResult{}, BrainSource{}, err
 		}
 		return T4CallResult{Normal: &out}, brainSource(result), nil
@@ -55,7 +59,11 @@ func T4ResultFromCall(result CallResult, in T4Input) (T4CallResult, BrainSource,
 func T6ResultFromCall(result CallResult, in T6Input) (T6Output, BrainSource, error) {
 	var out T6Output
 	if result.Status == "valid" {
-		if err := decode.Decode(result.Output, &out, decode.Closed); err != nil {
+		canonical, err := T6Contract(in).ValidateOutput(result.Output)
+		if err != nil {
+			return out, BrainSource{}, err
+		}
+		if err := decode.Decode(canonical, &out, decode.Closed); err != nil {
 			return out, BrainSource{}, err
 		}
 		return out, brainSource(result), nil

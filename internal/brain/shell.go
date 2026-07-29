@@ -46,8 +46,9 @@ type TouchpointContract struct {
 	// synthesized LLM output.
 	FallbackOutput func() []byte
 	// ValidateInput runs before reserve so malformed touchpoint inputs cannot
-	// create trace rows or consume budget.
-	ValidateInput func([]byte) error
+	// create trace rows or consume budget. It receives the call identity so
+	// validators can bind input to the trace being reserved.
+	ValidateInput func(CallParams) error
 }
 
 // CallParams is the logical-call identity plus its canonical input JSON.
@@ -77,7 +78,7 @@ func (s *Shell) Call(ctx context.Context, tp TouchpointContract, p CallParams) (
 	defer s.mu.Unlock()
 
 	if tp.ValidateInput != nil {
-		if err := tp.ValidateInput(p.Input); err != nil {
+		if err := tp.ValidateInput(p); err != nil {
 			return CallResult{}, err
 		}
 	}
