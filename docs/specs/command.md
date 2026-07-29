@@ -1,12 +1,12 @@
 ---
-status: draft
+status: active
 created: 2026-07-29
 summary: Forge 指令的鉴权、解析、确定性效果与回执契约
 ---
 
 # Command 规格
 
-本文定义 M5 Command：经鉴权的 Forge 评论和审批标签如何成为一个可重放的领域命令。本文保持 `draft`；它冻结字段和事务边界，不表示已实现或已通过评审。
+本文定义 M5 Command：经鉴权的 Forge 评论和审批标签如何成为一个可重放的领域命令。字段评审已由[第九次定向复审 PASS](../reviews/2026-07-29-m5-command-field-rereview-9-pi-gpt-5.6-sol.md)确认；本规格 `active` 不表示 M5 已实现或阶段门禁已通过。
 
 来源：[PRD §7.1、§9.2](../PRD.md)、[DESIGN §6.2、§6.4、§10.1](../DESIGN.md)、[WBS M5 §5.4](../WBS.md)、[ADR-013](../decisions/013-startup-stall-retry-convergence.md)。Interrupt、配置、Forge、存储、Ledger 和 outbox 的权威字段分别见 [`interrupt.md`](interrupt.md)、[`config.md`](config.md)、[`forge.md`](forge.md)、[`storage.md`](storage.md)、[`ledger.md`](ledger.md) 和 [`outbox.md`](outbox.md)。
 
