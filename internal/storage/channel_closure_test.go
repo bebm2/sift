@@ -83,6 +83,11 @@ func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	if err := db.db.QueryRowContext(ctx, `SELECT batch_id FROM attention_batch_members WHERE interrupt_id=?`, in.ID).Scan(&batch); err != nil {
 		t.Fatal(err)
 	}
+	for column, value := range map[string]any{"episode_admission_id": "other-admission", "critical_window_ms": int64(99), "critical_total_limit": 99, "critical_per_run_limit": 99} {
+		if _, err := db.db.ExecContext(ctx, `UPDATE attention_batches SET `+column+`=? WHERE id=?`, value, batch); err == nil || !strings.Contains(err.Error(), "immutable") {
+			t.Fatalf("sealed %s update error = %v", column, err)
+		}
+	}
 	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batch_members SET channel_id='other' WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("member retarget error = %v", err)
 	}
