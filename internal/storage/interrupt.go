@@ -177,15 +177,12 @@ type InterruptT6Caller func(context.Context, InterruptT6Input) (InterruptT6Outpu
 // key are derived here so callers cannot manufacture a more urgent or broader
 // Interrupt.
 type EmitInterruptCmd struct {
-	RunID                  string
-	ExpectedRunVersion     int64
-	AttemptNo              *int
-	Reason                 InterruptReason
-	FailureReviewVariant   FailureReviewVariant
-	FailureReviewRetryKind FailureReviewRetryKind
-	// ReportOnly prevents the emitter from applying its usual waiting_human
-	// transition. It is reserved for the Report agent_blocked path.
-	ReportOnly                      bool
+	RunID                           string
+	ExpectedRunVersion              int64
+	AttemptNo                       *int
+	Reason                          InterruptReason
+	FailureReviewVariant            FailureReviewVariant
+	FailureReviewRetryKind          FailureReviewRetryKind
 	Facts                           map[string]string
 	Generation                      InterruptGeneration
 	GatePhase                       GatePhase
@@ -265,9 +262,6 @@ func interruptTemplateFor(cmd EmitInterruptCmd) (interruptTemplate, bool) {
 }
 
 func validateFailureReviewVariant(cmd EmitInterruptCmd) error {
-	if cmd.ReportOnly && (cmd.Reason != InterruptAgentBlocked || cmd.Source != SourceAgent) {
-		return fmt.Errorf("%w: report-only transition is invalid", ErrInterruptRejected)
-	}
 	if cmd.Reason != InterruptFailureReview {
 		if cmd.FailureReviewVariant != "" {
 			return fmt.Errorf("%w: failure_review variant on another reason", ErrInterruptRejected)
@@ -450,10 +444,17 @@ func (d *DB) EmitInterrupt(ctx context.Context, cmd EmitInterruptCmd) (Interrupt
 // allowing the Gate recorder to append its frozen evidence before the
 // Interrupt is inserted. The callback must not perform external IO.
 func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error) (Interrupt, error) {
-	return d.emitInterruptHooks(ctx, cmd, before, nil)
+	return d.emitInterruptHooks(ctx, cmd, before, nil, false)
 }
 
-func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error, after func(*sql.Tx, Interrupt) error) (Interrupt, error) {
+func (d *DB) emitReportInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error, after func(*sql.Tx, Interrupt) error) (Interrupt, error) {
+	return d.emitInterruptHooks(ctx, cmd, before, after, true)
+}
+
+func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error, after func(*sql.Tx, Interrupt) error, reportOnly bool) (Interrupt, error) {
+	if reportOnly && (cmd.Reason != InterruptAgentBlocked || cmd.Source != SourceAgent) {
+		return Interrupt{}, fmt.Errorf("%w: report-only transition is invalid", ErrInterruptRejected)
+	}
 	if err := validateFailureReviewVariant(cmd); err != nil {
 		return Interrupt{}, err
 	}
@@ -585,7 +586,7 @@ func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, befor
 				return Interrupt{}, err
 			}
 		}
-	} else if !cmd.ReportOnly && RunStatus(status) != RunWaitingHuman {
+	} else if !reportOnly && RunStatus(status) != RunWaitingHuman {
 		if !legalTransition(RunStatus(status), RunWaitingHuman) {
 			return Interrupt{}, fmt.Errorf("%w: %s cannot wait for human", ErrInterruptRejected, status)
 		}
@@ -776,7 +777,12 @@ func interruptEffectBinding(cmd EmitInterruptCmd) ([]byte, string) {
 		delete(fields, "run_id")
 		fields["change_id"], fields["head_sha"], fields["review_policy_snapshot_digest"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.Generation.PolicySnapshotID
 	case InterruptAgentBlocked:
-		fields["attempt_no"], fields["generation"], fields["report_id"] = cmd.Generation.AttemptNo, cmd.Generation.Generation, cmd.Generation.ReportID
+		fields["attempt_no"], fields["generation"] = cmd.Generation.AttemptNo, cmd.Generation.Generation
+		if cmd.Source == SourceAgent {
+			fields["report_id"] = cmd.Generation.ReportID
+		} else {
+			fields["report_id"] = nil
+		}
 	case InterruptMergeConflict:
 		delete(fields, "run_id")
 		fields["change_id"], fields["head_sha"], fields["conflict_digest"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.Generation.ConflictDigest
