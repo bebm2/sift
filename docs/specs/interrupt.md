@@ -141,17 +141,17 @@ T4 正常输出和 fallback facts 的 `recommended_action`/`recommended_option_i
 
 接纳 vectors：`options` 重排为 `reject,retry,hold` → `interrupt_t4_options_mismatch`；`conclusion` 未命中 fragment → `interrupt_t4_unknown_fragment`；`recommended_option_id=review_report_interrupt_quota` → `interrupt_t4_unknown_option`。把上述合法 input 的 `conclusion` 改为 `<b>别的事实</b>`，即使文本安全也只回退。对前三种失败，fallback persisted bytes 唯一为：`headline=失败需要人工决定`、`brief_markdown=事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry`、`options_json=[{"effect":"再次执行","id":"retry","label":"重试失败步骤","risk":"相同故障可能再次发生"},{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持等待","id":"hold","label":"暂缓决定","risk":"Run 继续占用待处理项"}]`。安全事件链接接受并逐字段持久化；使用该链接时 `links_json` 的唯一最终 canonical bytes 为 `[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}]`，而非 prose delta。`recommended_action=hold` 只替换 brief 中两处 `retry`，不改变 options。
 
-Report quota v1 有自己的完整 T4/fallback golden，不得复用上面的 attempt JSON。其 fallback renderer 子对象为：
+Report quota v1 有自己的完整 T4/fallback golden，不得复用上面的 attempt JSON。以下 JSON bytes 均由 config §4 的 canonical serializer 生成；接纳测试必须逐层以同一 serializer 重算，并断言原始 UTF-8 bytes 与输出完全相等。其 fallback renderer 子对象为：
 
 ```json
-{"reason":"failure_review","headline":"报告打扰额度已耗尽","brief":"事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/0123456789abcdef0123456789abcdef；recommended_action=hold。建议：hold","min_modality":"voice","links":[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}],"options":[{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持 Interrupt 人工 held","risk":"Run 继续运行"}]}
+{"brief":"事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/0123456789abcdef0123456789abcdef；recommended_action=hold。建议：hold","headline":"报告打扰额度已耗尽","links":[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}],"min_modality":"voice","options":[{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持 Interrupt 人工 held","id":"hold","label":"暂缓决定","risk":"Run 继续运行"}],"reason":"failure_review"}
 ```
 
 其合法 T4 input/output（均为 canonical JSON bytes）为：
 
 ```json
-{"run_id":"run-01","attempt_no":null,"interrupt":{"reason":"failure_review","base_severity":"high","min_modality":"voice","fallback_headline":"报告打扰额度已耗尽","fallback_brief":"事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/0123456789abcdef0123456789abcdef；recommended_action=hold。建议：hold","brief_fragments":["请人工处理","额度已耗尽"],"links":[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}],"candidate_options":[{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持 Interrupt 人工 held","risk":"Run 继续运行"}]}}
-{"headline":"报告打扰额度已耗尽","conclusion":"额度已耗尽","key_points":["请人工处理"],"recommended_option_id":"hold","options":["reject","hold"]}
+{"attempt_no":null,"interrupt":{"base_severity":"high","brief_fragments":["请人工处理","额度已耗尽"],"candidate_options":[{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持 Interrupt 人工 held","id":"hold","label":"暂缓决定","risk":"Run 继续运行"}],"fallback_brief":"事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/0123456789abcdef0123456789abcdef；recommended_action=hold。建议：hold","fallback_headline":"报告打扰额度已耗尽","links":[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}],"min_modality":"voice","reason":"failure_review"},"run_id":"run-01"}
+{"conclusion":"额度已耗尽","headline":"报告打扰额度已耗尽","key_points":["请人工处理"],"options":["reject","hold"],"recommended_option_id":"hold"}
 ```
 
 该 output 的 persisted `brief_markdown` 唯一为 `结论：额度已耗尽；要点：请人工处理；建议：暂缓决定（hold）`，`options_json` 为 fallback JSON 中逐字节相同的两项数组。对 quota input，`options=["hold","reject"]`、`options=["reject","hold","retry"]` 分别是 `interrupt_t4_options_mismatch`；`recommended_option_id="retry"` 是 `interrupt_t4_unknown_option`。三者都回退为上面的 quota fallback bytes。attempt arm 混入 quota 的两项 options，或 quota arm 使用 attempt 三项 options，均在绑定/option 接纳前拒绝，不能以 fallback 偷换 variant。
