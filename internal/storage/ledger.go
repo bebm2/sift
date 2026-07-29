@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -307,7 +308,13 @@ func canonicalJSON(v any) ([]byte, error) {
 	if e = json.Unmarshal(b, &x); e != nil {
 		return nil, e
 	}
-	return json.Marshal(x)
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if e = encoder.Encode(x); e != nil {
+		return nil, e
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte{'\n'}), nil
 }
 
 func recomputeCertification(ctx context.Context, tx *sql.Tx, runID string, rules config.Certification, asOf int64) (string, error) {
