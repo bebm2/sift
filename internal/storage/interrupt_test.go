@@ -153,17 +153,17 @@ func TestEmitInterruptT4UsesConfiguredSeamAndEscapesFragmentsOnce(t *testing.T) 
 	called := false
 	db.SetInterruptT4(func(_ context.Context, in InterruptT4Input) (InterruptT4Output, error) {
 		called = true
-		if !containsString(in.Fragments, "review_requirement=<b>risk</b>") {
+		if !containsString(in.Fragments, "<b>risk</b>") {
 			t.Fatalf("fragments were pre-escaped: %#v", in.Fragments)
 		}
-		return InterruptT4Output{Headline: in.Headline, Conclusion: "review_requirement=<b>risk</b>", KeyPoints: []string{"review_requirement=<b>risk</b>"}, RecommendedOptionID: "approve"}, nil
+		return InterruptT4Output{Headline: in.Headline, Conclusion: "<b>risk</b>", KeyPoints: []string{"<b>risk</b>"}, Options: []string{"approve", "reject", "hold"}, RecommendedOptionID: "approve"}, nil
 	})
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "<b>risk</b>", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789abcdef0123456789abcdef01234567"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
 	got, err := db.EmitInterrupt(ctx, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !called || got.Brief != "结论：review_requirement=\\<b\\>risk\\</b\\>；要点：review_requirement=\\<b\\>risk\\</b\\>；建议：批准审阅（approve）" {
+	if !called || got.Brief != "结论：\\<b\\>risk\\</b\\>；要点：\\<b\\>risk\\</b\\>；建议：批准审阅（approve）" {
 		t.Fatalf("called=%v interrupt=%#v", called, got)
 	}
 }
