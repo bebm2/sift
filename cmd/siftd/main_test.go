@@ -36,17 +36,21 @@ func TestProductionSchedulerWakesOutboxAfterEnqueueAndEmitInterrupt(t *testing.T
 
 	testProductionWake(t, true, func(ctx context.Context, db *storage.DB, now int64) error {
 		const head = "0123456789abcdef0123456789abcdef01234567"
-		if err := db.SeedReverseSyncRunForTest(ctx, "run", "project", "cfg", "42", "change-1", "queued", now); err != nil {
+		if err := db.SeedGateCandidateForTest(ctx, "run", "project", "cfg", "change-1", now); err != nil {
+			return err
+		}
+		if err := db.SetRunChangeHeadForTest(ctx, "run", "change-1", head); err != nil {
 			return err
 		}
 		version, err := db.FreezeGateChangeHead(ctx, "run", "change-1", head, 1, now)
 		if err != nil {
 			return err
 		}
+		attempt := 1
 		_, err = db.EmitInterrupt(ctx, storage.EmitInterruptCmd{
-			RunID: "run", ExpectedRunVersion: version, Reason: storage.InterruptMergeConflict,
-			Facts:      map[string]string{"change_ref": "https://example.test/change/1", "head_sha": head, "conflict_summary": "conflict", "recommended_action": "retry", "conflict_evidence_ref": "https://example.test/change/1/conflict"},
-			Generation: storage.InterruptGeneration{ChangeID: "change-1", HeadSHA: head, ConflictDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			RunID: "run", ExpectedRunVersion: version, AttemptNo: &attempt, Reason: storage.InterruptStartupStall,
+			Facts:      map[string]string{"attempt_no": "1", "generation": "1", "diagnostic_cause": "termination_unconfirmed", "isolation_consequence": "worktree held", "recommended_action": "retry", "attempt_diagnostic_ref": "/attempt", "worktree_ref": "/worktree"},
+			Generation: storage.InterruptGeneration{AttemptNo: 1, Generation: 1},
 			GatePhase:  storage.GateNone, GuardrailLevel: storage.GuardrailNone,
 			AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 10, storage.SeverityNormal: 10, storage.SeverityHigh: 10},
 			DayTimezone:         "UTC", Source: storage.SourceSystem, NowMS: now,
