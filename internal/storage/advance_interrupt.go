@@ -128,12 +128,15 @@ func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceI
 		return false, err
 	}
 	var arm struct {
-		NoTransition bool `json:"no_transition"`
+		Arm          string `json:"arm"`
+		NoTransition bool   `json:"no_transition"`
 	}
 	if json.Unmarshal([]byte(binding), &arm) != nil {
 		return false, fmt.Errorf("%w: corrupt effect binding", ErrInterruptRejected)
 	}
-	if !arm.NoTransition {
+	// Older rows used a boolean; new rows use the closed tagged union.
+	noTransition := arm.NoTransition || arm.Arm == "report_quota_failure_review"
+	if !noTransition {
 		if RunStatus(status) != RunWaitingHuman {
 			return false, ErrRejectedStale
 		}
