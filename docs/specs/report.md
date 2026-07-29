@@ -192,3 +192,5 @@ M5 至少覆盖：
 4. 同 key 同 digest、同 key 异 digest、窗口内新 key 同语义、窗口到期和 `dedupe_window=0` 分别有可断言结果；所有 duplicate 零收费、零新 event。
 5. `burst=4` 跨固定分钟边界不瞬时超发，重启后桶连续且不随新配置重置；超限与配额拒绝没有 receipt/event/key 占位。
 6. 覆盖 DST 前后日桶、同 operation key/语义 duplicate、崩溃重放和并发收费；四个并发触顶者最多产生一条当日 quota-exhaustion 记录与 `failure_review`。在 exhaustion 线性化提交前/后、专用发射前/后分别注入崩溃：重放不得二次扣 token或安全事实，且最终至多一个 generation key Interrupt。publish target 缺失或 binding 结构拒绝保留 exhaustion 并返回同一 closed conflict；attention 存储错误也保留 exhaustion/token、返回 retryable internal，重放只再试发射。逐行验证上表，除这条有意拆分的安全事实/专用发射边界外，绝不出现部分领域状态。
+7. 逐字节执行 [`interrupt.md` §3.6](interrupt.md#36-t4-接纳与命令-golden-vectors) 的 Report quota v1 fallback、合法 `reject,hold` T4 input/output 和 persisted bytes；重排、添加 `retry`、错误 recommended option 都回退同一 quota fallback，绝不套用 attempt golden。
+8. 对共用 binding union 断言 new-attempt terminal pair 逐字段等于 binding `(attempt_no,generation)`、命中同 Run `failed` attempt；错 Run/generation、non-failed、pair 不等、attempt 字段混入 quota、quota 字段混入 attempt，以及两 arm options 交叉错配全部拒绝。
