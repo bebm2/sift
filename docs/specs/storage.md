@@ -553,11 +553,29 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 | `report_kind` | TEXT | `progress \| goal \| blocker \| completed` |
 | `payload_digest` | TEXT | NOT NULL |
 | `event_id` | TEXT | NOT NULL FK events |
+| `direct_interrupt_id` | TEXT | NULL UNIQUE FK interrupts；仅 blocker 直接致扰成功时非空 |
+| `report_interrupt_charge_entry_id` | TEXT | NULL UNIQUE FK budget_entries；仅实际 Report 子配额 charge 时非空 |
 | `received_at_ms` | INTEGER | NOT NULL |
 
-唯一约束 `(run_id, attempt_no, report_key)`。本表只记录已接受报告；重复请求先按该键返回既有 receipt，不消费令牌、不重复写事件；限流拒绝只记安全事件而不占用 report key。Agent 的 completed 只产生事件，不修改 Run 状态。
+`direct_interrupt_id` 与 `report_interrupt_charge_entry_id` 必须同空同非空；若非空，entry 必须为 `kind=report, scope=run, reason=report_agent_blocked`，且其 operation key 为 `report-interrupt-quota:<receipt_id>`。二者分别是 Report receipt 到直接 Interrupt 和 Report charge 的唯一 nullable 关联，不代表 attention charge。唯一约束 `(run_id, attempt_no, report_key)`。本表只记录已接受报告；重复请求先按该键返回既有 receipt，不消费令牌、不重复写事件；限流拒绝只记安全事件而不占用 report key。Agent 的 completed 只产生事件，不修改 Run 状态。
 
-### 7.5 `intake_items`（可变）
+### 7.5 `report_quota_exhaustions`（不可变）
+
+每个冻结 attention 日桶、每个 Run 最多一行；该表只记录 Report 子配额已满后的安全事实，不是 Agent report receipt，也不是普通领域 event。
+
+| 列 | 类型 | 约束/说明 |
+|---|---|---|
+| `run_id` | TEXT | NOT NULL，FK runs |
+| `daily_bucket_start_ms` | INTEGER | NOT NULL；与 `run_id` 组成主键 |
+| `daily_bucket_end_ms` | INTEGER | NOT NULL；从冻结 IANA zone 的下一本地日 00:00 得出 |
+| `security_event_id` | TEXT | NOT NULL UNIQUE FK events；`source=system` 的安全事件 |
+| `failure_digest` | TEXT | NOT NULL；Report 专用 `failure_review` facts digest |
+| `generation_key` | TEXT | NOT NULL UNIQUE；由 interrupt §5.1 独立 domain 派生 |
+| `created_at_ms` | INTEGER | NOT NULL |
+
+主键为 `(run_id,daily_bucket_start_ms)`，并以 `CHECK(daily_bucket_start_ms < daily_bucket_end_ms)` 固定半开桶。表及其索引均 append-only；数据库 trigger 拒绝 UPDATE/DELETE。`RecordReport` 以该主键的 INSERT 作为并发线性化点，不先查再写；冲突重放复用既有 `security_event_id`、digest 与 generation key。`failure_digest` 的 canonical facts、IANA/DST 边界和 `failure_review` link 以 [`interrupt.md` §5.1](interrupt.md) 为准。
+
+### 7.6 `intake_items`（可变）
 
 T1 pre-Run 摄入投影，回答「该 Issue 正在等什么、哪组问题已发、哪个回复可恢复处理」；语义与状态机见 [`brain.md` §7.3](brain.md)。
 
@@ -1015,7 +1033,7 @@ Gate record 来自同一 snapshot/evaluation；Brain record 一条 logical recor
 | `PrepareAttentionBatch` | due batch 的成员 open-CAS、payload sealing、唯一 Channel operation 与事件；不做外部 IO |
 | `ApplyCommandEvent(envelope, parsedAction?)` | Command 唯一 public command port：receipt/canonical identity、initial/final event、private Ledger decision/effect、Run/Interrupt CAS、probe request and outbox/ack in one transaction; it may call only private `resolveAttemptRaceTx` and `recordHumanDecisionTx` |
 | `ApplyRetryProbeResult` | startup_stall probe finalizer唯一 public result port；内部调用 private `resolveAttemptRaceTx`，不得先关闭 Interrupt |
-| `RecordReport` | token bucket + report receipt + event；必要时原子发唯一异常 Interrupt |
+| `RecordReport` | 先做 schema/phase/两层去重，再 CAS report rate bucket；普通 report 写 receipt+event，完整 blocker 原子写 `report_receipts` + Report charge + `agent_blocked` Interrupt/admission/outbox，子配额已满则原子写 `report_quota_exhaustions` + security event 并至多发专用 `failure_review`；不改变 `runs.status` |
 | `ReserveBrainCall` | brain_call_counters CAS 递增 + 插入 `status=running` 的 brain_calls（冻结身份/输入），同一事务 |
 | `RecordBrainAttempt` | immutable brain_attempts + token post-charge（budget entry/counter，唯一 operation key 幂等，允许单次越界） |
 | `FinalizeBrainCall` | brain_calls 一次性 `running → valid | fallback` 终结（valid 指向本 call 的 valid attempt，fallback 带原因）；恢复时按已有 attempts 收敛遗留 running call |
@@ -1044,7 +1062,18 @@ CAS 失败整笔回滚并返回 `RejectedStale`；非法状态组合在开事务
 
 ### 12.2 Interrupt 五件事
 
-同一事务：Run 转 `waiting_human`（或确认已处于合法人工态）→ 按 generation key 查重 → 首次按最终 severity 写 initial attention admission（非 critical 做 quota CAS/re-read/retry；初发 critical 做 fuse admission）并仅在实际 charge 时取得 entry id → 插入引用该 entry 或 NULL 的 Interrupt → 追加事件 → 从 Run 的已验证 Issue、已验证 Change 或冻结 `discussion_target_*` 创建 publish operation，并在需要时创建/加入 batch。generation key 已存在时直接返回既有 Interrupt，不得重复扣费、admission 或创建第二 operation。任一存储/事务错误回滚；manual Run 的冻结 target 不存在时同样以 `interrupt_publish_target_missing` 回滚/拒绝，不得留下无发布目标的 Interrupt。
+同一事务（普通 reason 模式）：Run 转 `waiting_human`（或确认已处于合法人工态）→ 按 generation key 查重 → 首次按最终 severity 写 initial attention admission（非 critical 做 quota CAS/re-read/retry；初发 critical 做 fuse admission）并仅在实际 charge 时取得 entry id → 插入引用该 entry 或 NULL 的 Interrupt → 追加事件 → 从 Run 的已验证 Issue、已验证 Change 或冻结 `discussion_target_*` 创建 publish operation，并在需要时创建/加入 batch。Report-only no-transition 模式跳过 Run transition，但仍执行同一 generation/admission/Interrupt/outbox 配方；它必须断言 `runs.status` 与 version 不变。generation key 已存在时直接返回既有 Interrupt，不得重复扣费、admission 或创建第二 operation。任一存储/事务错误回滚；manual Run 的冻结 target 不存在时同样以 `interrupt_publish_target_missing` 回滚/拒绝，不得留下无发布目标的 Interrupt。
+
+### 12.2.1 `RecordReport` 原子配方
+
+`RecordReport` 在单一 `BEGIN IMMEDIATE` 中按以下顺序执行，所有领域写入全成全败：
+
+1. 校验 run token binding、closed payload、attempt phase 与 Run 的冻结 `config_snapshot_id`；重复 report key/语义窗口命中时直接返回既有 receipt，不消费任何预算。
+2. 对非 duplicate report CAS 该 attempt 的 rate bucket；桶参数与 snapshot 不一致则回滚领域写入并记录安全事件，不重置 bucket。
+3. 对已消耗 rate token 的 blocker，读取冻结日桶 counter 的 `(bucket_start_ms,bucket_end_ms)`。容量未满时在同一事务插入唯一 Report charge entry；并调用 `EmitInterrupt` 的 Report-only no-transition 模式。
+4. `EmitInterrupt` 的 Report-only 模式创建 event/Interrupt/attention admission/outbox；Run 状态必须保持原值。实际 attention charge 才写 `budget_entries` 与两层 charge FK；`quota_batched`/`critical_fused` admission 的 attention FK 均为 NULL。成功后回填 receipt 的 `direct_interrupt_id` 与 `report_interrupt_charge_entry_id`。
+5. 子配额已满时，不写 receipt/event/Report charge；以 `(run_id,daily_bucket_start_ms)` INSERT `report_quota_exhaustions` 与安全 event。INSERT 冲突只复用既有 exhaustion；首次记录按 `interrupt.md §5.1` 固定 facts 至多创建一个 `failure_review`，其 command binding 必须声明合法 `retry_kind`。
+6. `EmitInterrupt` 结构拒绝或任意内部错误回滚 rate CAS、receipt、charge、Interrupt、admission、outbox 和 exhaustion；仅在领域回滚后另行提交确定性拒绝诊断。事务提交后才返回 RPC success。
 
 ### 12.3 Intake batch
 

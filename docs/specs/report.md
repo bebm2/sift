@@ -101,7 +101,7 @@ payload_digest = SHA-256(canonical JSON of
 {"retry_policy":{"initial_delay_ms":100,"multiplier_micros":2000000,"max_delay_ms":1000,"total_timeout_ms":10000}}
 ```
 
-四个值均为正整数；`multiplier_micros` 是 `runtime.retry_multiplier × 1,000,000`，范围 `1000000..10000000`。CLI 只接受这一个 schema；缺字段、范围错误或同一退避序列中策略变更均本地失败，不猜默认值、不读 `config.yaml`。首次收到 `not_ready` 时记录单调时钟起点；第 `n` 次等待（从 0 开始）为 `min(max_delay_ms, floor(initial_delay_ms × multiplier_micros^n / 1000000^n))`，且不得使下一次等待后的累计时间超过 `total_timeout_ms`。达到该上限即失败。边界 vector：示例 policy 的等待依次为 `100,200,400,800,1000×8` ms（累计 `9500ms`），下一次 `1000ms` 必须因超过 `10000ms` 拒绝；`initial_delay_ms=1001,max_delay_ms=1000`、缺 `multiplier_micros`、或第二次响应把 `max_delay_ms` 改为 `999` 均为本地失败。每次重试复用相同 report key 和 payload。任何其他错误（包括限流、配额冲突及 payload/schema 错误）都不进入该退避循环。
+四个值均为正整数；`multiplier_micros` 是配置中非 exponent、至多六位小数的 `runtime.retry_multiplier × 1,000,000` 精确整数，范围 `1000000..10000000`；三个 delay 是配置中精确的整数毫秒。CLI 只接受这一个 schema；缺字段、额外字段、范围错误、整数溢出或 `initial_delay_ms <= max_delay_ms <= total_timeout_ms` 不成立时均本地 fail closed，不猜默认值、不读 `config.yaml`。首次收到 `not_ready` 时记录单调时钟起点；第 `n` 次等待（从 0 开始）为 `min(max_delay_ms, floor(initial_delay_ms × multiplier_micros^n / 1000000^n))`，且不得使下一次等待后的累计时间超过 `total_timeout_ms`。达到该上限即失败。边界 vector：示例 policy 的等待依次为 `100,200,400,800,1000×8` ms（累计 `9500ms`），下一次 `1000ms` 必须因超过 `10000ms` 拒绝；`multiplier_micros=1000000` 长序列保持 `100ms`；`initial_delay_ms=1001,max_delay_ms=1000`、缺 `multiplier_micros`、或第二次响应把 `max_delay_ms` 改为 `999` 均为本地失败。每次重试复用相同 report key 和 payload。任何其他错误（包括限流、配额冲突及 payload/schema 错误）都不进入该退避循环。
 
 ## 5. 接受、事件与去重
 
@@ -118,9 +118,9 @@ payload_digest = SHA-256(canonical JSON of
 }
 ```
 
-`report` 是 §3 的原 payload；Run 和 attempt 身份由 event 的列承载，不从 Agent payload 复制。receipt 的 `report_kind`、`payload_digest`、`event_id` 和 `received_at_ms` 是事件的审计锚点。事件顺序仅是本地提交顺序，不把 Agent 声称的时间当作事实发生时间。
+`report` 是 §3 的原 payload；Run 和 attempt 身份由 event 的列承载，不从 Agent payload 复制。receipt 的 `report_kind`、`payload_digest`、`event_id`、`received_at_ms` 以及可空的 `direct_interrupt_id`、`report_interrupt_charge_entry_id` 是事件的审计锚点。事件顺序仅是本地提交顺序，不把 Agent 声称的时间当作事实发生时间。
 
-`blocker` 在 payload 和 attempt 日志引用均可形成 [`interrupt.md` §3](interrupt.md) 的 `agent_blocked` 最小事实时，预先生成新 receipt ID，并以它作为 `report_id` 调用唯一 `EmitInterrupt` 入口。它不得自行指定 severity、options 或 generation key。该 receipt 的 `direct_interrupt_id`、Report 子配额 entry 和 Interrupt 的 attention entry 一一绑定；注意力日配额合批或 critical fuse 只改变该 Interrupt 的 delivery，receipt、event、两笔 entry、Interrupt 和首发 outbox 仍同事务保留。它们不改变 Run 状态。
+`blocker` 在 payload 和 attempt 日志引用均可形成 [`interrupt.md` §3](interrupt.md) 的 `agent_blocked` 最小事实时，预先生成新 receipt ID，并以它作为 `report_id` 调用唯一 `EmitInterrupt` 入口。它不得自行指定 severity、options 或 generation key。Report 子配额 charge 与 Interrupt attention admission 是两个独立账本：receipt 的 `report_interrupt_charge_entry_id` 指向一笔实际 `kind=report` entry；`direct_interrupt_id` 指向该 Interrupt；Interrupt 的 `charged_budget_entry_id` 仅在 attention 实际收费时指向 `budget_entries`。若 attention admission 为 `quota_batched` 或 `critical_fused`，attention entry 与两个 attention charge FK 均为 NULL；不得写零额或虚构 entry。Report charge、receipt、event、Interrupt、admission 和首发 outbox 仍按 storage 事务配方绑定，且不改变 Run 状态。
 
 ### 5.2 两层去重
 
@@ -155,7 +155,6 @@ kind=report
 scope=run
 scope_id=<run_id>
 bucket_start_ms=<snapshot timezone 的本地日 00:00 对应 instant>
-bucket_end_ms=<次日本地日 00:00 对应 instant>
 amount=1
 reason=report_agent_blocked
 run_id=<run_id>
@@ -163,7 +162,7 @@ operation_key=report-interrupt-quota:<receipt_id>
 created_at_ms=<server received_at_ms>
 ```
 
-`bucket_start_ms <= created_at_ms < bucket_end_ms`；`attention.day_timezone=local` 在 config snapshot 创建时规范化为具体 IANA 名称。日桶按该冻结时区的日历日计算，使用下一本地日的 00:00 作为 exclusive end，故 DST 日可为 23 或 25 小时。新 receipt 的 `report_interrupt_charge_entry_id` 与 `direct_interrupt_id` 均唯一，后者的 `charged_budget_entry_id` 是同一次 `EmitInterrupt` 的唯一 attention entry；这三者把 report charge、receipt 与 Interrupt 固定为一对一。重放和语义 duplicate 不重复收费。critical 若由未来扩展的 Report 直接产生，仍计入本子配额，并同时遵守 attention critical fuse。
+`bucket_start_ms <= created_at_ms < bucket_end_ms`；`bucket_end_ms` 只从权威 `budget_counters` 由 `(run_id,bucket_start_ms)` 取得，不复制到 `budget_entries`；`attention.day_timezone=local` 在 config snapshot 创建时规范化为具体 IANA 名称。日桶按该冻结时区的日历日计算，使用下一本地日的 00:00 作为 exclusive end，故 DST 日可为 23 或 25 小时。新 receipt 的 `report_interrupt_charge_entry_id` 与 `direct_interrupt_id` 均为 nullable、各自 UNIQUE FK，且仅在相应写入成功时设置；它们把 Report receipt、Report charge 与直接 Interrupt 固定为一对一。attention charge 不由 Report receipt 伪造：只有 `attention_admissions.kind=quota_charged`（或实际 critical admission）时，`interrupts.charged_budget_entry_id` 与 admission 的 `attention_charge_entry_id` 才非空；`quota_batched` / `critical_fused` 时两者均为 NULL。重放和语义 duplicate 不重复收费。critical 若由未来扩展的 Report 直接产生，仍计入本子配额，并同时遵守 attention critical fuse。
 
 当子配额已满，后续会直接致扰的 blocker 不创建 receipt/event/普通 Interrupt，但在同一受限写入口插入唯一 `(run_id, daily_bucket_start_ms)` 的 quota-exhaustion 安全事件记录。该记录的唯一约束而非先查后写保证并发至多一次；它以 [`interrupt.md` §5](interrupt.md) 的 Report 专用 domain/version 调用 `failure_review`。该异常的 facts 固定为 `failure_class=report_interrupt_quota_exhausted`、受控 `failure_evidence_ref=sift://event/<security_event_id>` 与 `recommended_action=review_report_interrupt_quota`，不接受 Agent 自由文本；`attempt_no` 为 NULL。它仍经过 `EmitInterrupt` 的全局 attention 配额和 critical fuse：合批/熔断保留该异常 Interrupt，结构拒发则保留 quota-exhaustion 安全记录和确定性诊断，绝不借支或另开告警旁路。
 
@@ -176,13 +175,13 @@ created_at_ms=<server received_at_ms>
 | duplicate（两层任一） | 不消费 | 不写 | 复用既有；不占新 key | 不写 | 不变 | 不写 |
 | 普通 `progress`/`goal`/`completed` | 消费 | 不写 | 同事务新 receipt + event | 不写 | 不变 | 不写 |
 | blocker 不能形成最小 facts | 消费 | 不写 | 同事务新 receipt + `report.blocker` event | 同事务诊断 | 不变 | 不写 |
-| blocker facts 完整、子配额可用 | 消费 | 写上述一行 | 同事务新 receipt + event | 不写 | 不变 | 新 `agent_blocked`、一笔 attention entry 和 forge-comment outbox 全部提交 |
-| 上行 attention 合批或 critical fuse | 消费 | 写上述一行 | 同上 | 不写 | 不变 | 同一 Interrupt/attention entry/forge-comment 提交；delivery 标为 batched/held，不另扣或借支 |
-| 子配额已满 | 消费 | 不写 | 不写，key 不占位 | quota-exhaustion 行及其安全 event 提交 | 不变 | 至多一个专用 `failure_review`；若 attention 合批/熔断仍提交该 Interrupt，结构拒发只保留安全记录 |
+| blocker facts 完整、子配额可用、attention 实际收费 | 消费 | 写一行 Report charge | 同事务新 receipt + event | 不写 | 不变 | 新 `agent_blocked`、一笔 attention charge/admission 和 forge-comment outbox 全部提交 |
+| blocker facts 完整、attention `quota_batched` 或 critical fuse | 消费 | 写一行 Report charge | 同事务新 receipt + event | 不写 | 不变 | 同一 Interrupt/admission/forge-comment 提交；`charged_budget_entry_id=NULL`，delivery 标为 batched/held，不另扣或借支 |
+| 子配额已满 | 消费 | 不写 | 不写，key 不占位 | quota-exhaustion 行及其安全 event 提交 | 不变 | 至多一个专用 `failure_review`；若该异常 attention 合批/熔断，保留 admission 且无 attention charge；结构拒发只保留安全记录 |
 | `EmitInterrupt` 结构拒绝（完整 blocker 分支） | 回滚 | 回滚 | 回滚，key 不占位 | 领域回滚后提交拒绝诊断 | 不变 | 回滚 |
 | 事务内部错误 | 回滚 | 回滚 | 回滚，key 不占位 | 存储可用时提交 `report_transaction_failed`；否则 RPC 返回 retryable `internal` | 不变 | 回滚 |
 
-因此 token 在子配额满分支已消费；它是通过两层去重、payload/phase 验证及 rate CAS 后的一次上报尝试，而不是可借此绕开的免费探测。安全 event 与领域 event 的身份、时钟和 source 以 [`storage.md` §7](storage.md) 为准。
+因此 token 在子配额满分支已消费；它是通过两层去重、payload/phase 验证及 rate CAS 后的一次上报尝试，而不是可借此绕开的免费探测。Report-only `agent_blocked` 与 quota-exhaustion `failure_review` 都必须写 immutable `interrupt_command_effect_bindings`：前者绑定 `ask|retry|reject|hold` 的当前 effect；后者固定 `attempt_no=NULL`，`retry` 仅允许绑定 `retry_kind=gate_recheck|new_attempt` 的一种合法 effect，或按版本化 options 明确移除 `retry`。running Run 上 `hold` 保持 `running`（仅 Interrupt 进入人工 hold）；Report Interrupt 不执行 Run transition。安全 event 与领域 event 的身份、时钟和 source 以 [`storage.md` §7](storage.md) 为准。
 
 M5 至少覆盖：
 

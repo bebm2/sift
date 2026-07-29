@@ -222,7 +222,7 @@ params：
 - `kind = progress | goal | blocker | completed`；payload schema 后续由 `specs/report.md` 定义。
 - token binding、attempt 与 generation 必须一致。
 - `running`：进入 `RecordReport`；相同 report key + digest 返回 `duplicate`，同 key 异 digest 返回 `conflict`。
-- `spawning` 且 permit 已签发、started 尚未提交：返回 `not_ready`。`details` 是 closed object，且只能为 `{"retry_policy":{"initial_delay_ms":<positive integer>,"multiplier_micros":<1000000..10000000 integer>,"max_delay_ms":<positive integer>,"total_timeout_ms":<positive integer>}}`；值从绑定 Run 的 `config_snapshot_id` 导出，`multiplier_micros=runtime.retry_multiplier×1000000`。不得返回单次 `retry_after_ms` 或 daemon 当前配置。字段缺失、额外字段、`initial_delay_ms>max_delay_ms` 或 `max_delay_ms>total_timeout_ms` 均为服务端契约错误。
+- `spawning` 且 permit 已签发、started 尚未提交：返回 `not_ready`。`details` 是 closed object，且只能为 `{"retry_policy":{"initial_delay_ms":<positive integer>,"multiplier_micros":<1000000..10000000 integer>,"max_delay_ms":<positive integer>,"total_timeout_ms":<positive integer>}}`；值从绑定 Run 的 `config_snapshot_id` 导出。`multiplier_micros` 是配置中非 exponent、至多六位小数的 `runtime.retry_multiplier × 1,000,000` 的精确整数，三个 delay 是精确整数毫秒；配置加载时已拒绝无法精确表示的值，不在 wire 层 round/floor/ceil。不得返回单次 `retry_after_ms` 或 daemon 当前配置。字段缺失、额外字段、整数计算溢出、`initial_delay_ms>max_delay_ms` 或 `max_delay_ms>total_timeout_ms` 均为服务端契约错误。
 - pending/starting/finished/orphaned、过期 generation、跨 Run token：永久拒绝，不返回 `not_ready`。
 - `completed` 只写事件，不修改 Run 状态。
 
@@ -531,7 +531,7 @@ wrapper 原样追加 Agent PTY 字节流并按 config 轮转。日志不是 JSON
 - `sift report` 只读 `$SIFT_RUN_DIR/control.json` 的 run token并连接 `run.sock`；缺目录、文件不安全或 token 不合法时本地失败，不回退运维 socket。
 - `sift ps/logs/worktree/doctor/kill/retry` 只连接 `siftd.sock` 并读 operator token；不得把 operator token发送到 `run.sock`。
 - daemon 不可用时，写命令一律失败且不改 DB/文件。V0 只有显式 `sift doctor --offline` 可走离线只读诊断；输出必须含 `offline:true`，不得迁移、创建 token、清理 socket或修正权限。
-- `sift report` 只使用首次 `not_ready` response 的 closed `retry_policy` 和单调时钟计算指数退避；不得读 `config.yaml`。同一次序列中 policy 变化或 schema 非法时本地失败；其他 auth/stale/conflict 错误不重试。
+- `sift report` 只使用首次 `not_ready` response 的 closed `retry_policy` 和单调时钟计算指数退避；不得读 `config.yaml`。第 n 次等待为 `min(max_delay_ms, floor(initial_delay_ms × multiplier_micros^n / 1,000,000^n))`；中间整数溢出、`initial <= max <= total` 不成立，或累计等待超过 total timeout 均 fail closed。示例 policy 的等待为 `100,200,400,800,1000×8` ms（累计 9500ms）；下一次 1000ms 拒绝。`multiplier_micros=1000000` 的长序列保持 100ms，不得漂移。`10.5ms`、`1.0000001` 等配置在加载时拒绝；同一次序列中 policy 变化或 schema 非法时本地失败；其他 auth/stale/conflict 错误不重试。
 
 ## 9. 安全审计
 

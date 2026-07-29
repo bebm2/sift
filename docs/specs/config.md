@@ -219,7 +219,7 @@ brain:
 | `agent_silence_timeout` | `30m` | `1m..24h` |
 | `retry_initial_delay` | `30s` | `0s..1h` |
 | `retry_max_delay` | `5m` | 不小于 initial |
-| `retry_multiplier` | `2.0` | `1..10` |
+| `retry_multiplier` | `2.0` | JSON number in `1..10`, with at most 6 fractional decimal digits; exact millionths representation required (no exponent notation) |
 | `spawn_operation_lease_ttl` | `30s` | `5s..10m` |
 | `starting_permit_timeout` | `30s` | `1s..10m` |
 | `spawning_started_timeout` | `30s` | `1s..10m` |
@@ -404,15 +404,15 @@ attention:
 | `burst` | `4` | `1..1000` |
 | `dedupe_window` | `30s` | `0s..1h` |
 | `max_payload_bytes` | `65536` | `1024..1048576` |
-| `not_ready_initial_delay` | `100ms` | `10ms..5s` |
-| `not_ready_max_delay` | `1s` | 不小于 initial |
-| `not_ready_total_timeout` | `10s` | 不小于 max delay，最大 `1m` |
+| `not_ready_initial_delay` | `100ms` | duration exactly representable as integer milliseconds; `10ms..5s` |
+| `not_ready_max_delay` | `1s` | duration exactly representable as integer milliseconds; not less than initial |
+| `not_ready_total_timeout` | `10s` | duration exactly representable as integer milliseconds; not less than max delay, maximum `1m` |
 | `interrupts_per_run_daily_quota` | `4` | `1..100`；只约束 Layer 1 Report 直接触发的 Interrupt |
 | `on_interrupt_quota_exceeded` | `failure_review_once` | V0 只能为此值 |
 
 Report 子配额统计所有 Report 直接触发的 Interrupt（含 critical）；不统计 Gate、恢复或系统事实产生的 Interrupt。触顶后拒绝后续致扰报告，并以稳定生成键最多发一条 `failure_review`；该异常打扰仍受全局注意力配额，critical 还同时受 critical fuse。Report 超限与重复判断只由确定性代码执行。
 
-`spawning` 可返回 `not_ready`。Report 客户端以 `not_ready_initial_delay` 为首个等待间隔，按 `runtime.retry_multiplier` 指数增长并封顶于 `not_ready_max_delay`，累计等待不得超过 `not_ready_total_timeout`；因此必须满足 `not_ready_max_delay >= not_ready_initial_delay` 且 `not_ready_total_timeout >= not_ready_max_delay`。仅 `not_ready` 可重试，过期 attempt、跨 Run token、`pending/starting/finished/orphaned` 与其他鉴权/冲突错误永久拒绝，不进入退避。
+`spawning` 可返回 `not_ready`。配置加载器拒绝 exponent notation、超过六位小数的 `runtime.retry_multiplier`，以及不能精确表示为整数毫秒的三个 `not_ready_*` duration（例如 `10.5ms`）；不得 round/floor/ceil。规范化后唯一 wire 导出为 `multiplier_micros = retry_multiplier × 1,000,000` 与整数 `*_delay_ms`，并拒绝整数计算溢出。CLI 与 daemon 都 fail closed：`initial_delay_ms <= max_delay_ms <= total_timeout_ms`；未知或额外 retry 字段、非法策略和序列中策略漂移均拒绝。仅 `not_ready` 可重试，过期 attempt、跨 Run token、`pending/starting/finished/orphaned` 与其他鉴权/冲突错误永久拒绝，不进入退避。
 
 ### 3.11 `gate_defaults`
 
