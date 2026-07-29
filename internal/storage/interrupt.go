@@ -116,9 +116,37 @@ type InterruptT4Caller func(context.Context, InterruptT4Input) (InterruptT4Outpu
 
 type InterruptChannel struct {
 	ID           string
+	Type         string
+	TargetRef    string
 	Capabilities []string
+	Renderer     string
 	Default      bool
 	Isolated     bool
+}
+
+func (c InterruptChannel) snapshot() []byte {
+	type channelSnapshot struct {
+		Capabilities []string `json:"capabilities"`
+		ID           string   `json:"id"`
+		Renderer     string   `json:"renderer"`
+		TargetRef    string   `json:"target_ref"`
+		Type         string   `json:"type"`
+	}
+	kind, renderer := c.Type, c.Renderer
+	if kind == "" {
+		kind = "webhook"
+	}
+	if renderer == "" {
+		renderer = "plain-v1"
+	}
+	target := c.TargetRef
+	if target == "" {
+		target = "secret_ref:" + c.ID
+	}
+	caps := append([]string(nil), c.Capabilities...)
+	sort.Strings(caps)
+	b, _ := json.Marshal(channelSnapshot{caps, c.ID, renderer, target, kind})
+	return b
 }
 
 type InterruptT6Input struct {
@@ -167,9 +195,12 @@ type EmitInterruptCmd struct {
 	Channels      []InterruptChannel
 	// NextWindowAtMS and BatchAtMS are availability/daily-summary instants
 	// frozen before the external T6 call.
-	NextWindowAtMS *int64
-	BatchAtMS      *int64
-	NowMS          int64
+	NextWindowAtMS                          *int64
+	BatchAtMS                               *int64
+	DailySummaryAt                          string
+	CriticalWindowMS                        int64
+	CriticalTotalLimit, CriticalPerRunLimit int
+	NowMS                                   int64
 }
 
 type Interrupt struct {
@@ -255,10 +286,10 @@ func validateFailureReviewVariant(cmd EmitInterruptCmd) error {
 }
 
 type interruptDispatch struct {
-	severity                               InterruptSeverity
-	state, channelID, delivery, heldReason string
-	suggestedDowngrade                     bool
-	nextDispatchAtMS                       *int64
+	severity                                                InterruptSeverity
+	state, channelID, channelSnapshot, delivery, heldReason string
+	suggestedDowngrade                                      bool
+	nextDispatchAtMS                                        *int64
 }
 
 func admitInterruptT6(ctx context.Context, cmd EmitInterruptCmd, modality string, base InterruptSeverity, expiresAtMS int64) (interruptDispatch, error) {
@@ -309,7 +340,14 @@ func admitInterruptT6(ctx context.Context, cmd EmitInterruptCmd, modality string
 	if severity == SeverityHigh || severity == SeverityCritical {
 		out.Delivery = "immediate"
 	}
-	d := interruptDispatch{severity: severity, state: "ready", channelID: out.ChannelID, delivery: out.Delivery, suggestedDowngrade: out.SuggestedDowngrade}
+	var selected InterruptChannel
+	for _, channel := range compatible {
+		if channel.ID == out.ChannelID {
+			selected = channel
+			break
+		}
+	}
+	d := interruptDispatch{severity: severity, state: "ready", channelID: out.ChannelID, channelSnapshot: string(selected.snapshot()), delivery: out.Delivery, suggestedDowngrade: out.SuggestedDowngrade}
 	switch out.Delivery {
 	case "immediate":
 		now := cmd.NowMS
@@ -559,7 +597,7 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	optionsJSON, _ := json.Marshal(in.Options)
 	linksJSON, _ := json.Marshal(in.Links)
 	nonce := newID()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,channel_id,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms,expires_after_ms,on_max_escalations,base_severity,nonce_issued_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,? ,1,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), nonce, dispatch.state, nullable(in.ChannelID), nullable(in.Delivery), in.SuggestedDowngrade, nullableInt64(in.NextDispatchAtMS), nullable(in.HeldReason), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS, cmd.ExpiresAfterMS, cmd.OnMaxEscalations, baseSeverity, cmd.NowMS); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,channel_id,channel_snapshot_json,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms,expires_after_ms,on_max_escalations,base_severity,nonce_issued_at_ms,day_timezone,daily_summary_at,critical_window_ms,critical_total_limit,critical_per_run_limit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), nonce, dispatch.state, nullable(in.ChannelID), nullable(dispatch.channelSnapshot), nullable(in.Delivery), in.SuggestedDowngrade, nullableInt64(in.NextDispatchAtMS), nullable(in.HeldReason), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS, cmd.ExpiresAfterMS, cmd.OnMaxEscalations, baseSeverity, cmd.NowMS, timezoneOrUTC(cmd.DayTimezone), summaryOrDefault(cmd.DailySummaryAt), fuseWindowOrDefault(cmd.CriticalWindowMS), fuseTotalOrDefault(cmd.CriticalTotalLimit), fuseRunOrDefault(cmd.CriticalPerRunLimit)); err != nil {
 		// Two recovery/termination callers can discover the same stall at
 		// once. SQLite serializes the writers, so the loser may observe the
 		// unique generation-key constraint only after the winner commits.
@@ -569,6 +607,28 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 		if existing, found, lookupErr := d.interruptByKey(ctx, key); lookupErr == nil && found {
 			return existing, nil
 		}
+		return Interrupt{}, err
+	}
+	if in.Severity != SeverityCritical {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,NULL,?)`, newID(), in.ID, in.ID+":initial", "quota_charged", in.ID, in.RunID, cmd.NowMS); err != nil {
+			return Interrupt{}, err
+		}
+	} else {
+		admitted, admissionID, err := admitCriticalTx(ctx, tx, in.ID, cmd.NowMS, "initial", fuseWindowOrDefault(cmd.CriticalWindowMS), fuseTotalOrDefault(cmd.CriticalTotalLimit), fuseRunOrDefault(cmd.CriticalPerRunLimit))
+		if err != nil {
+			return Interrupt{}, err
+		}
+		if !admitted {
+			if err := addCriticalBatchMemberTx(ctx, tx, in.ID, 1, nonce, admissionID, dispatch.channelID, dispatch.channelSnapshot, cmd.NowMS); err != nil {
+				return Interrupt{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='batched',delivery='batch',held_reason=NULL,next_dispatch_at_ms=NULL WHERE id=?`, in.ID); err != nil {
+				return Interrupt{}, err
+			}
+		}
+	}
+	binding, _ := json.Marshal(map[string]bool{"no_transition": cmd.FailureReviewVariant == FailureReviewReportQuota})
+	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,binding_json,created_at_ms) VALUES(?,?,?)`, in.ID, string(binding), cmd.NowMS); err != nil {
 		return Interrupt{}, err
 	}
 	eventID := newID()
@@ -724,6 +784,37 @@ func escapeBrief(v string) (string, error) {
 	}
 	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>").Replace(v), nil
 }
+func timezoneOrUTC(v string) string {
+	if v == "" || v == "local" {
+		return "UTC"
+	}
+	return v
+}
+func summaryOrDefault(v string) string {
+	if v == "" {
+		return "09:00"
+	}
+	return v
+}
+func fuseWindowOrDefault(v int64) int64 {
+	if v <= 0 {
+		return 15 * 60 * 1000
+	}
+	return v
+}
+func fuseTotalOrDefault(v int) int {
+	if v <= 0 {
+		return 5
+	}
+	return v
+}
+func fuseRunOrDefault(v int) int {
+	if v <= 0 {
+		return 2
+	}
+	return v
+}
+
 func nullableInt64(v *int64) any {
 	if v == nil {
 		return nil
@@ -832,10 +923,13 @@ func interruptGenerationKey(run string, reason InterruptReason, g InterruptGener
 }
 
 func chargeAttentionTx(ctx context.Context, tx *sql.Tx, cmd EmitInterruptCmd, s InterruptSeverity) (string, error) {
+	if s == SeverityCritical {
+		return "", nil
+	}
 	id := newID()
 	key := "interrupt-charge:" + mustGenerationKey(cmd)
 	bucket := cmd.NowMS
-	if s != SeverityCritical {
+	{
 		loc := time.Local
 		if cmd.DayTimezone != "" && cmd.DayTimezone != "local" {
 			var err error
