@@ -156,7 +156,10 @@ func startSchedulersWithFactory(ctx context.Context, db *storage.DB, workers *da
 		if hooks.Supervisor != nil {
 			hooks.Supervisor()
 		}
-		return termination.Timeout(ctx)
+		if err := termination.Timeout(ctx); err != nil {
+			return err
+		}
+		return db.SupervisorInterruptTick(ctx, time.Now().UnixMilli())
 	}))
 	outbox := factory.Outbox(reportSchedulerError("outbox", func(ctx context.Context) error {
 		if hooks.Outbox != nil {
