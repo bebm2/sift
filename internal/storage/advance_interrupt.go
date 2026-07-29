@@ -141,6 +141,9 @@ func (d *DB) holdAdvance(ctx context.Context, tx *sql.Tx, cmd AdvanceInterruptCm
 	if err != nil {
 		return false, err
 	}
+	if err := excludeStaleBatchMembersTx(ctx, tx, cmd.InterruptID, cmd.NowMS); err != nil {
+		return false, err
+	}
 	return finishAdvance(ctx, tx, res, cmd, event)
 }
 

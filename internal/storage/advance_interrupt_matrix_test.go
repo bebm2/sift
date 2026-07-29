@@ -2,10 +2,87 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
 )
+
+func TestAdvanceInterruptPostEscalationSummaryExpiryBoundaries(t *testing.T) {
+	base := time.UnixMilli(testNow).UTC()
+	midnight := time.Date(base.Year(), base.Month(), base.Day()+1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	initial := midnight
+	for _, tc := range []struct {
+		name         string
+		expiresAfter int64
+		wantState    string
+		wantHeld     string
+	}{
+		{"summary after new expiry", 11 * time.Hour.Milliseconds(), "held", "batch_after_expiry"},
+		{"summary at new expiry", 12 * time.Hour.Milliseconds(), "held", "batch_after_expiry"},
+		{"summary before new expiry", 13 * time.Hour.Milliseconds(), "ready", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _ := openTestDB(t)
+			ctx := context.Background()
+			if err := db.SeedProjectForTest(ctx, "cfg", "project", initial); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", initial); err != nil {
+				t.Fatal(err)
+			}
+			batchAt := initial + 1
+			cmd := t6Command(initial)
+			cmd.ExpiresAfterMS, cmd.BatchAtMS = tc.expiresAfter, &batchAt
+			cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = ExpireEscalate, ExpireHold, 1
+			cmd.DailySummaryAt = "00:00"
+			cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+			cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+				return InterruptT6Output{Delivery: "batch", ChannelID: "ops", SuggestedDowngrade: true}, nil
+			}
+			in, err := emitTestInterrupt(t, ctx, db, cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var nonce string
+			if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&nonce); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: 1, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: initial + tc.expiresAfter}); err != nil || !ok {
+				t.Fatalf("advance = %v, %v", ok, err)
+			}
+			var state, held, newNonce string
+			var version, escalation, expiresAt int64
+			var due sql.NullInt64
+			if err := db.db.QueryRow(`SELECT dispatch_state,COALESCE(held_reason,''),version,nonce,escalation_count,expires_at_ms,next_dispatch_at_ms FROM interrupts WHERE id=?`, in.ID).Scan(&state, &held, &version, &newNonce, &escalation, &expiresAt, &due); err != nil {
+				t.Fatal(err)
+			}
+			if state != tc.wantState || held != tc.wantHeld || version != 2 || newNonce == nonce || escalation != 1 || expiresAt != initial+2*tc.expiresAfter {
+				t.Fatalf("post-escalation state=%s/%s version=%d nonce=%q escalation=%d expiry=%d", state, held, version, newNonce, escalation, expiresAt)
+			}
+			if tc.wantState == "ready" {
+				if !due.Valid || due.Int64 != initial+24*time.Hour.Milliseconds() {
+					t.Fatalf("summary due=%v, want next midnight", due)
+				}
+			} else if due.Valid {
+				t.Fatalf("held interrupt retained due %d", due.Int64)
+			}
+			var admissions, charges, operations int
+			if err := db.db.QueryRow(`SELECT count(*) FROM attention_admissions WHERE interrupt_id=?`, in.ID).Scan(&admissions); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.db.QueryRow(`SELECT count(*) FROM attention_admissions WHERE interrupt_id=? AND attention_charge_entry_id IS NOT NULL`, in.ID).Scan(&charges); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='channel_publish' AND interrupt_id=?`, in.ID).Scan(&operations); err != nil {
+				t.Fatal(err)
+			}
+			if admissions != 1 || charges != 1 || operations != 0 {
+				t.Fatalf("accounting admissions/charges/channel operations=%d/%d/%d", admissions, charges, operations)
+			}
+		})
+	}
+}
 
 func TestAdvanceInterruptEscalationCountsReuseDowngrade(t *testing.T) {
 	db, _ := openTestDB(t)
@@ -224,10 +301,14 @@ func TestAdvanceInterruptExcludesStaleDailyMembersAndCancelsEmptyBatch(t *testin
 	for _, tc := range []struct {
 		name     string
 		onExpire ExpireAction
+		onMax    ExpireAction
+		max      int
 		want     string
 	}{
-		{"close", ExpireAutoReject, "closed"},
-		{"version change", ExpireEscalate, "open"},
+		{"close", ExpireAutoReject, ExpireHold, 1, "closed"},
+		{"version change", ExpireEscalate, ExpireHold, 1, "open"},
+		{"expire hold", ExpireHold, ExpireHold, 1, "open"},
+		{"max hold", ExpireEscalate, ExpireHold, 0, "open"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, path := openTestDB(t)
@@ -241,7 +322,7 @@ func TestAdvanceInterruptExcludesStaleDailyMembersAndCancelsEmptyBatch(t *testin
 			const expiry = int64(48 * 60 * 60 * 1000)
 			cmd := t6Command(testNow)
 			cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
-			cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = expiry, tc.onExpire, ExpireHold, 1
+			cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = expiry, tc.onExpire, tc.onMax, tc.max
 			cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
 			in, err := emitTestInterrupt(t, ctx, db, cmd)
 			if err != nil {
