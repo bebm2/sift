@@ -101,6 +101,21 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 			t.Fatalf("rate token after rolled-back exhaustion = %d, %v", available, err)
 		}
 	})
+	t.Run("security-event cut rolls back the exhaustion transaction", func(t *testing.T) {
+		db, ctx := seedReportQuotaRun(t, 1)
+		if err := submitBlocker(ctx, db, "0123456789abcdef0123456789abcdef"); err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, db, `CREATE TRIGGER fail_quota_security_event BEFORE INSERT ON events WHEN NEW.type='security.report_quota_exhausted' BEGIN SELECT RAISE(ABORT, 'injected security event crash'); END`)
+		if err := submitBlocker(ctx, db, "1123456789abcdef0123456789abcdef"); err == nil || !strings.Contains(err.Error(), "injected security event crash") {
+			t.Fatalf("security event cut = %v", err)
+		}
+		assertCount(t, db, "report_quota_exhaustions", 0)
+		var available int
+		if err := db.db.QueryRow(`SELECT available_units FROM rate_limit_buckets WHERE kind='report' AND scope_id='run:run:attempt:1'`).Scan(&available); err != nil || available != 7 {
+			t.Fatalf("rate token after rolled-back security event = %d, %v", available, err)
+		}
+	})
 	t.Run("emission rollback retains only committed exhaustion", func(t *testing.T) {
 		db, ctx := seedReportQuotaRun(t, 1)
 		if err := submitBlocker(ctx, db, "0123456789abcdef0123456789abcdef"); err != nil {
@@ -192,6 +207,24 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 		}
 		if err := db.db.QueryRow(`SELECT available_units FROM rate_limit_buckets WHERE kind='report' AND scope_id='run:run:attempt:1'`).Scan(&n); err != nil || n != 6 {
 			t.Fatalf("rate tokens = %d, %v", n, err)
+		}
+		var eventID, binding, bindingDigest, interruptID, admissionInterruptID string
+		var bucketStart, bucketEnd int64
+		if err := db.db.QueryRow(`SELECT q.security_event_id,q.daily_bucket_start_ms,q.daily_bucket_end_ms,b.binding_json,b.binding_digest,i.id,a.interrupt_id
+			FROM report_quota_exhaustions q
+			JOIN interrupts i ON i.generation_key=q.generation_key
+			JOIN interrupt_command_effect_bindings b ON b.interrupt_id=i.id
+			JOIN attention_admissions a ON a.interrupt_id=i.id
+			WHERE q.run_id='run'`).Scan(&eventID, &bucketStart, &bucketEnd, &binding, &bindingDigest, &interruptID, &admissionInterruptID); err != nil {
+			t.Fatal(err)
+		}
+		wantBinding := `{"arm":"report_quota_failure_review","daily_bucket_end_ms":` + fmt.Sprint(bucketEnd) + `,"daily_bucket_start_ms":` + fmt.Sprint(bucketStart) + `,"run_id":"run","security_event_id":"` + eventID + `"}`
+		if binding != wantBinding || admissionInterruptID != interruptID {
+			t.Fatalf("quota object identity = binding %q, interrupt/admission %q/%q", binding, interruptID, admissionInterruptID)
+		}
+		var digestOK int
+		if err := db.db.QueryRow(`SELECT lower(hex(sift_sha256(?)))=?`, binding, bindingDigest).Scan(&digestOK); err != nil || digestOK != 1 {
+			t.Fatalf("quota binding digest = %d, %v", digestOK, err)
 		}
 	})
 }

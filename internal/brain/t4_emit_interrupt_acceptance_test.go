@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/miaoxiaoyong/sift/internal/storage"
@@ -16,32 +17,28 @@ func TestEmitInterruptT4PersistsProductionCanonicalTrace(t *testing.T) {
 	if err := db.SeedGateCandidateForTest(ctx, "run-01", "p", "cfg-p", "change-01", shellTestBase); err != nil {
 		t.Fatal(err)
 	}
-	fake := &FakeProvider{Responses: []FakeResponse{{ResultText: `{"headline":"无法确认旧执行体已停止","conclusion":"termination_unconfirmed","key_points":["worktree 保持隔离"],"recommended_option_id":"retry","options":["retry","reject","hold"]}`, InputTokens: 1, OutputTokens: 1}}}
+	if err := db.SeedFailedAttemptForTest(ctx, "run-01", 1, shellTestBase); err != nil {
+		t.Fatal(err)
+	}
+	fake := &FakeProvider{Responses: []FakeResponse{{ResultText: `{"headline":"失败需要人工决定","conclusion":"<b>风险</b>","key_points":["/<!-- sift-op:x -->"],"recommended_option_id":"retry","options":["retry","reject","hold"]}`, InputTokens: 1, OutputTokens: 1}}}
 	shell := newShellAt(db, shellCfg(100), fake, shellTestBase+1, shellTestBase+2, shellTestBase+3, shellTestBase+4)
 	db.SetInterruptT4(shell.CallT4)
 	attempt := 1
-	cmd := storage.EmitInterruptCmd{RunID: "run-01", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: storage.InterruptStartupStall,
-		Facts:      map[string]string{"attempt_no": "1", "generation": "1", "diagnostic_cause": "termination_unconfirmed", "isolation_consequence": "worktree 保持隔离", "recommended_action": "retry", "attempt_diagnostic_ref": "/attempt", "worktree_ref": "/worktree"},
-		Generation: storage.InterruptGeneration{AttemptNo: 1, Generation: 1}, GatePhase: storage.GateNone, GuardrailLevel: storage.GuardrailNone,
+	cmd := storage.EmitInterruptCmd{RunID: "run-01", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: storage.InterruptFailureReview, FailureReviewVariant: storage.FailureReviewAttempt, FailureReviewRetryKind: storage.FailureReviewNewAttempt,
+		Facts:      map[string]string{"failure_class": "<b>风险</b>", "failure_evidence_ref": "/<!-- sift-op:x -->", "recommended_action": "retry"},
+		Generation: storage.InterruptGeneration{AttemptNo: 1, Generation: 1, FailureDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, GatePhase: storage.GateNone, GuardrailLevel: storage.GuardrailNone,
 		AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 3, storage.SeverityHigh: 3}, DayTimezone: "UTC", Source: storage.SourceSystem, NowMS: shellTestBase,
 	}
 	interrupt, err := db.EmitInterrupt(ctx, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if interrupt.Brief != "结论：termination_unconfirmed；要点：worktree 保持隔离；建议：重新探测旧执行体（retry）" {
+	if interrupt.Brief != "结论：\\<b\\>风险\\</b\\>；要点：/\\<\\!\\-\\- sift\\-op:x \\-\\-\\>；建议：重试失败步骤（retry）" {
 		t.Fatalf("persisted brief = %q", interrupt.Brief)
 	}
 
-	input := T4Input{RunID: "run-01", AttemptNo: &attempt, Interrupt: T4Interrupt{Reason: "startup_stall", BaseSeverity: "high", MinModality: "text", FallbackHeadline: "无法确认旧执行体已停止", FallbackBrief: "事实：attempt_no=1；generation=1；diagnostic_cause=termination\\_unconfirmed；isolation_consequence=worktree 保持隔离；recommended_action=retry；attempt_diagnostic_ref=/attempt；worktree_ref=/worktree。建议：retry", BriefFragments: []string{"/attempt", "/worktree", "1", "retry", "termination_unconfirmed", "worktree 保持隔离"}, Links: []T4Link{{Label: "attempt_diagnostic_ref", Target: "/attempt"}, {Label: "worktree_ref", Target: "/worktree"}}, CandidateOptions: []T4Option{{ID: "retry", Label: "重新探测旧执行体", Effect: "请求受控终止再探测", Risk: "未确认消失时仍保持隔离"}, {ID: "reject", Label: "放弃此 Run", Effect: "停止处理并保持隔离", Risk: "不代表旧执行体已停止"}, {ID: "hold", Label: "继续等待", Effect: "保持等待和隔离", Risk: "旧执行体可能仍在运行"}}}}
-	wantInput, err := BuildT4Input(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantOutput, err := T4Contract(input).ValidateOutput([]byte(fake.Responses[0].ResultText))
-	if err != nil {
-		t.Fatal(err)
-	}
+	wantInput := []byte(`{"attempt_no":1,"interrupt":{"base_severity":"high","brief_fragments":["/<!-- sift-op:x -->","<b>风险</b>","retry"],"candidate_options":[{"effect":"再次执行","id":"retry","label":"重试失败步骤","risk":"相同故障可能再次发生"},{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持等待","id":"hold","label":"暂缓决定","risk":"Run 继续占用待处理项"}],"fallback_brief":"事实：failure_class=<b\\>风险</b\\>；failure_evidence_ref=/<\\!\\-\\- sift\\-op:x \\-\\-\\>；recommended_action=retry。建议：retry","fallback_headline":"失败需要人工决定","links":[{"label":"failure_evidence_ref","target":"/<!-- sift-op:x -->"}],"min_modality":"voice","reason":"failure_review"},"run_id":"run-01"}`)
+	wantOutput := []byte(`{"conclusion":"<b>风险</b>","headline":"失败需要人工决定","key_points":["/<!-- sift-op:x -->"],"options":["retry","reject","hold"],"recommended_option_id":"retry"}`)
 	var trace bytes.Buffer
 	if err := db.ExportBrainCallsJSONL(ctx, &trace); err != nil {
 		t.Fatal(err)
@@ -85,14 +82,9 @@ func TestEmitInterruptQuotaT4UsesProductionCanonicalTraceAndPersistedFallback(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantInput, err := BuildT4Input(gotInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantOutput, err := T4Contract(gotInput).ValidateOutput([]byte(fake.Responses[0].ResultText))
-	if err != nil {
-		t.Fatal(err)
-	}
+	securityEventRef := interrupt.Links[0].Target
+	wantInput := []byte(fmt.Sprintf(`{"attempt_no":null,"interrupt":{"base_severity":"high","brief_fragments":["请人工处理","额度已耗尽"],"candidate_options":[{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持 Interrupt 人工 held","id":"hold","label":"暂缓决定","risk":"Run 继续运行"}],"fallback_brief":"事实：failure_class=report\\_interrupt\\_quota\\_exhausted；failure_evidence_ref=%s；recommended_action=hold。建议：hold","fallback_headline":"报告打扰额度已耗尽","links":[{"label":"failure_evidence_ref","target":"%s"}],"min_modality":"voice","reason":"failure_review"},"run_id":"run-quota"}`, securityEventRef, securityEventRef))
+	wantOutput := []byte(`{"conclusion":"额度已耗尽","headline":"报告打扰额度已耗尽","key_points":["请人工处理"],"options":["reject","hold"],"recommended_option_id":"hold"}`)
 	var trace bytes.Buffer
 	if err := db.ExportBrainCallsJSONL(ctx, &trace); err != nil {
 		t.Fatal(err)
@@ -109,5 +101,8 @@ func TestEmitInterruptQuotaT4UsesProductionCanonicalTraceAndPersistedFallback(t 
 	}
 	if interrupt.Headline != "报告打扰额度已耗尽" || interrupt.Brief != "结论：额度已耗尽；要点：请人工处理；建议：暂缓决定（hold）" || len(interrupt.Options) != 2 || interrupt.Options[0].ID != "reject" || interrupt.Options[1].ID != "hold" {
 		t.Fatalf("persisted quota interrupt = %#v", interrupt)
+	}
+	if len(interrupt.Links) != 1 || interrupt.Links[0] != (storage.InterruptLink{Label: "failure_evidence_ref", Target: securityEventRef}) {
+		t.Fatalf("persisted quota links = %#v", interrupt.Links)
 	}
 }
