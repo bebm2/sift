@@ -14,7 +14,7 @@ summary: Forge 指令的鉴权、解析、确定性效果与回执契约
 
 1. Command 只消费 `forge_comment` 的 `/sift` 候选和 `approval_label` 的新增事件；关闭、合并等 Forge 事实仍走 Intake。
 2. 每个候选先以 canonical command event key 去重，再鉴权、解析、精确匹配 immutable target、当前 Interrupt、nonce/cutoff 与 `options[]`，最后由唯一存储事务端口提交。不得从当前 Run、Forge 标签集合、最近评论或自然语言猜测。
-3. canonical key 是 `SHA-256(canonical_json({"v":1,"project_id":project_id,"source":source,"remote_event_id":remote_event_id}))` 的 64 位小写 hex。`source` 严格为 `forge_comment | approval_label`，remote ID 为 1–256 UTF-8 bytes 且不含 NUL。该 key 是 receipt、事件 `idempotency_key`、probe requester 关联和 ack operation 的**同一**身份；不得单独拼接远端 ID。
+3. canonical key 是 `SHA-256(canonical_json({"v":1,"project_id":project_id,"source":source,"remote_event_id":remote_event_id}))` 的 64 位小写 hex。`source` 严格为 `forge_comment | approval_label`，remote ID 为 1–256 UTF-8 bytes 且不含 NUL。它是候选/receipt 的 canonical command identity；事件的 `idempotency_key` 必须另按阶段派生（§6.1），不得把一个命令的 initial/final 两行压成同一唯一键，也不得单独拼接远端 ID。
 4. allowlist 只鉴权，不绕过 CAS、target、nonce、cutoff、Gate、隔离或 options。非命令、缺 actor 和不可信 actor 静默；公开文本不得含 actor、token、旧 nonce、原评论、reject/ask 原文、进程身份、消失证据或数据库错误。
 5. Command 不取得 `*sql.Tx`，也不在事务中调用 Forge、Brain、进程检查或信号。唯一 public command 写端口为 `ApplyCommandEvent(envelope, parsed_action?)`；其私有事务原语负责 Ledger、状态和 outbox。`startup_stall` probe 的最终结果仅由 `ApplyRetryProbeResult` 提交。
 
@@ -34,19 +34,20 @@ summary: Forge 指令的鉴权、解析、确定性效果与回执契约
   "target": {"kind":"issue","id":"123"},
   "actor": "alice",
   "raw_digest": "64-lowercase-hex",
+  "occurred_at_ms": 0,
   "comment": {"id":"…","body":"/sift approve …"},
   "label": null,
   "label_position": null
 }
 ```
 
-Required common fields are as shown. `target.kind` is `issue|change`; `target.id` is 1–256 bytes. `comment` is required only for `forge_comment`, where `comment.id=remote_event_id`, `body` is 1–16384 UTF-8 bytes, and label fields are null. For `approval_label`, `label={"event_id":remote_event_id,"name":"…","action":"added"}` and `label_position` are required, while `comment` is null. `label_position` is a canonical positive decimal integer (no sign/leading zero, at most 39 digits). `raw_digest` hashes the unmodified source payload. `event_key` is recomputed, never trusted from the adapter.
+Required common fields are as shown. `target.kind` is `issue|change`; `target.id` is 1–256 bytes. `comment` is required only for `forge_comment`, where `comment.id=remote_event_id`, `body` is 1–16384 UTF-8 bytes, and label fields are null. For `approval_label`, `label={"event_id":remote_event_id,"name":"…","action":"added"}` and `label_position` are required, while `comment` is null. `label_position` is a canonical positive decimal integer (no sign/leading zero, at most 39 digits). `raw_digest` hashes the unmodified source payload. `occurred_at_ms` is the nonnegative source event business time supplied by Forge (or the injected recorded time when the source provides none); it is the sole time used by command effects. `event_key` is recomputed, never trusted from the adapter.
 
 [`forge.md` §2/§4](forge.md) requires both platforms to provide stable comment/note ID, label-event ID, exact target, nullable actor and label position. A driver event lacking target, remote ID or source is a Forge contract violation, not a Command input. Missing actor remains an envelope with `actor=null`; Command owns its persisted ignored receipt.
 
 ### 2.2 Receipt and candidate boundary
 
-`forge_event_receipts` uses `(project_id,event_kind,forge_event_id)` where `event_kind` is exactly the envelope `source`; it stores `event_key`, target, nullable actor and raw digest. A duplicate returns the stored outcome and creates no event, Ledger entry, probe or ack.
+`forge_event_receipts` uses `(project_id,event_kind,forge_event_id)` where `event_kind` is exactly the envelope `source`; it stores `event_key`, target, nullable actor and raw digest. A duplicate returns the stored outcome and creates no event, Ledger entry, probe or ack. The empty label stream uses cutoff sentinel `0`: because every accepted label position is positive, `position > 0` is the first usable post-cutover boundary.
 
 | candidate | immutable receipt | domain event / ack |
 |---|---|---|
@@ -87,7 +88,7 @@ duration-number = 1*DIGIT ["." 1*DIGIT] / "." 1*DIGIT
 duration-unit = "ns" / "us" / %xC2.B5 "s" / "ms" / "s" / "m" / "h"
 ```
 
-`utf8-no-nul` is valid UTF-8 with no NUL; the 16384 limit is bytes after the one separating SP. `reason` additionally rejects CR and LF. `ask` alone can be multiline. The duration grammar is the positive, unsigned subset of Go `time.ParseDuration`: parse it with that function, reject an overflow or a result `<=0`, then compare it to the Interrupt's immutable `hold_max_duration_ms`. No other Go-duration spelling is accepted.
+`utf8-no-nul` is valid UTF-8 with no NUL; the 16384 limit is bytes after the one separating SP. `reason` rejects CR and LF. `ask` accepts LF and CRLF exactly as supplied but rejects a bare CR; all other control code points are rejected. The duration grammar is the positive, unsigned subset of Go `time.ParseDuration`: parse it with that function, reject overflow, a result `<=0`, or a duration that is not an integral number of milliseconds. The remaining value is `hold_duration_ms` and is compared to the Interrupt's immutable `hold_max_duration_ms`; sub-millisecond inputs are rejected, never rounded. No other Go-duration spelling is accepted.
 
 `hold_max_duration_ms` is copied from `attention.hold_max_duration` into the Interrupt when it is created, alongside expiry defaults. Thus restart/config drift cannot change a pending hold limit. Parser vectors must cover one/many/missing SP, EOF, optional reject reason, CR/LF cases, each duration unit/decimal, overflow, zero/negative/sign, and exact lower/upper limit.
 
@@ -112,7 +113,7 @@ CompiledCommandV1 {
 
 The executable fields are populated only after the immutable target, one open Interrupt, current nonce/cutoff and option validation. The transaction loads its own current snapshots and inserts the command event; callers cannot provide target status, options, calibration ID, Task Spec ID, severity, outbox key or SQL.
 
-For every successful row below, `recordHumanDecisionTx` writes exactly one `HumanDecisionV1`; reject/ask additionally write the unmodified `SemanticMaterialV1`. `hold` always retains `waiting_human`, updates expiry to `occurred_at + duration`, increments Interrupt version and rotates nonce. All unlisted reason/action pairs reject as `rejected_option`.
+For every successful row below, `recordHumanDecisionTx` writes exactly one `HumanDecisionV1`; reject/ask additionally write the unmodified `SemanticMaterialV1`. `hold` always retains `waiting_human`, updates expiry to `occurred_at_ms + hold_duration_ms`, increments Interrupt version and rotates nonce. The transaction uses the envelope's frozen `occurred_at_ms`; it never reads a wall clock. All unlisted reason/action pairs reject as `rejected_option`.
 
 | reason | action | immutable binding/precondition | one deterministic transaction effect |
 |---|---|---|---|
@@ -139,7 +140,7 @@ For every successful row below, `recordHumanDecisionTx` writes exactly one `Huma
 |  | reject | §5 race CAS | §5 only |
 |  | hold | §5 race CAS | common hold through the private race primitive |
 
-`interrupt_command_effect_bindings` is immutable, one-to-one with an Interrupt, and has a closed reason-tagged schema for the bindings in this table (including `failure_review.retry_kind`). It is written by the reason owner in the same transaction that emits the Interrupt; unknown/missing/cross-reason binding rejects. Gate re-evaluation is a persisted deduplicated internal operation keyed by `(interrupt_id, expected head where applicable)`, not a Forge call inside this transaction. Approval/review/exemption facts are consumed by the next Gate snapshot; they never overwrite the historical snapshot.
+`interrupt_command_effect_bindings` is immutable, one-to-one with an Interrupt, and has a closed reason-tagged schema for the bindings in this table (including `failure_review.retry_kind`). It is written by the reason owner in the same transaction that emits the Interrupt; unknown/missing/cross-reason binding rejects. Gate re-evaluation is a persisted deduplicated internal operation keyed by `(interrupt_id, head_sha)` (with `head_sha=NULL` only for effects that do not re-evaluate a head), and records the creating event; it is not a Forge call inside this transaction. Approval/review/exemption facts are immutable `command_effects` rows consumed by the next Gate snapshot; they never overwrite the historical snapshot. A closed Interrupt leaves `Run=waiting_human` only while its deduplicated re-evaluation operation is pending; that operation must deterministically transition the Run to the Gate result or a new open Interrupt.
 
 ## 5. `startup_stall`: one owner, request then result
 
@@ -180,13 +181,14 @@ All shown fields are required. `command_event_id` references the final `CommandE
 | nonce/version/CAS stale | `command.rejected` / `rejected_stale` | `rejected_stale` |
 | action not in options | `command.rejected` / `rejected_option` | `rejected_option` |
 | probe already live | `command.rejected` / `probe_in_progress` | `probe_in_progress` |
-| normal table action, startup reject, successful probe | `command.accepted` or `command.resolved` / `applied` | `applied` |
+| normal table action | `command.accepted` / `applied` | `applied` |
+| startup reject, successful probe | `command.resolved` / `applied` | `applied` |
 | retry request | `command.accepted` / `retry_pending` | no ack yet |
 | probe cannot prove absence | `command.resolved` / `absence_unconfirmed` | `absence_unconfirmed` |
 | execution fact wins | `command.resolved` / `superseded_by_fact` | `superseded_by_fact` |
 | decision already won | `command.resolved` / `superseded_by_decision` | `superseded_by_decision` |
 
-The final ack operation key is `command:<event_key>:ack`; its `created_from_event_id` is the final event and its target is the immutable envelope target. Same key with another digest is a contract violation. It is created in the same final transaction, not after an external probe.
+The canonical command identity is not an events uniqueness key. Stage keys are: initial event `command:<event_key>:initial`; final event `command:<event_key>:final`; probe/race facts append a deterministic suffix (`:probe-failed`, `:fact-wins`, or `:decision-wins`) when applicable. Each event key is unique and final events reference the initial event by `final_for_event_id`; an immutable command outcome relation resolves the receipt's initial event to the final event. A retry replay therefore returns the persisted final outcome at every crash point. The final ack operation key is `command:<event_key>:ack`; its `created_from_event_id` is the final event and its target is the immutable envelope target. Same key with another digest is a contract violation. It is created in the same final transaction, not after an external probe.
 
 The deterministic renderer outputs action, disposition, Run and Interrupt. When `next_nonce` is non-null it may output **only the newly issued current nonce** in a complete executable command for that same target; it must never echo the submitted/old nonce. That new nonce is a public anti-replay correlator, not a capability secret.
 
@@ -194,4 +196,4 @@ The deterministic renderer outputs action, disposition, Run and Interrupt. When 
 
 M5 tests must cover GitHub/GitLab comment and label IDs, exact targets, nullable actors, full label pagination/high-water positions and cross-project/cross-source equal remote IDs. They must also cover every grammar and matrix row, default/non-default approved label, config restart drift, label cutover/replay/crash, all table mappings, and nonce renderer bytes.
 
-For every trusted candidate, crash injection at receipt, initial/final command event, Ledger, Run/Interrupt, Task Spec/exemption/review fact, probe, launch and ack operation proves all-or-nothing. Replaying after each point returns the persisted final outcome and at most one Ledger decision, probe, state effect and ack operation.
+For every trusted candidate, crash injection at receipt, initial/final command event, Ledger, Run/Interrupt, Task Spec/effect fact, gate re-evaluation operation, probe, launch and ack operation proves all-or-nothing. Replaying after each point returns the persisted final outcome and at most one Ledger decision, probe, state effect and ack operation. Required identity vectors include: same remote ID across comment/label sources (different keys), same remote ID across projects (different keys), same candidate replay (same receipt), same key with a changed digest/target (contract violation), retry crash before initial commit, between initial and probe, after probe fact but before final event, and after final event before ack. Empty and non-empty label streams, nonce rotation crash, sub-millisecond hold, bare CR, LF and CRLF must each have one deterministic expected outcome.
