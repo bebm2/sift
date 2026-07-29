@@ -246,18 +246,38 @@ func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 		n := int(attemptNo.Int64)
 		c.AttemptNo = &n
 	}
+	terminalReclaim := false
 	if state == string(OperationExecuting) {
 		var oldAttempt string
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM outbox_attempts WHERE operation_id=? AND attempt_no=?`, c.ID, oldCount).Scan(&oldAttempt); err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_attempt_results (attempt_id, finished_at_ms, outcome, error_class, error_summary) VALUES (?, ?, 'retry', 'transient', 'lease_expired')`, oldAttempt, nowMS); err != nil {
+		alertAfter, maxAttempts := d.channelPolicy()
+		reclaim := CompleteOutcome{State: OperationRetryable, ErrorClass: ErrorTransient, ErrorSummary: "lease_expired", NowMS: nowMS, ChannelFailureAlertAfter: alertAfter, MaxAttempts: maxAttempts}
+		if maxAttempts > 0 && oldCount >= maxAttempts {
+			reclaim.State = OperationFailed
+			terminalReclaim = true
+		}
+		result := "retry"
+		if terminalReclaim {
+			result = "failed"
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_attempt_results (attempt_id, finished_at_ms, outcome, error_class, error_summary) VALUES (?, ?, ?, 'transient', 'lease_expired')`, oldAttempt, nowMS, result); err != nil {
 			return nil, err
 		}
 		if c.Kind == OperationChannelPublish {
-			if err := applyChannelOutcomeTx(ctx, tx, c, CompleteOutcome{State: OperationRetryable, ErrorClass: ErrorTransient, ErrorSummary: "lease_expired", NowMS: nowMS, ChannelFailureAlertAfter: 3}, true); err != nil {
+			if err := applyChannelOutcomeTx(ctx, tx, c, reclaim, true); err != nil {
 				return nil, err
 			}
+		}
+		if terminalReclaim {
+			if _, err := tx.ExecContext(ctx, `UPDATE outbox_operations SET state='failed',lease_owner=NULL,lease_expires_at_ms=NULL,completed_at_ms=?,updated_at_ms=? WHERE id=? AND state='executing'`, nowMS, nowMS, c.ID); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, err
+			}
+			return nil, nil
 		}
 	}
 	c.ClaimAttemptNo, c.AttemptID, c.LeaseOwner, c.LeaseExpiresAtMS = oldCount+1, newID(), workerID, nowMS+leaseMS

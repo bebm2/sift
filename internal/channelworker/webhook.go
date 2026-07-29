@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/miaoxiaoyong/sift/internal/storage"
 )
@@ -123,6 +126,50 @@ func validChannel(p webhookPayload) bool {
 	return strings.HasPrefix(p.Channel.TargetRef, prefix) && len(p.Channel.TargetRef) > len(prefix) && !strings.ContainsAny(p.Channel.TargetRef[len(prefix):], "\r\n")
 }
 
+// EnvironmentSecretResolver is the small production resolver used by the V0
+// daemon. The payload contains only the handle; the resolved value never
+// crosses the storage boundary.
+type EnvironmentSecretResolver struct{}
+
+func (EnvironmentSecretResolver) Resolve(_ context.Context, name string) (string, error) {
+	if value, ok := os.LookupEnv(name); ok {
+		return value, nil
+	}
+	if value, ok := os.LookupEnv("SIFT_SECRET_" + name); ok {
+		return value, nil
+	}
+	return "", ErrAuthOrCapability
+}
+
+type HTTPWebhookSender struct{ Client *http.Client }
+
+func (s HTTPWebhookSender) Send(ctx context.Context, endpoint, body string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body))
+	if err != nil {
+		return "", ErrContractViolation
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	client := s.Client
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", ErrTransient
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return "", ErrRateLimited
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", ErrAuthOrCapability
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", ErrTransient
+	}
+	return resp.Status, nil
+}
+
 // WebhookAdapter executes exactly one sealed attempt. Errors crossing this
 // boundary are classifications only: sender text can contain endpoint secrets.
 type WebhookAdapter struct {
@@ -136,17 +183,20 @@ func (a WebhookAdapter) Publish(ctx context.Context, payload []byte, operationKe
 		return nil, fmt.Errorf("%w: closed channel_publish payload", ErrContractViolation)
 	}
 	if p.DeliveryKind == "interrupt" {
-		if !only(payload, "delivery_kind", "delivery_id", "interrupt_id", "escalation_no", "priority", "interrupt_version", "nonce", "channel", "rendered_text") || !required(payload, "interrupt_id", "escalation_no", "interrupt_version", "nonce") || p.InterruptID == "" || p.Nonce == "" {
+		if !only(payload, "delivery_kind", "delivery_id", "interrupt_id", "escalation_no", "priority", "interrupt_version", "nonce", "channel", "rendered_text") || !required(payload, "interrupt_id", "escalation_no", "interrupt_version", "nonce") || p.InterruptID == "" || p.Nonce == "" || p.DeliveryID != fmt.Sprintf("interrupt:%s:%d:%s", p.InterruptID, p.EscalationNo, p.Channel.ID) {
 			return nil, fmt.Errorf("%w: interrupt payload", ErrContractViolation)
 		}
 	} else if p.DeliveryKind == "attention_batch" {
-		if !only(payload, "delivery_kind", "delivery_id", "batch_id", "batch_kind", "channel", "project_id", "forge_alert_target", "scope", "scope_id", "due_at_ms", "members", "rendered_text") || !required(payload, "batch_id", "batch_kind", "project_id", "scope", "scope_id", "due_at_ms", "forge_alert_target", "members") || p.BatchID == "" || p.ProjectID == "" || p.ForgeAlertTarget.ForgeKind == "" || p.ForgeAlertTarget.ForgeHost == "" || p.ForgeAlertTarget.ForgeProjectKey == "" || p.ForgeAlertTarget.TargetKind == "" || p.ForgeAlertTarget.TargetID == "" || len(p.Members) == 0 {
+		if !only(payload, "delivery_kind", "delivery_id", "batch_id", "batch_kind", "channel", "project_id", "forge_alert_target", "scope", "scope_id", "due_at_ms", "members", "rendered_text") || !required(payload, "batch_id", "batch_kind", "project_id", "scope", "scope_id", "due_at_ms", "forge_alert_target", "members") || p.BatchID == "" || (p.BatchKind != "daily_summary" && p.BatchKind != "critical_fused") || (p.Scope != "day" && p.Scope != "global" && p.Scope != "run") || p.ProjectID == "" || p.ForgeAlertTarget.ForgeKind == "" || (p.ForgeAlertTarget.ForgeKind != "github" && p.ForgeAlertTarget.ForgeKind != "gitlab") || p.ForgeAlertTarget.ForgeHost == "" || p.ForgeAlertTarget.ForgeProjectKey == "" || (p.ForgeAlertTarget.TargetKind != "issue" && p.ForgeAlertTarget.TargetKind != "discussion") || p.ForgeAlertTarget.TargetID == "" || len(p.Members) == 0 {
 			return nil, fmt.Errorf("%w: batch payload", ErrContractViolation)
 		}
 		last := ""
+		if p.DeliveryID != p.BatchID+":publish:1" {
+			return nil, fmt.Errorf("%w: batch delivery identity", ErrContractViolation)
+		}
 		for _, raw := range p.Members {
 			var member batchMember
-			if err := decodeClosed(raw, &member); err != nil || !required(raw, "delivery_id", "interrupt_id", "interrupt_version", "nonce", "headline", "reason", "severity", "links", "options", "command_lines") || member.DeliveryID == "" || !strings.HasPrefix(member.DeliveryID, p.BatchID+":") || member.InterruptID == "" || member.Nonce == "" || member.InterruptID <= last {
+			if err := decodeClosed(raw, &member); err != nil || !required(raw, "delivery_id", "interrupt_id", "interrupt_version", "nonce", "headline", "reason", "severity", "links", "options", "command_lines") || member.DeliveryID != p.BatchID+":"+member.InterruptID || member.InterruptID == "" || member.Nonce == "" || member.InterruptID <= last || (member.Severity != "low" && member.Severity != "normal" && member.Severity != "high" && member.Severity != "critical") || (member.Reason != "agent_blocked" && member.Reason != "code_review" && member.Reason != "failure_review" && member.Reason != "startup_stall" && member.Reason != "merge_conflict") {
 				return nil, fmt.Errorf("%w: batch member", ErrContractViolation)
 			}
 			last = member.InterruptID
