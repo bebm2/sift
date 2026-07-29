@@ -550,6 +550,14 @@ func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, v
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,critical_window_ms,critical_total_limit,critical_per_run_limit,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, kind, deliveryID, scope, scopeID, episode, due, criticalWindow, criticalTotal, criticalPerRun, now, now); err != nil {
 		return fmt.Errorf("create attention batch: %w", err)
 	}
+	var batchProject, batchChannel, batchSnapshot, batchForgeKind, batchHost, batchForgeProject, batchTargetKind, batchTargetID, batchKind, batchDelivery, batchScope, batchScopeID string
+	var batchDue int64
+	if err := tx.QueryRowContext(ctx, `SELECT project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,due_at_ms FROM attention_batches WHERE id=?`, batch).Scan(&batchProject, &batchChannel, &batchSnapshot, &batchForgeKind, &batchHost, &batchForgeProject, &batchTargetKind, &batchTargetID, &batchKind, &batchDelivery, &batchScope, &batchScopeID, &batchDue); err != nil {
+		return err
+	}
+	if batchProject != project || batchChannel != channel || batchSnapshot != snapshot || batchForgeKind != forgeKind || batchHost != host || batchForgeProject != forgeProject || batchTargetKind != targetKind || batchTargetID != targetID || batchKind != kind || batchDelivery != deliveryID || batchScope != scope || batchScopeID != scopeID || batchDue != due {
+		return fmt.Errorf("%w: attention batch identity collision", ErrInterruptRejected)
+	}
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batch_members(batch_id,interrupt_id,admission_id,member_key,channel_id,channel_snapshot_json,delivery_id,interrupt_version,nonce,headline,reason,severity,links_json,options_json,joined_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, id, admission, batch+":"+id, channel, snapshot, batch+":"+id, version, nonce, headline, reason, severity, links, opts, now)
 	if err != nil {
 		return fmt.Errorf("add attention batch member: %w", err)
