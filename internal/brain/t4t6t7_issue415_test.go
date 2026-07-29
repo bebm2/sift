@@ -264,6 +264,7 @@ func TestIssue436T7MalformedInputsDoNotReserveOrCallProvider(t *testing.T) {
 		name string
 		path []string
 	}{
+		{"missing_aggregate_key", []string{"aggregate_key"}},
 		{"missing_window", []string{"window"}},
 		{"missing_window_start", []string{"window", "start_ms"}},
 		{"missing_window_end", []string{"window", "end_ms"}},
@@ -395,10 +396,10 @@ func TestIssue436FallbackAdaptersPreserveSourceAndT4Skeleton(t *testing.T) {
 	in.Interrupt.FallbackBrief = "check failed: build 17"
 	in.Interrupt.BriefFragments = []string{"build 17 failed", "review needed"}
 	in.Interrupt.Links = []T4Link{{Label: "evidence", Target: "https://example.test/e"}, {Label: "event", Target: "sift://event/0123456789abcdef0123456789abcdef"}}
+	in.Interrupt.CandidateOptions = []T4Option{{ID: "review", Label: "Review", Effect: "open review", Risk: "delay"}, {ID: "retry", Label: "Retry", Effect: "retry check", Risk: "cost"}}
 	if _, err := BuildT4Input(in); err != nil {
 		t.Fatalf("lossless T4 fixture is not a valid frozen skeleton: %v", err)
 	}
-	in.Interrupt.CandidateOptions = []T4Option{{ID: "review", Label: "Review", Effect: "open review", Risk: "delay"}, {ID: "retry", Label: "Retry", Effect: "retry check", Risk: "cost"}}
 	var fallback T4Input
 	if err := decode.Decode(T4FallbackOutput(in), &fallback, decode.Closed); err != nil || !reflect.DeepEqual(fallback, in) {
 		t.Fatalf("lossless T4 fallback skeleton = %#v, want %#v: %v", fallback, in, err)
