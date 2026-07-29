@@ -73,6 +73,7 @@ func TestReconcilerOnceExternalMergeCompletesWaitingHuman(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed.Close()
+	setIntakeGateHead(t, db, "run-merge")
 	recorded, _, err := db.RecordGateEvaluationAndEmitInterrupt(context.Background(), intakeGateRecord("run-merge"), intakeGateInterrupt("run-merge"))
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +135,18 @@ func intakeGateRecordWithShadow(runID, shadow string) storage.GateEvaluationReco
 	return storage.GateEvaluationRecord{RunID: runID, GateInputHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", GateVersion: "gate/v1", SnapshotSchemaVersion: 1, SnapshotJSON: []byte(`{"schema_version":1}`), VerdictJSON: []byte(`{"schema_version":1,"kind":"hitl"}`), HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", EffectivePolicyHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", CertificationVersion: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", RiskSourceVersion: "T3/fallback/v1", VerdictDigest: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", ShadowDecision: shadow, FeaturesJSON: []byte(`{"schema_version":1}`), NowMS: reconcilerNow}
 }
 
+func setIntakeGateHead(t *testing.T, db *storage.DB, runID string) {
+	t.Helper()
+	q, err := sql.Open("sqlite", db.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if _, err := q.Exec(`UPDATE runs SET change_head_sha=? WHERE id=?`, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", runID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func intakeGateInterrupt(runID string) storage.EmitInterruptCmd {
 	return storage.EmitInterruptCmd{RunID: runID, ExpectedRunVersion: 2, Reason: storage.InterruptCodeReview, Facts: map[string]string{"change_ref": "https://example.test/c1", "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://example.test/c1/diff"}, Generation: storage.InterruptGeneration{ChangeID: "c1", HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, GatePhase: storage.GateReview, GuardrailLevel: storage.GuardrailNone, AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 3, storage.SeverityHigh: 3}, DayTimezone: "UTC", Source: storage.SourceSystem, NowMS: reconcilerNow}
 }
@@ -153,6 +166,7 @@ func TestReconcilerExternalInconclusiveMergeConvergesWithoutSettlement(t *testin
 	if err := db.RecordCreatedChange(context.Background(), "run-inconclusive", "c1", reconcilerNow); err != nil {
 		t.Fatal(err)
 	}
+	setIntakeGateHead(t, db, "run-inconclusive")
 	if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(context.Background(), intakeGateRecordWithShadow("run-inconclusive", "inconclusive"), intakeGateInterrupt("run-inconclusive")); err != nil {
 		t.Fatal(err)
 	}
@@ -241,6 +255,7 @@ func TestReconcilerExternalMergeFactsFirstWithoutExactBinding(t *testing.T) {
 					t.Fatal(err)
 				}
 				q.Close()
+				setIntakeGateHead(t, db, "run")
 				if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(context.Background(), intakeGateRecordWithShadow("run", tc.shadow), intakeGateInterrupt("run")); err != nil {
 					t.Fatal(err)
 				}

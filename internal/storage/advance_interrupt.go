@@ -311,9 +311,15 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 			WHERE i.id=? AND r.id=? AND r.change_id=? AND r.change_head_sha=?
 				AND s.head_sha=? AND s.head_sha=?)`, interruptID, runID, textValue("change_id"), textValue("head_sha"), textValue("head_sha"), textValue("conflict_digest")).Scan(&exists)
 	case "guardrail_violation":
-		// These values are immutable policy/source facts.  Their non-empty
-		// shape is checked above; the policy owner supplies the provenance.
-		exists = 1
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM interrupts i
+			JOIN calibration_entries c ON c.id=i.calibration_id
+			JOIN gate_evaluations e ON e.id=c.gate_evaluation_id
+			JOIN gate_input_snapshots s ON s.id=e.snapshot_id
+			WHERE i.id=? AND e.run_id=? AND s.head_sha=?
+				AND json_extract(e.verdict_json,'$.rule_id')=?
+				AND json_extract(e.verdict_json,'$.matched_paths_digest')=?)`, interruptID, runID,
+			textValue("head_sha"), textValue("rule_id"), textValue("matched_paths_digest")).Scan(&exists)
 	case "agent_blocked", "startup_stall", "failure_review_attempt":
 		query := `SELECT EXISTS(SELECT 1 FROM attempts a JOIN interrupts i ON i.id=? WHERE a.run_id=? AND a.run_id=i.run_id AND a.attempt_no=? AND a.generation=?)`
 		args := []any{interruptID, runID, integerValue("attempt_no"), integerValue("generation")}
