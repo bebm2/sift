@@ -91,8 +91,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if version != 45 {
-		t.Fatalf("SchemaVersion = %d, want 45", version)
+	if version != 46 {
+		t.Fatalf("SchemaVersion = %d, want 46", version)
 	}
 
 	embedded, err := loadEmbeddedMigrations()
@@ -135,9 +135,63 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 45 {
-		t.Fatalf("schema_migrations rows = %d, want 45 after reopen", count)
+	if count != 46 {
+		t.Fatalf("schema_migrations rows = %d, want 46 after reopen", count)
 	}
+}
+
+func TestDailyBatchUpgradeNormalizesLegacyLimitsAndReopens(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sift.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE schema_migrations (version INTEGER NOT NULL PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL, binary_version TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadEmbeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		if migration.version > 43 {
+			break
+		}
+		if err := applyOne(ctx, raw, migration, "old-binary", time.UnixMilli(testNow)); err != nil {
+			t.Fatalf("apply %04d: %v", migration.version, err)
+		}
+	}
+	if _, err := raw.Exec(`INSERT INTO config_snapshots(id,config_hash,schema_version,canonical_json,source_present,loaded_at_ms,binary_version) VALUES('cfg','hash',1,'{}',1,1,'old-binary'); INSERT INTO projects(id,config_snapshot_id,forge_kind,forge_host,forge_project_key,repo_path,enabled,health,created_at_ms,updated_at_ms) VALUES('project','cfg','github','github.com','owner/project','/repo',1,'active',1,1); INSERT INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,due_at_ms,critical_window_ms,critical_total_limit,critical_per_run_limit,created_at_ms,updated_at_ms) VALUES('daily:legacy','collecting','project','ops','{}','github','github.com','owner/project','issue','42','daily_summary','daily:legacy:publish:1','day','UTC:1',1,900000,5,2,1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow + 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var window, total, perRun sql.NullInt64
+	if err := db.db.QueryRowContext(ctx, `SELECT critical_window_ms,critical_total_limit,critical_per_run_limit FROM attention_batches WHERE id='daily:legacy'`).Scan(&window, &total, &perRun); err != nil {
+		t.Fatal(err)
+	}
+	if window.Valid || total.Valid || perRun.Valid {
+		t.Fatalf("legacy daily limits = %#v/%#v/%#v, want NULL", window, total, perRun)
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batches SET critical_window_ms=1 WHERE id='daily:legacy'`); err == nil {
+		t.Fatal("collecting daily batch accepted critical authority")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow + 2)})
+	if err != nil {
+		t.Fatalf("reopen upgraded database: %v", err)
+	}
+	defer reopened.Close()
 }
 
 func TestPopulated0020To0021UpgradePreservesForeignKeysAndRestarts(t *testing.T) {
