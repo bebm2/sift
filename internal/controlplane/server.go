@@ -24,6 +24,15 @@ import (
 
 const deadline = 5 * time.Second
 
+type reportParams struct {
+	RunID      string         `json:"run_id"`
+	AttemptNo  int            `json:"attempt_no"`
+	Generation int            `json:"generation"`
+	ReportKey  string         `json:"report_key"`
+	Kind       string         `json:"kind"`
+	Payload    map[string]any `json:"payload"`
+}
+
 type Server struct {
 	Home          config.Home
 	operatorToken string
@@ -310,10 +319,27 @@ func (s *Server) runRequest(req Request) Response {
 	}
 	switch req.Method {
 	case "report.submit":
-		if req.Auth.Kind != "run_token" || !validToken(req.Auth.Token) {
+		if req.Auth.Kind != "run_token" || !validToken(req.Auth.Token) || req.Auth.Nonce != "" || req.Auth.Session != "" || req.Auth.Permit != "" {
 			return failure(req.RequestID, "unauthorized", "credential rejected", false)
 		}
-		return failure(req.RequestID, "not_found", "run not found", false)
+		if s.db == nil || !onlyKeys(req.Params, "run_id", "attempt_no", "generation", "report_key", "kind", "payload") {
+			return failure(req.RequestID, "invalid_request", "invalid params", false)
+		}
+		var p reportParams
+		if !decodeParams(req.Params, &p) || p.RunID == "" || p.AttemptNo < 1 || p.Generation < 1 || p.ReportKey == "" || p.Kind == "" {
+			return failure(req.RequestID, "invalid_request", "invalid params", false)
+		}
+		result, err := s.db.RecordReport(context.Background(), storage.ReportSubmitCmd{Token: req.Auth.Token, RunID: p.RunID, AttemptNo: p.AttemptNo, Generation: p.Generation, ReportKey: p.ReportKey, Kind: p.Kind, Payload: p.Payload, NowMS: time.Now().UnixMilli()})
+		if err != nil {
+			if strings.Contains(err.Error(), "unauthorized") {
+				return failure(req.RequestID, "unauthorized", "credential rejected", false)
+			}
+			if strings.Contains(err.Error(), "rate limit") {
+				return failure(req.RequestID, "conflict", "report rate limit exceeded", false)
+			}
+			return failure(req.RequestID, "conflict", "report was not accepted", false)
+		}
+		return success(req.RequestID, result)
 	case "claim.acquire", "claim.permit_spawn", "claim.started":
 		return s.handoffRequest(req)
 	default:
