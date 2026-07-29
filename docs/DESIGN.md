@@ -405,7 +405,7 @@ D0.2 写的「按 `(base, head branch)` 查是否已存在**开启的** Change�
 **职责**：把 `gh api` / `glab api`（plumbing，PRD §13.1）封装为 PRD §5.2 的最小动词集，输出中性领域类型。
 
 - **归一在边界完成**：平台字段（`number`/`iid`、`mergeable_state`/`detailed_merge_status`、Checks vs Pipelines、Draft 前缀）不允许泄漏到上层。PRD §5.2 差异清单逐条对应一个归一函数。两平台无法都给出确定性答案时，归一结果是显式 `unknown`，由上层转 HITL——**不允许适配器猜**。
-- **actor 是类型的一部分**：`listLabelEvents` / `listIssueComments` / `listChangeComments` 返回类型中 actor 为必填字段；取不到 actor 的事件在适配器内即被丢弃。C8 的 fail closed 因此是类型系统的结果，不是每个调用点都要记得的检查。
+- **actor 是带来源的可空字段**：`listLabelEvents` / `listIssueComments` / `listChangeComments` 返回类型显式携带 nullable actor；适配器不得补全或猜测。Intake 等非 Command 驱动 consumer 在适配器内丢弃缺 actor，Command 候选则保留 `actor=null` 交给 Command 持久化 `ignored_missing_actor` receipt 后静默拒绝。这样 C8 的 fail closed 同时保留 Command 的不可变审计边界。
 - **副作用对账也是端口能力**：`findChangeForCreateOperation` 跨全状态返回 marker 唯一命中 / 未命中 / 同 base-head 冲突；`mergeChange` 必须接受 expected head 并映射到平台的远端条件合并。二者都不得由 outbox worker 用 raw API 旁路实现。
 - **进程调用安全**：一律 argv 数组启动，禁止 shell 拼接。
 - **错误分类**（对上层暴露的唯一错误语义）：`Transient`（退避重试）、`RateLimited`（尊重远端 reset 并联动 API 预算降速）、`AuthOrCapability`（停止该项目摄入 + 一次告警，不循环轰炸）、`ContractViolation`（保留响应摘要，fail closed）、`SemanticConflict`（重读事实源后重判）。
@@ -1197,7 +1197,7 @@ D0.9 自查本身的结论保留：`retry` 是非终局探测请求，探测失�
 
 | 文档 | 内容 |
 |------|------|
-| `specs/forge.md` | 最小动词集签名、中性类型、平台归一表、actor 必填契约、Change operation 全状态查找、merge expected-head CAS、错误分类 |
+| `specs/forge.md` | 最小动词集签名、中性类型、平台归一表、actor 可空契约、Change operation 全状态查找、merge expected-head CAS、错误分类 |
 | `specs/storage.md` | 表结构、事件 schema 与版本策略、迁移、回放集导出格式；Brain trace 独立调用键 + 可空 Gate 快照外键 |
 | `specs/policy.md` / `specs/config.md` | 策略与全局配置 schema、有效策略计算、漂移判定口径 |
 | `specs/gate.md` | Gate 输入快照结构、判定顺序、默认硬护栏路径清单 |

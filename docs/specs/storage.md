@@ -40,7 +40,7 @@ Brain 字段级评审 [2026-07-28-brain-review-pi-gpt-5.6-sol.md](../reviews/202
 10. `attempt_resolution` 是唯一规范名称；V0 枚举仅 `reject | retry_after_absence`。
 11. attempt 隔离是独立于 Run 状态和 attempt phase 的当前投影：Run 终态、attempt 终结、Interrupt 关闭均不隐含解除隔离；冻结 worktree 不得清理或分配给任何 attempt。
 12. 只有持久化的执行体消失证据，或显式的 operator 强制清理安全事件，才能解除隔离；仅凭 lease/heartbeat/等待超时、PID 不存在或 Run 终态均不够。
-13. 合法启动/结果事实与 `attempt_resolution` 只在 `ResolveAttemptRace` 内仲裁；四个调用入口不得各自实现近似事务。
+13. 合法启动/结果事实与 `attempt_resolution` 只在 private `resolveAttemptRaceTx` 内仲裁；public `ApplyCommandEvent`、recovery 和 probe ports 不得各自实现近似事务。
 14. 每次 daemon boot 都有存储内恢复屏障。该 boot 的恢复扫描完成前，任何 worker 都不得 claim 或 reclaim `launch_agent` operation；非启动 operation 不受此屏障阻塞。
 15. 恢复扫描覆盖全部非终态 attempt 与全部未完成 `launch_agent` operation，不以 Run 状态过滤；外部文件/进程观测在事务外完成，只有确定性恢复动作进入写事务。
 
@@ -93,6 +93,8 @@ PRAGMA wal_autocheckpoint = 1000;
 | `binary_version` | TEXT | NOT NULL |
 
 迁移文件随二进制嵌入，命名 `NNNN_name.sql`，只允许前向执行。每个迁移在独立 `BEGIN IMMEDIATE` 事务中完成；checksum 与已应用记录不一致时拒启。数据库最高版本高于二进制支持版本时拒启，禁止尝试降级。
+
+Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id)` 唯一键改为 `(project_id,event_kind,forge_event_id)`，回填 `event_key` 为可验证的 canonical identity；无法唯一回填或发现同 key 异 digest/target 的旧行时拒启并要求人工迁移。迁移必须同时建立 command outcome/effect/target 表及 gate re-evaluation operation 的 FK/唯一索引，不能只加 nullable 列。
 
 ## 4. 配置与项目投影
 
@@ -356,6 +358,8 @@ PRAGMA wal_autocheckpoint = 1000;
 | `links_json` | TEXT | NOT NULL，默认 `[]` |
 | `nonce` | TEXT | NOT NULL |
 | `nonce_issued_at_ms` | INTEGER | NOT NULL；当前 nonce 成为有效值的时间 |
+| `hold_max_duration_ms` | INTEGER | NOT NULL；创建时从 config snapshot 冻结的正毫秒数 |
+| `approval_label_cutoff_position` | TEXT | NULL；正十进制远端位置；NULL 表示 nonce 初发/轮换后尚未完成 cutover |
 | `version` | INTEGER | NOT NULL，初值 1；nonce/超时更新时 +1 |
 | `status` | TEXT | `open \| closed` |
 | `dispatch_state` | TEXT | `ready \| batched \| held \| probe_in_progress` |
@@ -389,6 +393,7 @@ PRAGMA wal_autocheckpoint = 1000;
 - `charged_budget_entry_id` 只在首次发射实际写入 attention charge 时非空；`quota_batched` admission 的 Interrupt 必为 NULL，不能用零额或虚构 entry 充数。该列与 admission 的对应约束见 §6.3。
 - 初始 nonce 的 `nonce_issued_at_ms` 等于 `created_at_ms`；每次 nonce 轮换必须同一 CAS 更新 `nonce_issued_at_ms` 并递增 version。非 nonce 更新不得改写该时间。
 - `probe_in_progress` 时拒绝新指令，但合法迟到事实仍可经仲裁入口提交。
+- 创建或轮换 nonce 时，`approval_label_cutoff_position` 必须先 CAS 置 NULL 并递增 version；Forge 在事务外穷举目标的 label stream 后，`SetApprovalLabelCutoff(interrupt_id,expected_version,nonce,position)` 以第二笔 CAS 写入最高证明位置。空 stream 写入 sentinel `0`；没有证明位置能力或扫描未穷尽时保持 NULL，Command 对 label approval fail closed。
 
 `close_reason` 只说明该 Interrupt 为何不再待决，不替代 attempt resolution 或 RPC disposition：
 
@@ -464,7 +469,17 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 
 `attention_batch_members` 保存 batch 的不可重复成员与发送时需要的冻结展示绑定：主键 `(batch_id, interrupt_id)`，另有唯一 `member_key=<batch_id>:<interrupt_id>`；列为 `admission_id`（FK attention_admissions）、`interrupt_version`、`nonce`、`headline`、`reason`、`severity`、`links_json`、`options_json`、`joined_at_ms`、`excluded_at_ms`。入批时冻结这些值；同一 Interrupt 不能在同一 batch 有第二成员。关闭或由事实 supersede 的事务在 batch 仍为 `collecting` 时必须把成员标为 excluded。到期的 `PrepareAttentionBatch` 在同一事务重读其余成员的 open/version/nonce，排除不再匹配者；有成员时冻结 sorted payload、写唯一 `channel_publish` operation 并把 batch 置 `sealed`，无成员则 `cancelled`。sealed payload、member 快照、operation 和成功 delivery evidence 均不可改；这一定义以 sealing 为发送前的最后关闭排除边界，之后的关闭不会改写已经冻结的外部请求。
 
-### 6.4 Batch delivery 投影
+### 6.4 Command target、effect 与 outcome
+
+`interrupt_command_targets` 是每个 Interrupt 恰好一行的不可变目标绑定：`interrupt_id` PK/FK interrupts、`publish_operation_id` NOT NULL UNIQUE FK outbox_operations（必须是初始 forge_comment operation）、`target_kind` NOT NULL (`issue|change`)、`target_id` NOT NULL、`created_at_ms` NOT NULL。目标必须与同一发布 operation 的 payload 逐字节相等。
+
+`interrupt_command_effect_bindings` 是 reason owner 在 EmitInterrupt 五件事事务中创建的不可变一对一 binding：`interrupt_id` PK/FK、`reason`、`binding_schema_version=1`、`binding_json`、`binding_digest` UNIQUE、`created_at_ms`。`binding_json` 只允许这些 closed arms：`design_approval(task_spec_snapshot_id,run_id)`、`guardrail_violation(run_id,head_sha,rule_id,matched_paths_digest)`、`code_review(change_id,head_sha,review_policy_snapshot_digest)`、`agent_blocked(run_id,attempt_no,generation)`、`merge_conflict(change_id,head_sha,conflict_digest)`、`failure_review(run_id,attempt_no,generation,retry_kind=gate_recheck|new_attempt)`、`startup_stall(run_id,attempt_no,generation)`。每个 arm 的 FK/组合 FK、reason 一致性和禁止未知字段由写端口及 CHECK 共同保证；缺失、跨 reason 或重复 binding 回滚。
+
+`command_effects` 是 `ApplyCommandEvent` 创建的不可变事实表：`id` PK、`interrupt_id` FK、`event_id` FK events、`effect_kind` (`one_time_exemption|human_review_approval`)、`run_id` FK、`change_id`、`head_sha`、`rule_id`、`matched_paths_digest`、`review_policy_snapshot_digest`、`created_at_ms`。CHECK 要求 exemption 恰有 run/head/rule/path digest，review approval 恰有 run/change/head/review-policy digest；各自 binding identity 唯一。Gate 下一份 snapshot 消费 effect，不修改历史 Gate 输入。
+
+`command_event_outcomes` 解决 retry 的 initial/final 归属，是唯一允许 CAS 补全结局的可变投影：`id` PK、`event_key` UNIQUE、`initial_event_id` UNIQUE FK events、`final_event_id` NULL UNIQUE FK events、`state=pending|final`、`created_at_ms`、`finalized_at_ms` NULL。初始 retry 插入 pending，最终事务以 CAS 补一次 final event/state/time；非 retry 在同一事务插入 initial=final 的 final 状态。receipt 只链接 initial 也能唯一解析最终事件；任何同 key 异 digest 均为 contract violation。
+
+### 6.5 Batch delivery 投影
 
 每个 sealed batch 有一条 `batch_deliveries` 投影：`batch_id` PK/FK、`operation_key` UNIQUE、`state=pending|delivered|failed`、`attempt_count`、`remote_ref`、`last_error`、`created_at_ms`、`delivered_at_ms`。它与 `interrupt_deliveries` 同样只提供查询面。`CompleteOutboxAttempt` 成功时原子标记该投影、batch 和逐成员的 Ledger delivery；响应丢失的重放沿用同一 operation key 和 frozen payload，Channel 仍如实为 at-least-once。
 
@@ -514,16 +529,18 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 | `id` | TEXT | PK |
 | `project_id` | TEXT | NOT NULL FK projects |
 | `forge_event_id` | TEXT | NOT NULL |
-| `event_kind` | TEXT | NOT NULL |
+| `event_kind` | TEXT | NOT NULL；`forge_comment \| approval_label` |
+| `event_key` | TEXT | NOT NULL；Command canonical 64-hex identity |
 | `target_kind` | TEXT | `issue \| change` |
 | `target_id` | TEXT | NOT NULL |
 | `actor` | TEXT | NULL |
 | `raw_digest` | TEXT | NOT NULL |
 | `disposition` | TEXT | `accepted \| fact_observed \| ignored_untrusted_actor \| ignored_missing_actor` |
-| `domain_event_id` | TEXT | NULL FK events |
+| `domain_event_id` | TEXT | NULL FK events；trusted Command 的 initial event |
+| `command_outcome_id` | TEXT | NULL FK command_event_outcomes；trusted Command 的 initial/final resolution |
 | `observed_at_ms` | INTEGER | NOT NULL |
 
-唯一约束 `(project_id, forge_event_id)`。重复投递返回既有 receipt，不新增“duplicate”行。事实观测不因 actor 缺失被忽略；驱动事件必须有可信 actor 才能 `accepted`。
+唯一约束 `(project_id, event_kind, forge_event_id)` 与 `(project_id, event_key)`。迁移必须删除旧的 `(project_id, forge_event_id)` 约束；因此同项目不同 source 的相同远端 ID 不碰撞。重复投递返回既有 receipt，不新增“duplicate”行；同 key 的 digest、target、source 或 remote ID 不一致是 `contract_violation`。事实观测不因 actor 缺失被忽略；驱动事件必须有可信 actor 才能 `accepted`。
 
 ### 7.4 `report_receipts`（不可变）
 
@@ -596,10 +613,11 @@ M1 冻结上述表与约束，并仅实现 fake 骨架链所需的 Forge Run/rec
 |----|------|-----------|
 | `id` | TEXT | PK |
 | `operation_key` | TEXT | NOT NULL UNIQUE，稳定业务键 |
-| `kind` | TEXT | `forge_comment \| forge_labels \| create_change \| merge_change \| rerun_checks \| channel_publish \| launch_agent \| command_ack \| forge_alert` |
+| `kind` | TEXT | `forge_comment \| forge_labels \| create_change \| merge_change \| rerun_checks \| channel_publish \| launch_agent \| command_ack \| gate_re_evaluation \| forge_alert` |
 | `run_id` | TEXT | NULL FK runs |
 | `attempt_no` | INTEGER | NULL；非空时与 run_id 组成 attempts 组合 FK |
 | `interrupt_id` | TEXT | NULL FK interrupts |
+| `created_from_event_id` | TEXT | NULL FK events；Command/Gate operation 的创建事件，不可改 |
 | `state` | TEXT | `pending \| executing \| retryable \| succeeded \| failed \| stale \| conflict` |
 | `payload_schema_version` | INTEGER | NOT NULL |
 | `payload_json` | TEXT | NOT NULL |
@@ -616,7 +634,7 @@ M1 冻结上述表与约束，并仅实现 fake 骨架链所需的 Forge Run/rec
 | `updated_at_ms` | INTEGER | NOT NULL |
 | `completed_at_ms` | INTEGER | NULL |
 
-`executing` 必须同时有 lease owner/expiry；其他 state 不得保留有效 lease。terminal state 为 succeeded/failed/stale/conflict。payload 一经创建不可改；重试只更新执行字段。`rerun_checks` 的 claim/reclaim、request-start 与 complete 另按 §8.5 执行，不得套用通用 lease-expiry 重试。
+`executing` 必须同时有 lease owner/expiry；其他 state 不得保留有效 lease。terminal state 为 succeeded/failed/stale/conflict。payload 一经创建不可改；重试只更新执行字段。`gate_re_evaluation` 的 `operation_key` 是 `gate:<interrupt_id>:<head_sha-or-none>:reeval:1`，同 Interrupt/head 只允许一条；`created_from_event_id` 必须指向创建该 operation 的 final command event。claim/replay 由同一 key 返回既有 operation，终态为 `succeeded|failed|conflict`；失败必须产生确定性的后续 Gate/Interrupt 结局，不能留下无界 `waiting_human`。`rerun_checks` 的 claim/reclaim、request-start 与 complete 另按 §8.5 执行，不得套用通用 lease-expiry 重试。
 
 ### 8.2 `check_rerun_consumptions`（不可变）
 
@@ -992,21 +1010,20 @@ Gate record 来自同一 snapshot/evaluation；Brain record 一条 logical recor
 | `AcquireLaunchClaim` | wrapper/session CAS + pending→starting + launch outbox attempt/result/succeeded + event |
 | `AdvanceAttempt` | attempt/claim + events；不得旁路 Run transition |
 | `StartOrAdvanceProbe` | attempt probe + 受控终止观测事件 |
-| `ResolveAttemptRace(expectedRunVersion, expectedGeneration, factKey, command)` | claim:started、恢复补 started、迟到 result、Interrupt 指令共用的唯一 CAS 仲裁；resolution/身份/结果、隔离、Run transition、Interrupt close、回执 outbox 与事件同事务 |
 | `EmitInterrupt` | Run transition + Interrupt + initial attention admission/budget/critical fuse + event + publish outbox |
 | `AdvanceInterrupt` | Supervisor 的 hold/escalate/auto_reject，及升级首次 critical admission/fuse：Interrupt CAS + 可选 Run transition/batch/outbox/event |
 | `PrepareAttentionBatch` | due batch 的成员 open-CAS、payload sealing、唯一 Channel operation 与事件；不做外部 IO |
-| `ApplyInterruptCommand` | 通用指令：Interrupt CAS + 可选 Task Spec/Ledger/calibration/certification + Run transition/outbox/event |
-| `ApplyRetryProbeResult` | ADR-013 全部结果字段的一笔 CAS 事务；内部必须调用与 `ResolveAttemptRace` 相同的仲裁原语，不得先关闭 Interrupt |
+| `ApplyCommandEvent(envelope, parsedAction?)` | Command 唯一 public command port：receipt/canonical identity、initial/final event、private Ledger decision/effect、Run/Interrupt CAS、probe request and outbox/ack in one transaction; it may call only private `resolveAttemptRaceTx` and `recordHumanDecisionTx` |
+| `ApplyRetryProbeResult` | startup_stall probe finalizer唯一 public result port；内部调用 private `resolveAttemptRaceTx`，不得先关闭 Interrupt |
 | `RecordReport` | token bucket + report receipt + event；必要时原子发唯一异常 Interrupt |
 | `ReserveBrainCall` | brain_call_counters CAS 递增 + 插入 `status=running` 的 brain_calls（冻结身份/输入），同一事务 |
 | `RecordBrainAttempt` | immutable brain_attempts + token post-charge（budget entry/counter，唯一 operation key 幂等，允许单次越界） |
 | `FinalizeBrainCall` | brain_calls 一次性 `running → valid | fallback` 终结（valid 指向本 call 的 valid attempt，fallback 带原因）；恢复时按已有 attempts 收敛遗留 running call |
 | `RecordGateEvaluation` | snapshot/cache/evaluation/calibration/gate_sample + T3/T5 Brain links + 必要 Interrupt；Gate HITL 同时写不可变 `interrupt.calibration_id` |
-| `RecordHumanDecision` | Command、手工 merge/close 唯一人类动作入口；只能解析 immutable Interrupt/external binding，写 ledger + certification snapshot/current CAS + Run/Interrupt/outbox |
+| `RecordHumanDecision` | private `recordHumanDecisionTx` primitive only; no public port. It is callable only inside `ApplyCommandEvent` (or the separately specified operator transaction owner) and writes exactly one decision for one immutable binding |
 | `RefreshCertification` | Gate 组装前以冻结 `as_of_ms` 重算窗口；必要时插入 certification snapshot 并 CAS 更新 current 指针，不做外部 IO |
 
-任何新增可变表必须在本表有完整、显式的写入族归属；新增端口必须证明不能由上述端口表达，并同步本规格与崩溃注入测试。恢复端口接收的是已验证观测及其 digest，不持有数据库事务做 OS 探测；`ApplyStartupRecoveryAction`、`RecordTerminationObservation`、`ResolveAttemptRace` 与 `ApplyRetryProbeResult` 共享内部 transition/isolation/仲裁原语，不形成四套可漂移规则。
+`resolveAttemptRaceTx`、`recordHumanDecisionTx`、Ledger append/settlement、normal transition、receipt/event/probe/effect/ack primitives are private and have no callable public port. Any new mutable table must have one explicit owner here, and every port change must include migration and crash-injection coverage. Recovery ports receive validated observations/digests and never hold a transaction during OS probing; `ApplyStartupRecoveryAction`, `RecordTerminationObservation`, private `resolveAttemptRaceTx` and `ApplyRetryProbeResult` share the same internal transition/isolation/arbitration primitives.
 
 ## 12. 关键事务配方
 
