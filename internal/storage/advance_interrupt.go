@@ -309,7 +309,9 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 			JOIN gate_evaluations e ON e.id=c.gate_evaluation_id
 			JOIN gate_input_snapshots s ON s.id=e.snapshot_id
 			WHERE i.id=? AND r.id=? AND r.change_id=? AND r.change_head_sha=?
-				AND s.head_sha=? AND s.head_sha=?)`, interruptID, runID, textValue("change_id"), textValue("head_sha"), textValue("head_sha"), textValue("conflict_digest")).Scan(&exists)
+				AND s.head_sha=?
+                AND json_extract(s.canonical_json,'$.change.mergeability')='conflicting'
+                AND json_extract(e.verdict_json,'$.mergeability')='conflicting')`, interruptID, runID, textValue("change_id"), textValue("head_sha"), textValue("head_sha")).Scan(&exists)
 	case "guardrail_violation":
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM interrupts i

@@ -6,6 +6,23 @@ summary: AdvanceInterrupt 0036 重复摘要升级处置
 
 # AdvanceInterrupt schema upgrade
 
+The repository tool below is the only supported duplicate-digest recovery
+path. Run it against a stopped service and a copy of the database first:
+
+```sh
+go run ./cmd/sift-advance-interrupt-repair --db /path/sift.db
+# If the report contains only distinct immutable bindings:
+go run ./cmd/sift-advance-interrupt-repair --db /path/sift.db \
+  --repair --backup /path/sift.db.pre-0043
+```
+
+`--repair` canonicalizes each JSON binding and recomputes its SHA-256 digest
+inside one transaction. It refuses byte-identical immutable rows (there is no
+lossless digest-preserving repair for those); retain the backup and escalate
+that case for a new Interrupt rather than editing history. The command prints
+each interrupt-to-digest mapping and is safe to rerun after restoring the
+backup.
+
 版本 0038 依赖 0036 的 binding digest 唯一索引。升级前在数据库副本上执行：
 
 ```sql
@@ -29,5 +46,5 @@ PRAGMA foreign_key_check;
 SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;
 ```
 
-应分别返回无行和 `38`。如备份修复无法证明 binding provenance，保持服务
+应分别返回无行和 `43`。如备份修复无法证明 binding provenance，保持服务
 停止并重新生成受影响 Interrupt，而不是绕过 0038 的约束。
