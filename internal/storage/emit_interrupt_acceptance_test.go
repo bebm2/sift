@@ -58,6 +58,70 @@ func TestEmitInterruptBindingIdentityAcceptanceMatrix(t *testing.T) {
 	}
 }
 
+func TestGateFailureReviewPersistsExactBindingProvenance(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	const head = "0123456789012345678901234567890123456789"
+	mustExec(t, db, `UPDATE runs SET change_id='change-01',change_head_sha=? WHERE id='run'`, head)
+	r := gateRecord(testNow)
+	r.HeadSHA = head
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview,
+		Facts:      map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": head, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"},
+		Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: head}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
+	if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd); err != nil {
+		t.Fatal(err)
+	}
+	var binding, digest, snapshotHead, policy, evaluationRun, calibrationRun string
+	if err := db.db.QueryRow(`SELECT b.binding_json,b.binding_digest,s.head_sha,s.effective_policy_hash,e.run_id,c.run_id FROM interrupt_command_effect_bindings b JOIN interrupts i ON i.id=b.interrupt_id JOIN calibration_entries c ON c.id=i.calibration_id JOIN gate_evaluations e ON e.id=c.gate_evaluation_id JOIN gate_input_snapshots s ON s.id=e.snapshot_id WHERE i.run_id='run'`).Scan(&binding, &digest, &snapshotHead, &policy, &evaluationRun, &calibrationRun); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"arm":"code_review","change_id":"change-01","head_sha":"` + head + `","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `"}`
+	if binding != want || snapshotHead != head || policy != strings.Repeat("c", 64) || evaluationRun != "run" || calibrationRun != "run" {
+		t.Fatalf("provenance binding=%q snapshot=%q policy=%q evaluation=%q calibration=%q", binding, snapshotHead, policy, evaluationRun, calibrationRun)
+	}
+	var digestOK int
+	if err := db.db.QueryRow(`SELECT lower(hex(sift_sha256(binding_json)))=binding_digest FROM interrupt_command_effect_bindings WHERE binding_json=?`, binding).Scan(&digestOK); err != nil || digestOK != 1 {
+		t.Fatalf("binding digest valid=%d err=%v", digestOK, err)
+	}
+}
+
+func TestGateBindingFailureRollsBackProvenanceAndEmission(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	const head = "0123456789012345678901234567890123456789"
+	mustExec(t, db, `UPDATE runs SET change_id='change-01',change_head_sha=? WHERE id='run'`, head)
+	mustExec(t, db, `CREATE TRIGGER fail_gate_binding BEFORE INSERT ON interrupt_command_effect_bindings BEGIN SELECT RAISE(ABORT,'injected gate binding failure'); END`)
+	r := gateRecord(testNow)
+	r.HeadSHA = head
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": head, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: head}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
+	if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd); err == nil || !strings.Contains(err.Error(), "injected gate binding failure") {
+		t.Fatalf("error=%v", err)
+	}
+	for _, table := range []string{"gate_input_snapshots", "gate_evaluations", "calibration_entries", "ledger_entries", "interrupts", "attention_admissions", "budget_entries", "events", "outbox_operations", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
+		assertCount(t, db, table, 0)
+	}
+	var status string
+	var version int
+	if err := db.db.QueryRow(`SELECT status,version FROM runs WHERE id='run'`).Scan(&status, &version); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || version != 1 {
+		t.Fatalf("run transition leaked: %s/%d", status, version)
+	}
+}
+
 func TestEmitInterruptBindingFailureRollsBackFiveThings(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
