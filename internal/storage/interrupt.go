@@ -91,6 +91,33 @@ type InterruptT4Output struct {
 // outputs deterministically fall back to the canonical Interrupt renderer.
 type InterruptT4Caller func(context.Context, InterruptT4Input) (InterruptT4Output, error)
 
+type InterruptChannel struct {
+	ID           string
+	Capabilities []string
+	Default      bool
+	Isolated     bool
+}
+
+type InterruptT6Input struct {
+	RunID, Reason, MinModality string
+	AttemptNo                  *int
+	Severity                   InterruptSeverity
+	ExpiresAtMS, FrozenAtMS    int64
+	ChannelCandidates          []string
+	DefaultChannelID           string
+	NextWindowAtMS             *int64
+}
+
+type InterruptT6Output struct {
+	SuggestedDowngrade bool
+	Delivery           string
+	ChannelID          string
+}
+
+// InterruptT6Caller runs outside the emission transaction. Invalid or failed
+// advice deterministically uses the fallback delivery for the frozen channels.
+type InterruptT6Caller func(context.Context, InterruptT6Input) (InterruptT6Output, error)
+
 // EmitInterruptCmd carries only facts. Templates, severity and the generation
 // key are derived here so callers cannot manufacture a more urgent or broader
 // Interrupt.
@@ -113,7 +140,13 @@ type EmitInterruptCmd struct {
 	// binds a Gate HITL to the shadow prediction frozen in this transaction.
 	CalibrationID string
 	T4            InterruptT4Caller
-	NowMS         int64
+	T6            InterruptT6Caller
+	Channels      []InterruptChannel
+	// NextWindowAtMS and BatchAtMS are availability/daily-summary instants
+	// frozen before the external T6 call.
+	NextWindowAtMS *int64
+	BatchAtMS      *int64
+	NowMS          int64
 }
 
 type Interrupt struct {
@@ -128,6 +161,10 @@ type Interrupt struct {
 	ExpiresAtMS              int64
 	OnExpire                 ExpireAction
 	ChargedBudgetEntryID     string
+	ChannelID, Delivery      string
+	SuggestedDowngrade       bool
+	NextDispatchAtMS         *int64
+	HeldReason               string
 }
 
 var ErrInterruptRejected = errors.New("storage: interrupt rejected")
@@ -150,6 +187,110 @@ var interruptTemplates = map[InterruptReason]interruptTemplate{
 	InterruptMergeConflict:      {"合并冲突需要处理", "voice", []InterruptOption{{"retry", "重新执行合并", "再次尝试合并", "冲突未变时会再次失败"}, {"reject", "停止 Run", "Run 停止", "Change 不会合并"}, {"hold", "暂缓决定", "保持等待", "Change 继续待处理"}}, []string{"change_ref", "head_sha", "conflict_summary", "recommended_action", "conflict_evidence_ref"}, []string{"change_ref", "conflict_evidence_ref"}, SeverityHigh, 8 * 3600 * 1000, ExpireEscalate},
 	InterruptFailureReview:      {"失败需要人工决定", "voice", []InterruptOption{{"retry", "重试失败步骤", "再次执行", "相同故障可能再次发生"}, {"reject", "停止 Run", "Run 停止", "需人工重新发起"}, {"hold", "暂缓决定", "保持等待", "Run 继续占用待处理项"}}, []string{"failure_class", "failure_evidence_ref", "recommended_action"}, []string{"failure_evidence_ref"}, SeverityHigh, 24 * 3600 * 1000, ExpireAutoReject},
 	InterruptStartupStall:       {"无法确认旧执行体已停止", "text", []InterruptOption{{"retry", "重新探测旧执行体", "请求受控终止再探测", "未确认消失时仍保持隔离"}, {"reject", "放弃此 Run", "停止处理并保持隔离", "不代表旧执行体已停止"}, {"hold", "继续等待", "保持等待和隔离", "旧执行体可能仍在运行"}}, []string{"attempt_no", "generation", "diagnostic_cause", "isolation_consequence", "recommended_action", "attempt_diagnostic_ref", "worktree_ref"}, []string{"attempt_diagnostic_ref", "worktree_ref"}, SeverityHigh, 3600 * 1000, ExpireEscalate},
+}
+
+type interruptDispatch struct {
+	severity                               InterruptSeverity
+	state, channelID, delivery, heldReason string
+	suggestedDowngrade                     bool
+	nextDispatchAtMS                       *int64
+}
+
+func admitInterruptT6(ctx context.Context, cmd EmitInterruptCmd, modality string, base InterruptSeverity, expiresAtMS int64) (interruptDispatch, error) {
+	compatible := make([]InterruptChannel, 0, len(cmd.Channels))
+	isolated := false
+	for _, channel := range cmd.Channels {
+		if channel.ID == "" || !containsString(channel.Capabilities, modality) {
+			continue
+		}
+		if channel.Isolated {
+			isolated = true
+			continue
+		}
+		compatible = append(compatible, channel)
+	}
+	if len(compatible) == 0 {
+		reason := "no_compatible_channel"
+		if isolated {
+			reason = "channel_isolated"
+		}
+		return interruptDispatch{severity: base, state: "held", delivery: "held", heldReason: reason}, nil
+	}
+	sort.Slice(compatible, func(i, j int) bool { return compatible[i].ID < compatible[j].ID })
+	defaultChannel := compatible[0].ID
+	for _, channel := range compatible {
+		if channel.Default {
+			defaultChannel = channel.ID
+			break
+		}
+	}
+	input := InterruptT6Input{RunID: cmd.RunID, Reason: string(cmd.Reason), AttemptNo: cmd.AttemptNo, Severity: base, MinModality: modality, ExpiresAtMS: expiresAtMS, FrozenAtMS: cmd.NowMS, DefaultChannelID: defaultChannel, NextWindowAtMS: cmd.NextWindowAtMS}
+	for _, channel := range compatible {
+		input.ChannelCandidates = append(input.ChannelCandidates, channel.ID)
+	}
+	out := InterruptT6Output{Delivery: "batch", ChannelID: defaultChannel}
+	if base == SeverityHigh || base == SeverityCritical {
+		out.Delivery = "immediate"
+	}
+	if cmd.T6 != nil {
+		if advised, err := cmd.T6(ctx, input); err == nil && validT6Advice(advised, input) {
+			out = advised
+		}
+	}
+	severity := base
+	if out.SuggestedDowngrade {
+		severity = downgradeInterruptSeverity(severity)
+	}
+	if severity == SeverityHigh || severity == SeverityCritical {
+		out.Delivery = "immediate"
+	}
+	d := interruptDispatch{severity: severity, state: "ready", channelID: out.ChannelID, delivery: out.Delivery, suggestedDowngrade: out.SuggestedDowngrade}
+	switch out.Delivery {
+	case "immediate":
+		now := cmd.NowMS
+		d.nextDispatchAtMS = &now
+	case "batch":
+		if cmd.BatchAtMS == nil || *cmd.BatchAtMS >= expiresAtMS {
+			d.state, d.delivery, d.heldReason = "held", "held", "batch_after_expiry"
+		} else {
+			d.nextDispatchAtMS = cmd.BatchAtMS
+		}
+	case "next_window":
+		if cmd.NextWindowAtMS == nil || *cmd.NextWindowAtMS <= cmd.NowMS || *cmd.NextWindowAtMS >= expiresAtMS {
+			return interruptDispatch{}, fmt.Errorf("%w: invalid next_window", ErrInterruptRejected)
+		}
+		d.nextDispatchAtMS = cmd.NextWindowAtMS
+	default:
+		return interruptDispatch{}, fmt.Errorf("%w: invalid T6 delivery", ErrInterruptRejected)
+	}
+	return d, nil
+}
+
+func validT6Advice(out InterruptT6Output, in InterruptT6Input) bool {
+	if !containsString(in.ChannelCandidates, out.ChannelID) || (out.Delivery != "immediate" && out.Delivery != "batch" && out.Delivery != "next_window") {
+		return false
+	}
+	severity := in.Severity
+	if out.SuggestedDowngrade {
+		severity = downgradeInterruptSeverity(severity)
+	}
+	if (severity == SeverityHigh || severity == SeverityCritical) && out.Delivery != "immediate" {
+		return false
+	}
+	return out.Delivery != "next_window" || in.NextWindowAtMS != nil && *in.NextWindowAtMS > in.FrozenAtMS && *in.NextWindowAtMS < in.ExpiresAtMS
+}
+
+func downgradeInterruptSeverity(s InterruptSeverity) InterruptSeverity {
+	switch s {
+	case SeverityCritical:
+		return SeverityHigh
+	case SeverityHigh:
+		return SeverityNormal
+	case SeverityNormal:
+		return SeverityLow
+	default:
+		return SeverityLow
+	}
 }
 
 func BaseSeverity(reason InterruptReason, phase GatePhase, guard GuardrailLevel, escalation, max int) (InterruptSeverity, error) {
@@ -226,6 +367,11 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if err != nil {
 		return Interrupt{}, err
 	}
+	if existing, found, err := d.interruptByKey(ctx, key); err != nil {
+		return Interrupt{}, err
+	} else if found {
+		return existing, nil
+	}
 	headline := t.headline
 	// T4 is advisory and deliberately runs before, never inside, the five-write
 	// transaction. Any provider, schema, or admission failure keeps fallback.
@@ -237,6 +383,11 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 			}
 		}
 	}
+	dispatch, err := admitInterruptT6(ctx, cmd, t.modality, severity, cmd.NowMS+cmd.ExpiresAfterMS)
+	if err != nil {
+		return Interrupt{}, err
+	}
+	severity = dispatch.severity
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Interrupt{}, err
@@ -320,10 +471,10 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if err != nil {
 		return Interrupt{}, err
 	}
-	in := Interrupt{ID: newID(), RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, GenerationKey: key, Reason: cmd.Reason, Severity: severity, Headline: headline, Brief: brief, Options: t.options, MinModality: t.modality, Links: links, ExpiresAtMS: cmd.NowMS + cmd.ExpiresAfterMS, OnExpire: cmd.OnExpire, ChargedBudgetEntryID: entryID}
+	in := Interrupt{ID: newID(), RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, GenerationKey: key, Reason: cmd.Reason, Severity: severity, Headline: headline, Brief: brief, Options: t.options, MinModality: t.modality, Links: links, ExpiresAtMS: cmd.NowMS + cmd.ExpiresAfterMS, OnExpire: cmd.OnExpire, ChargedBudgetEntryID: entryID, ChannelID: dispatch.channelID, Delivery: dispatch.delivery, SuggestedDowngrade: dispatch.suggestedDowngrade, NextDispatchAtMS: dispatch.nextDispatchAtMS, HeldReason: dispatch.heldReason}
 	optionsJSON, _ := json.Marshal(in.Options)
 	linksJSON, _ := json.Marshal(in.Links)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,? ,1,'open','ready',?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), newID(), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,channel_id,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,? ,1,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), newID(), dispatch.state, nullable(in.ChannelID), nullable(in.Delivery), in.SuggestedDowngrade, nullableInt64(in.NextDispatchAtMS), nullable(in.HeldReason), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS); err != nil {
 		// Two recovery/termination callers can discover the same stall at
 		// once. SQLite serializes the writers, so the loser may observe the
 		// unique generation-key constraint only after the winner commits.
@@ -468,6 +619,12 @@ func escapeBrief(v string) (string, error) {
 		}
 	}
 	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>").Replace(v), nil
+}
+func nullableInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 func validLink(v string) bool { return strings.HasPrefix(v, "/") || strings.HasPrefix(v, "https://") }
 func indexOf(a []string, s string) int {
@@ -635,10 +792,11 @@ func (d *DB) interruptByKey(ctx context.Context, key string) (Interrupt, bool, e
 
 func interruptByKeyTx(ctx context.Context, tx *sql.Tx, key string) (Interrupt, bool, error) {
 	var in Interrupt
-	var n sql.NullInt64
+	var n, next sql.NullInt64
 	var opts, links string
 	var reason, severity, on string
-	err := tx.QueryRowContext(ctx, `SELECT id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,expires_at_ms,on_expire,charged_budget_entry_id FROM interrupts WHERE generation_key=?`, key).Scan(&in.ID, &in.RunID, &n, &in.GenerationKey, &reason, &severity, &in.Headline, &in.Brief, &opts, &in.MinModality, &links, &in.ExpiresAtMS, &on, &in.ChargedBudgetEntryID)
+	var channelID, delivery, heldReason sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,channel_id,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,charged_budget_entry_id FROM interrupts WHERE generation_key=?`, key).Scan(&in.ID, &in.RunID, &n, &in.GenerationKey, &reason, &severity, &in.Headline, &in.Brief, &opts, &in.MinModality, &links, &channelID, &delivery, &in.SuggestedDowngrade, &next, &heldReason, &in.ExpiresAtMS, &on, &in.ChargedBudgetEntryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Interrupt{}, false, nil
 	}
@@ -652,6 +810,10 @@ func interruptByKeyTx(ctx context.Context, tx *sql.Tx, key string) (Interrupt, b
 	in.Reason = InterruptReason(reason)
 	in.Severity = InterruptSeverity(severity)
 	in.OnExpire = ExpireAction(on)
+	in.ChannelID, in.Delivery, in.HeldReason = channelID.String, delivery.String, heldReason.String
+	if next.Valid {
+		in.NextDispatchAtMS = &next.Int64
+	}
 	if json.Unmarshal([]byte(opts), &in.Options) != nil || json.Unmarshal([]byte(links), &in.Links) != nil {
 		return Interrupt{}, false, errors.New("storage: corrupt interrupt JSON")
 	}

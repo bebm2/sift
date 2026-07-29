@@ -87,6 +87,26 @@ func T4ResultFromCall(result CallResult, in T4Input) (T4CallResult, BrainSource,
 	return T4CallResult{Fallback: &in}, fallbackSource(result, "T4"), nil
 }
 
+// CallT6 adapts the unified Brain shell to the frozen Interrupt dispatch
+// candidate. The storage emitter retains final severity and dispatch authority.
+func (s *Shell) CallT6(ctx context.Context, in storage.InterruptT6Input) (storage.InterruptT6Output, error) {
+	candidate := T6Candidate{Reason: InterruptReason(in.Reason), Severity: InterruptSeverity(in.Severity), MinModality: InterruptModality(in.MinModality), ExpiresAtMS: in.ExpiresAtMS, ChannelCandidates: append([]string(nil), in.ChannelCandidates...), DefaultChannelID: in.DefaultChannelID}
+	input := T6Input{RunID: in.RunID, AttemptNo: in.AttemptNo, FrozenAtMS: in.FrozenAtMS, Candidate: candidate, Availability: T6Availability{State: "unknown", NextWindowAtMS: in.NextWindowAtMS}, Attention: T6Attention{FallbackImmediateMinSeverity: "high", Remaining: []T6Quota{{Severity: "low"}, {Severity: "normal"}, {Severity: "high"}}}}
+	canonical, err := BuildT6Input(input)
+	if err != nil {
+		return storage.InterruptT6Output{}, err
+	}
+	result, err := s.Call(ctx, T6Contract(input), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:" + in.RunID, RunID: in.RunID, AttemptNo: in.AttemptNo, Input: canonical})
+	if err != nil {
+		return storage.InterruptT6Output{}, err
+	}
+	out, _, err := T6ResultFromCall(result, input)
+	if err != nil {
+		return storage.InterruptT6Output{}, err
+	}
+	return storage.InterruptT6Output{Delivery: string(*out.Delivery), ChannelID: *out.ChannelID, SuggestedDowngrade: *out.SuggestedDowngrade}, nil
+}
+
 func T6ResultFromCall(result CallResult, in T6Input) (T6Output, BrainSource, error) {
 	var out T6Output
 	if result.Status == "valid" {
