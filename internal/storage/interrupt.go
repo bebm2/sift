@@ -177,12 +177,15 @@ type InterruptT6Caller func(context.Context, InterruptT6Input) (InterruptT6Outpu
 // key are derived here so callers cannot manufacture a more urgent or broader
 // Interrupt.
 type EmitInterruptCmd struct {
-	RunID                           string
-	ExpectedRunVersion              int64
-	AttemptNo                       *int
-	Reason                          InterruptReason
-	FailureReviewVariant            FailureReviewVariant
-	FailureReviewRetryKind          FailureReviewRetryKind
+	RunID                  string
+	ExpectedRunVersion     int64
+	AttemptNo              *int
+	Reason                 InterruptReason
+	FailureReviewVariant   FailureReviewVariant
+	FailureReviewRetryKind FailureReviewRetryKind
+	// ReportOnly prevents the emitter from applying its usual waiting_human
+	// transition. It is reserved for the Report agent_blocked path.
+	ReportOnly                      bool
 	Facts                           map[string]string
 	Generation                      InterruptGeneration
 	GatePhase                       GatePhase
@@ -262,6 +265,9 @@ func interruptTemplateFor(cmd EmitInterruptCmd) (interruptTemplate, bool) {
 }
 
 func validateFailureReviewVariant(cmd EmitInterruptCmd) error {
+	if cmd.ReportOnly && (cmd.Reason != InterruptAgentBlocked || cmd.Source != SourceAgent) {
+		return fmt.Errorf("%w: report-only transition is invalid", ErrInterruptRejected)
+	}
 	if cmd.Reason != InterruptFailureReview {
 		if cmd.FailureReviewVariant != "" {
 			return fmt.Errorf("%w: failure_review variant on another reason", ErrInterruptRejected)
@@ -579,7 +585,7 @@ func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, befor
 				return Interrupt{}, err
 			}
 		}
-	} else if RunStatus(status) != RunWaitingHuman {
+	} else if !cmd.ReportOnly && RunStatus(status) != RunWaitingHuman {
 		if !legalTransition(RunStatus(status), RunWaitingHuman) {
 			return Interrupt{}, fmt.Errorf("%w: %s cannot wait for human", ErrInterruptRejected, status)
 		}
@@ -770,7 +776,7 @@ func interruptEffectBinding(cmd EmitInterruptCmd) ([]byte, string) {
 		delete(fields, "run_id")
 		fields["change_id"], fields["head_sha"], fields["review_policy_snapshot_digest"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.Generation.PolicySnapshotID
 	case InterruptAgentBlocked:
-		fields["attempt_no"], fields["generation"] = cmd.Generation.AttemptNo, cmd.Generation.Generation
+		fields["attempt_no"], fields["generation"], fields["report_id"] = cmd.Generation.AttemptNo, cmd.Generation.Generation, cmd.Generation.ReportID
 	case InterruptMergeConflict:
 		delete(fields, "run_id")
 		fields["change_id"], fields["head_sha"], fields["conflict_digest"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.Generation.ConflictDigest
