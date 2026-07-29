@@ -135,6 +135,8 @@ Gate reconciler 在事务外读取 Forge/Brain 事实、组装快照并运行纯
 
 非 HITL verdict 同样必须创建 calibration 预判，且不得把“没有打扰人”误作人类决定。每次 evaluation 的 `cache_hit` 状态和 verdict digest 都可审计；同一输入的多次调用应有多行 evaluation/calibration，而不是覆盖先前记录。
 
+Command-triggered `gate_re_evaluation` is a persisted successor, not a second Gate owner. Its worker assembles and verifies facts outside the transaction; [`CompleteOutboxAttempt`](storage.md#81-outbox_operations) then atomically persists the evaluation/verdict on success, emits the frozen `failure_review` successor on failure, or creates the verified replacement-head re-evaluation successor on conflict. It must not close the source Interrupt and later separately call `RecordGateEvaluation` or `EmitInterrupt`; the complete succeeded/failed/conflict matrix is owned by storage §8.1/§12.4.
+
 ## 6. Change 创建与 Gate 的衔接
 
 Gate/Change reconciler 只接受 M3 `EvaluateSuccess` 已确认的“可创建 Change”领域事实：成功 `result.json` 身份一致、final head 已冻结且一致、分支至少一个提交。失败 attempt、中间提交、未冻结 head 或 Agent 自报完成都不得创建 Change operation；Gate 不重新从 worktree 或 Agent 输出推断这些事实。
