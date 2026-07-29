@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -48,6 +49,37 @@ func TestIssue415ReasonsUseStorageCanonicalSet(t *testing.T) {
 func issue436T7JSON(t *testing.T, in T7Input) []byte {
 	t.Helper()
 	b, err := decode.Canonical(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func issue436T7Without(t *testing.T, input []byte, path ...string) []byte {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(input, &value); err != nil {
+		t.Fatal(err)
+	}
+	for i, part := range path {
+		switch current := value.(type) {
+		case map[string]any:
+			if i == len(path)-1 {
+				delete(current, part)
+				continue
+			}
+			value = current[part]
+		case []any:
+			index := 0
+			if _, err := fmt.Sscanf(part, "%d", &index); err != nil || index < 0 || index >= len(current) {
+				t.Fatalf("invalid T7 test path %q", strings.Join(path, "."))
+			}
+			value = current[index]
+		default:
+			t.Fatalf("invalid T7 test path %q", strings.Join(path, "."))
+		}
+	}
+	b, err := decode.Canonical(value)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +149,21 @@ func TestIssue436T7MalformedInputsDoNotReserveOrCallProvider(t *testing.T) {
 			in.Categories[0].EvidenceSummary.TotalSamples = -1
 			return params(issue436T7JSON(t, in))
 		}()},
+		{"category_negative_samples_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.Categories[0].EvidenceSummary.NegativeSamples = -1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"category_leak_count_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.Categories[0].EvidenceSummary.LeakCount = -1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"category_false_block_count_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.Categories[0].EvidenceSummary.FalseBlockCount = -1
+			return params(issue436T7JSON(t, in))
+		}()},
 		{"category_negative_exceeds_total", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
 			in := base()
 			in.Categories[0].EvidenceSummary.NegativeSamples = 1
@@ -135,6 +182,21 @@ func TestIssue436T7MalformedInputsDoNotReserveOrCallProvider(t *testing.T) {
 		{"replay_negative_count", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
 			in := base()
 			in.ReplaySummary.TotalSamples = -1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"replay_negative_samples_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.NegativeSamples = -1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"replay_leak_count_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.LeakCount = -1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"replay_false_block_count_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.FalseBlockCount = -1
 			return params(issue436T7JSON(t, in))
 		}()},
 		{"replay_negative_exceeds_total", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
@@ -176,6 +238,16 @@ func TestIssue436T7MalformedInputsDoNotReserveOrCallProvider(t *testing.T) {
 			in.SemanticMaterial = []T7SemanticMaterial{{EntryID: "replay", MaterialKind: "ask_text", Text: "text"}}
 			return params(issue436T7JSON(t, in))
 		}()},
+		{"duplicate_category_category_evidence", T7Contract(globalAll, "", []TaskKind{TaskBug, TaskChore}, []string{"same"}), func() CallParams {
+			in := base()
+			in.Categories = []T7CategoryEvidence{secondCategory(TaskBug, "same"), secondCategory(TaskChore, "same")}
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"duplicate_semantic_semantic_entry", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.SemanticMaterial = []T7SemanticMaterial{{EntryID: "same", MaterialKind: "ask_text", Text: "one"}, {EntryID: "same", MaterialKind: "ask_text", Text: "two"}}
+			return params(issue436T7JSON(t, in))
+		}()},
 		{"categories_unsorted", T7Contract(globalAll, "", []TaskKind{TaskBug, TaskChore}, []string{"cat", "cat-chore"}), func() CallParams {
 			in := base()
 			in.Categories = []T7CategoryEvidence{secondCategory(TaskChore, "cat-chore"), secondCategory(TaskBug, "cat")}
@@ -186,6 +258,49 @@ func TestIssue436T7MalformedInputsDoNotReserveOrCallProvider(t *testing.T) {
 			in.SemanticMaterial = []T7SemanticMaterial{{EntryID: "z", MaterialKind: "ask_text", Text: "z"}, {EntryID: "a", MaterialKind: "ask_text", Text: "a"}}
 			return params(issue436T7JSON(t, in))
 		}()},
+	}
+
+	for _, field := range []struct {
+		name string
+		path []string
+	}{
+		{"missing_window", []string{"window"}},
+		{"missing_window_start", []string{"window", "start_ms"}},
+		{"missing_window_end", []string{"window", "end_ms"}},
+		{"missing_categories", []string{"categories"}},
+		{"missing_category_evidence_id", []string{"categories", "0", "evidence_id"}},
+		{"missing_category_task_kind", []string{"categories", "0", "task_kind"}},
+		{"missing_category_certification_version", []string{"categories", "0", "certification_version"}},
+		{"missing_category_certified", []string{"categories", "0", "certified"}},
+		{"missing_category_evidence_summary", []string{"categories", "0", "evidence_summary"}},
+		{"missing_summary_window_start", []string{"categories", "0", "evidence_summary", "window_start_ms"}},
+		{"missing_summary_window_end", []string{"categories", "0", "evidence_summary", "window_end_ms"}},
+		{"missing_summary_certification_rules", []string{"categories", "0", "evidence_summary", "certification_rules_version"}},
+		{"missing_summary_digest", []string{"categories", "0", "evidence_summary", "evidence_digest"}},
+		{"missing_summary_total", []string{"categories", "0", "evidence_summary", "total_samples"}},
+		{"missing_summary_negative", []string{"categories", "0", "evidence_summary", "negative_samples"}},
+		{"missing_summary_leaks", []string{"categories", "0", "evidence_summary", "leak_count"}},
+		{"missing_summary_false_blocks", []string{"categories", "0", "evidence_summary", "false_block_count"}},
+		{"missing_replay_summary", []string{"replay_summary"}},
+		{"missing_replay_evidence_id", []string{"replay_summary", "evidence_id"}},
+		{"missing_replay_dataset_version", []string{"replay_summary", "dataset_version"}},
+		{"missing_replay_gate_version", []string{"replay_summary", "gate_version"}},
+		{"missing_replay_total", []string{"replay_summary", "total_samples"}},
+		{"missing_replay_negative", []string{"replay_summary", "negative_samples"}},
+		{"missing_replay_leaks", []string{"replay_summary", "leak_count"}},
+		{"missing_replay_false_blocks", []string{"replay_summary", "false_block_count"}},
+		{"missing_semantic_material", []string{"semantic_material"}},
+		{"missing_semantic_entry_id", []string{"semantic_material", "0", "entry_id"}},
+		{"missing_semantic_kind", []string{"semantic_material", "0", "material_kind"}},
+		{"missing_semantic_text", []string{"semantic_material", "0", "text"}},
+	} {
+		in := base()
+		in.SemanticMaterial = []T7SemanticMaterial{{EntryID: "entry", MaterialKind: "ask_text", Text: "text"}}
+		cases = append(cases, struct {
+			name     string
+			contract TouchpointContract
+			params   CallParams
+		}{field.name, T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), params(issue436T7Without(t, issue436T7JSON(t, in), field.path...))})
 	}
 
 	for _, tc := range cases {
@@ -279,7 +394,10 @@ func TestIssue436FallbackAdaptersPreserveSourceAndT4Skeleton(t *testing.T) {
 	in.AttemptNo = intPtr(3)
 	in.Interrupt.FallbackBrief = "check failed: build 17"
 	in.Interrupt.BriefFragments = []string{"build 17 failed", "review needed"}
-	in.Interrupt.Links = []T4Link{{Label: "event", Target: "sift://event/0123456789abcdef0123456789abcdef"}, {Label: "evidence", Target: "https://example.test/e"}}
+	in.Interrupt.Links = []T4Link{{Label: "evidence", Target: "https://example.test/e"}, {Label: "event", Target: "sift://event/0123456789abcdef0123456789abcdef"}}
+	if _, err := BuildT4Input(in); err != nil {
+		t.Fatalf("lossless T4 fixture is not a valid frozen skeleton: %v", err)
+	}
 	in.Interrupt.CandidateOptions = []T4Option{{ID: "review", Label: "Review", Effect: "open review", Risk: "delay"}, {ID: "retry", Label: "Retry", Effect: "retry check", Risk: "cost"}}
 	var fallback T4Input
 	if err := decode.Decode(T4FallbackOutput(in), &fallback, decode.Closed); err != nil || !reflect.DeepEqual(fallback, in) {
