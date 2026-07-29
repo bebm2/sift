@@ -91,8 +91,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if version != 35 {
-		t.Fatalf("SchemaVersion = %d, want 35", version)
+	if version != 36 {
+		t.Fatalf("SchemaVersion = %d, want 36", version)
 	}
 
 	embedded, err := loadEmbeddedMigrations()
@@ -135,8 +135,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 35 {
-		t.Fatalf("schema_migrations rows = %d, want 35 after reopen", count)
+	if count != 36 {
+		t.Fatalf("schema_migrations rows = %d, want 36 after reopen", count)
 	}
 }
 
@@ -199,6 +199,47 @@ func TestPopulated0020To0021UpgradePreservesForeignKeysAndRestarts(t *testing.T)
 		t.Fatalf("restart after populated upgrade: %v", err)
 	} else {
 		defer reopened.Close()
+	}
+}
+
+func TestPopulated0035To0036FailureRollsBackBindingIndexAndMigrationRecord(t *testing.T) {
+	ctx := context.Background()
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "sift.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TABLE schema_migrations (version INTEGER NOT NULL PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL, binary_version TEXT NOT NULL);
+		CREATE TABLE interrupt_command_effect_bindings (binding_digest TEXT NOT NULL);
+		INSERT INTO interrupt_command_effect_bindings VALUES ('duplicate'), ('duplicate')`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadEmbeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var migration36 migration
+	for _, m := range migrations {
+		if m.version == 36 {
+			migration36 = m
+			break
+		}
+	}
+	if migration36.version != 36 {
+		t.Fatal("0036 migration not embedded")
+	}
+	if err := applyOne(ctx, raw, migration36, "test-binary", time.UnixMilli(testNow)); err == nil {
+		t.Fatal("duplicate binding digests accepted by 0036")
+	}
+	var count int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=36`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed migration recorded count=%d err=%v", count, err)
+	}
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='interrupt_command_effect_bindings_digest'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed migration left unique index count=%d err=%v", count, err)
+	}
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM interrupt_command_effect_bindings`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("failed migration changed populated rows count=%d err=%v", count, err)
 	}
 }
 
