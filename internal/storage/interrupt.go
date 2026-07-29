@@ -132,7 +132,7 @@ type EmitInterruptCmd struct {
 	GuardrailLevel                  GuardrailLevel
 	EscalationCount, MaxEscalations int
 	ExpiresAfterMS                  int64
-	OnExpire                        ExpireAction
+	OnExpire, OnMaxEscalations      ExpireAction
 	AttentionDailyQuota             map[InterruptSeverity]int
 	DayTimezone                     string
 	Source                          EventSource
@@ -351,15 +351,18 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if cmd.OnExpire == "" {
 		cmd.OnExpire = t.onExpire
 	}
-	if cmd.ExpiresAfterMS <= 0 || (cmd.OnExpire != ExpireHold && cmd.OnExpire != ExpireEscalate && cmd.OnExpire != ExpireAutoReject) || (cmd.Reason == InterruptStartupStall && cmd.OnExpire == ExpireAutoReject) {
-		return Interrupt{}, fmt.Errorf("%w: invalid expiry policy", ErrInterruptRejected)
+	if cmd.OnMaxEscalations == "" {
+		cmd.OnMaxEscalations = ExpireHold
 	}
-	if !canonicalRecommendedAction(t.options, cmd.Facts["recommended_action"]) {
-		return Interrupt{}, fmt.Errorf("%w: recommended_action is not a canonical option", ErrInterruptRejected)
+	if cmd.ExpiresAfterMS <= 0 || (cmd.OnExpire != ExpireHold && cmd.OnExpire != ExpireEscalate && cmd.OnExpire != ExpireAutoReject) || (cmd.OnMaxEscalations != ExpireHold && cmd.OnMaxEscalations != ExpireAutoReject) || (cmd.Reason == InterruptStartupStall && (cmd.OnExpire == ExpireAutoReject || cmd.OnMaxEscalations == ExpireAutoReject)) {
+		return Interrupt{}, fmt.Errorf("%w: invalid expiry policy", ErrInterruptRejected)
 	}
 	brief, links, err := renderInterrupt(t, cmd.Facts, cmd.Reason)
 	if err != nil {
 		return Interrupt{}, err
+	}
+	if !canonicalRecommendedAction(t.options, cmd.Facts["recommended_action"]) {
+		return Interrupt{}, fmt.Errorf("%w: recommended_action is not a canonical option", ErrInterruptRejected)
 	}
 	severity, err := BaseSeverity(cmd.Reason, cmd.GatePhase, cmd.GuardrailLevel, cmd.EscalationCount, cmd.MaxEscalations)
 	if err != nil {
@@ -385,6 +388,7 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 			}
 		}
 	}
+	baseSeverity := severity
 	dispatch, err := admitInterruptT6(ctx, cmd, t.modality, severity, cmd.NowMS+cmd.ExpiresAfterMS)
 	if err != nil {
 		return Interrupt{}, err
@@ -476,7 +480,8 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	in := Interrupt{ID: newID(), RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, GenerationKey: key, Reason: cmd.Reason, Severity: severity, Headline: headline, Brief: brief, Options: t.options, MinModality: t.modality, Links: links, ExpiresAtMS: cmd.NowMS + cmd.ExpiresAfterMS, OnExpire: cmd.OnExpire, ChargedBudgetEntryID: entryID, ChannelID: dispatch.channelID, Delivery: dispatch.delivery, SuggestedDowngrade: dispatch.suggestedDowngrade, NextDispatchAtMS: dispatch.nextDispatchAtMS, HeldReason: dispatch.heldReason}
 	optionsJSON, _ := json.Marshal(in.Options)
 	linksJSON, _ := json.Marshal(in.Links)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,channel_id,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,? ,1,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), newID(), dispatch.state, nullable(in.ChannelID), nullable(in.Delivery), in.SuggestedDowngrade, nullableInt64(in.NextDispatchAtMS), nullable(in.HeldReason), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS); err != nil {
+	nonce := newID()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,channel_id,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms,expires_after_ms,on_max_escalations,base_severity,nonce_issued_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,? ,1,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), nonce, dispatch.state, nullable(in.ChannelID), nullable(in.Delivery), in.SuggestedDowngrade, nullableInt64(in.NextDispatchAtMS), nullable(in.HeldReason), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS, cmd.ExpiresAfterMS, cmd.OnMaxEscalations, baseSeverity, cmd.NowMS); err != nil {
 		// Two recovery/termination callers can discover the same stall at
 		// once. SQLite serializes the writers, so the loser may observe the
 		// unique generation-key constraint only after the winner commits.
@@ -572,7 +577,7 @@ func containsString(values []string, value string) bool {
 	return false
 }
 func escapeT4Text(value string) string {
-	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>", "<", "\\<", "&", "\\&").Replace(value)
+	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>", "<", "\\<", "&", "\\&").Replace(value)
 }
 
 func renderComment(in Interrupt) string { return in.Headline + "\n\n" + in.Brief }
