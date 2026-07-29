@@ -156,7 +156,16 @@ type AttentionReasonDefault struct {
 	OnMaxEscalations string `json:"on_max_escalations"`
 }
 
+type AttentionChannel struct {
+	ID           string   `json:"id"`
+	Type         string   `json:"type"`
+	TargetRef    string   `json:"target_ref"`
+	Capabilities []string `json:"capabilities"`
+	Default      bool     `json:"default"`
+}
+
 type Attention struct {
+	Channels                 []AttentionChannel                `json:"channels"`
 	DayTimezone              string                            `json:"day_timezone"`
 	DailyQuota               DailyQuota                        `json:"daily_quota"`
 	MaxEscalations           int                               `json:"max_escalations"`

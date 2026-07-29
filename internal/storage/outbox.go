@@ -254,14 +254,13 @@ func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 		}
 		alertAfter, maxAttempts := d.channelPolicy()
 		reclaim := CompleteOutcome{State: OperationRetryable, ErrorClass: ErrorTransient, ErrorSummary: "lease_expired", NowMS: nowMS, ChannelFailureAlertAfter: alertAfter, MaxAttempts: maxAttempts}
-		if maxAttempts > 0 && oldCount >= maxAttempts {
+		// Channel's terminal projection is failed, but the expired attempt is
+		// immutable evidence of a retryable transient lease expiry.
+		if c.Kind == OperationChannelPublish && maxAttempts > 0 && oldCount >= maxAttempts {
 			reclaim.State = OperationFailed
 			terminalReclaim = true
 		}
 		result := "retry"
-		if terminalReclaim {
-			result = "failed"
-		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_attempt_results (attempt_id, finished_at_ms, outcome, error_class, error_summary) VALUES (?, ?, ?, 'transient', 'lease_expired')`, oldAttempt, nowMS, result); err != nil {
 			return nil, err
 		}
@@ -318,7 +317,7 @@ func (d *DB) CompleteOutboxAttempt(ctx context.Context, claim ClaimedOperation, 
 	// A retryable completion at the frozen attempt limit is terminal. Decide
 	// this before writing its immutable result and Channel projections so they
 	// all describe the same outcome.
-	if outcome.State == OperationRetryable && outcome.MaxAttempts > 0 && claim.ClaimAttemptNo >= outcome.MaxAttempts {
+	if claim.Kind == OperationChannelPublish && outcome.State == OperationRetryable && outcome.MaxAttempts > 0 && claim.ClaimAttemptNo >= outcome.MaxAttempts {
 		outcome.State = OperationFailed
 	}
 	result := map[OperationState]string{OperationSucceeded: "success", OperationRetryable: "retry", OperationFailed: "failed", OperationStale: "stale", OperationConflict: "conflict"}[outcome.State]

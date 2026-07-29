@@ -661,6 +661,14 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries (id,interrupt_id,surface,priority,operation_key,state,attempt_count,created_at_ms) VALUES (?,?,'forge_comment','normal',?,'pending',0,?)`, newID(), in.ID, opKey, cmd.NowMS); err != nil {
 		return Interrupt{}, err
 	}
+	if dispatch.delivery == "immediate" {
+		if err := enqueueInterruptChannelTx(ctx, tx, in.ID, 1, nonce, 0, "normal", cmd.NowMS); err != nil {
+			return Interrupt{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='batched',next_dispatch_at_ms=NULL WHERE id=?`, in.ID); err != nil {
+			return Interrupt{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return Interrupt{}, err
 	}

@@ -29,6 +29,7 @@ type Reconciler struct {
 	Defaults      config.GateDefaults
 	Certification config.Certification
 	Attention     config.Attention
+	Channels      []storage.InterruptChannel
 	Now           func() time.Time
 }
 
@@ -199,7 +200,7 @@ func (r *Reconciler) record(ctx context.Context, c storage.GateCandidate, in Inp
 		got, recorded, err := EvaluateAndRecord(ctx, r.DB, in, false, features, now.UnixMilli())
 		return got, recorded, err
 	}
-	cmd, err := interruptCommand(c, in, v, r.Attention, now.UnixMilli())
+	cmd, err := interruptCommand(c, in, v, r.Attention, r.Channels, now.UnixMilli())
 	if err != nil {
 		return Verdict{}, storage.RecordedGateEvaluation{}, err
 	}
