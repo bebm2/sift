@@ -7,29 +7,52 @@ import "context"
 // or arm it from persisted next-at timestamps, so restart recovery has no
 // in-memory timing authority.
 type Scheduler struct {
-	wake   chan struct{}
+	wake   chan chan error
 	onWake func(context.Context) error
 }
 
 func newScheduler(onWake func(context.Context) error) Scheduler {
-	return Scheduler{wake: make(chan struct{}, 1), onWake: onWake}
+	return Scheduler{wake: make(chan chan error, 1), onWake: onWake}
 }
 func (s *Scheduler) Wake() {
 	select {
-	case s.wake <- struct{}{}:
+	case s.wake <- nil:
 	default:
 	}
 }
+
+// WakeAndWait establishes that a startup sweep has completed. Commit wakeups
+// remain non-blocking through Wake.
+func (s *Scheduler) WakeAndWait(ctx context.Context) error {
+	done := make(chan error, 1)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.wake <- done:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
+}
+
 func (s *Scheduler) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-s.wake:
+		case done := <-s.wake:
+			var err error
 			if s.onWake != nil {
-				if err := s.onWake(ctx); err != nil {
-					return err
-				}
+				err = s.onWake(ctx)
+			}
+			if done != nil {
+				done <- err
+			}
+			if err != nil {
+				return err
 			}
 		}
 	}
