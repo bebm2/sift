@@ -2,6 +2,7 @@ package brain
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/miaoxiaoyong/sift/internal/storage"
@@ -14,6 +15,16 @@ func t4Input() T4Input {
 		BriefFragments:   []string{"check failed", "review needed"},
 		CandidateOptions: []T4Option{{ID: "review", Label: "Review", Effect: "open review", Risk: "delay"}},
 	}}
+}
+
+func t7JSON(t *testing.T) []byte {
+	t.Helper()
+	d := strings.Repeat("a", 64)
+	b, err := BuildT7Input(T7Input{AggregateKey: "aggregate:v1:global:all:1:2", Window: T7Window{StartMS: 1, EndMS: 2}, Categories: []T7CategoryEvidence{{EvidenceID: "cat", TaskKind: TaskBug, CertificationVersion: d, EvidenceSummary: T7EvidenceSummary{WindowStartMS: 1, WindowEndMS: 2, CertificationRulesVersion: d, EvidenceDigest: d}}}, ReplaySummary: T7ReplaySummary{EvidenceID: "replay", DatasetVersion: "v1", GateVersion: "gate/v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func t6Input() T6Input {
@@ -78,13 +89,13 @@ func TestT4T6T7InvalidOutputFallsBack(t *testing.T) {
 	}{
 		{"T4", T4Contract(t4Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-4", RunID: "run-4", Input: t4JSON}},
 		{"T6", T6Contract(t6Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-6", RunID: "run-6", Input: t6JSON}},
-		{"T7", T7Contract("aggregate:v1:global:all:1:2", []string{"e1"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: []byte(`{"aggregate_key":"aggregate:v1:global:all:1:2"}`)}},
+		{"T7", T7Contract("aggregate:v1:global:all:1:2", []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: t7JSON(t)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &FakeProvider{Responses: []FakeResponse{{ResultText: `{"bogus":true}`}, {ResultText: `{"bogus":true}`}}}
 			shell := newShellAt(db, shellCfg(100), fake, shellTestBase+1, shellTestBase+2, shellTestBase+3, shellTestBase+4, shellTestBase+5, shellTestBase+6)
 			res, err := shell.Call(ctx, tc.contract, tc.p)
-			if err != nil || res.Status != storage.BrainCallFallback || res.FallbackReason != "attempts exhausted: invalid_output" {
+			if err != nil || res.Status != storage.BrainCallFallback || res.FallbackReason != "invalid_output" {
 				t.Fatalf("Call = %#v, %v", res, err)
 			}
 		})
@@ -111,7 +122,7 @@ func TestT4T6T7ProviderDisabledFallback(t *testing.T) {
 	}{
 		{"T4", T4Contract(t4Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-4", RunID: "run-4", Input: []byte(`{"run_id":"run-4"}`)}},
 		{"T6", T6Contract(t6Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-6", RunID: "run-6", Input: []byte(`{"run_id":"run-6"}`)}},
-		{"T7", T7Contract("aggregate:v1:global:all:1:2", []string{"e1"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: []byte(`{"aggregate_key":"aggregate:v1:global:all:1:2"}`)}},
+		{"T7", T7Contract("aggregate:v1:global:all:1:2", []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: t7JSON(t)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res, err := shell.Call(ctx, tc.contract, tc.p)

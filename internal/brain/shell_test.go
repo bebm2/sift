@@ -171,7 +171,7 @@ func TestShellInvalidThenFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if res.Status != storage.BrainCallFallback || !strings.Contains(res.FallbackReason, "attempts exhausted") {
+	if res.Status != storage.BrainCallFallback || res.FallbackReason != "provider_error" {
 		t.Fatalf("result = %+v", res)
 	}
 	// T1 fallback is the fixed ready output (§7.2): the issue is never lost.
@@ -271,7 +271,7 @@ func TestShellPreflightGates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.FallbackReason != "provider_forbidden" {
+		if res.FallbackReason != "provider_disabled" {
 			t.Fatalf("result = %+v", res)
 		}
 		_, attempts, _ := db.BrainCallTrace(ctx, res.CallID)
@@ -302,7 +302,7 @@ func TestShellPreflightGates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res2.Status != storage.BrainCallFallback || res2.FallbackReason != "token_budget_exceeded" {
+		if res2.Status != storage.BrainCallFallback || res2.FallbackReason != "token_threshold" {
 			t.Fatalf("second call = %+v", res2)
 		}
 		_, attempts, _ := db.BrainCallTrace(ctx, res2.CallID)
@@ -327,7 +327,7 @@ func TestShellPreflightGates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.Status != storage.BrainCallFallback || !strings.Contains(res.FallbackReason, "token_budget_exceeded") {
+		if res.Status != storage.BrainCallFallback || res.FallbackReason != "token_threshold" {
 			t.Fatalf("result = %+v", res)
 		}
 		if len(fake.Requests) != 1 {

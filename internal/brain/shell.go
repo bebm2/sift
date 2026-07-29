@@ -45,6 +45,9 @@ type TouchpointContract struct {
 	// means the fallback is a workflow state (T2: human assignment), not a
 	// synthesized LLM output.
 	FallbackOutput func() []byte
+	// ValidateInput runs before reserve so malformed touchpoint inputs cannot
+	// create trace rows or consume budget.
+	ValidateInput func([]byte) error
 }
 
 // CallParams is the logical-call identity plus its canonical input JSON.
@@ -73,6 +76,11 @@ func (s *Shell) Call(ctx context.Context, tp TouchpointContract, p CallParams) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if tp.ValidateInput != nil {
+		if err := tp.ValidateInput(p.Input); err != nil {
+			return CallResult{}, err
+		}
+	}
 	message := BuildMessage(tp.Asset, p.Input)
 	digest := DigestBytes(message)
 
@@ -242,6 +250,7 @@ func (s *Shell) preflightFallback(ctx context.Context, tp TouchpointContract, re
 }
 
 func (s *Shell) finalizeFallback(ctx context.Context, tp TouchpointContract, result CallResult, reason string) (CallResult, error) {
+	reason = fallbackReason(reason)
 	if err := s.db.FinalizeBrainCall(ctx, storage.FinalizeBrainCallCmd{
 		CallID:         result.CallID,
 		Status:         storage.BrainCallFallback,
