@@ -66,7 +66,7 @@ func (s *Shell) CallT4(ctx context.Context, in storage.InterruptT4Input) (storag
 		return storage.InterruptT4Output{}, err
 	}
 	out := admitted.Normal
-	return storage.InterruptT4Output{Headline: *out.Headline, Conclusion: *out.Conclusion, KeyPoints: append([]string(nil), (*out.KeyPoints)...), RecommendedOptionID: *out.RecommendedOptionID}, nil
+	return storage.InterruptT4Output{Headline: *out.Headline, Conclusion: *out.Conclusion, KeyPoints: append([]string(nil), (*out.KeyPoints)...), Options: append([]string(nil), (*out.Options)...), RecommendedOptionID: *out.RecommendedOptionID}, nil
 }
 
 func T4ResultFromCall(result CallResult, in T4Input) (T4CallResult, BrainSource, error) {

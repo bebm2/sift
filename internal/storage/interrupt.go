@@ -64,6 +64,7 @@ func ActiveInterruptReasons() []InterruptReason {
 type InterruptGeneration struct {
 	TaskSpecSnapshotID, PolicySnapshotID, ViolationCode, SubjectDigest string
 	ChangeID, HeadSHA, ReportID, ConflictDigest, FailureDigest         string
+	ReportDailyBucketStartMS, ReportDailyBucketEndMS, SecurityEventID  int64
 	AttemptNo, Generation                                              int
 }
 
@@ -84,6 +85,7 @@ type InterruptT4Output struct {
 	Headline            string
 	Conclusion          string
 	KeyPoints           []string
+	Options             []string
 	RecommendedOptionID string
 }
 
@@ -186,6 +188,22 @@ var interruptTemplates = map[InterruptReason]interruptTemplate{
 	InterruptMergeConflict:      {"合并冲突需要处理", "voice", []InterruptOption{{"retry", "重新执行合并", "再次尝试合并", "冲突未变时会再次失败"}, {"reject", "停止 Run", "Run 停止", "Change 不会合并"}, {"hold", "暂缓决定", "保持等待", "Change 继续待处理"}}, []string{"change_ref", "head_sha", "conflict_summary", "recommended_action", "conflict_evidence_ref"}, []string{"change_ref", "conflict_evidence_ref"}, SeverityHigh, 8 * 3600 * 1000, ExpireEscalate},
 	InterruptFailureReview:      {"失败需要人工决定", "voice", []InterruptOption{{"retry", "重试失败步骤", "再次执行", "相同故障可能再次发生"}, {"reject", "停止 Run", "Run 停止", "需人工重新发起"}, {"hold", "暂缓决定", "保持等待", "Run 继续占用待处理项"}}, []string{"failure_class", "failure_evidence_ref", "recommended_action"}, []string{"failure_evidence_ref"}, SeverityHigh, 24 * 3600 * 1000, ExpireAutoReject},
 	InterruptStartupStall:       {"无法确认旧执行体已停止", "text", []InterruptOption{{"retry", "重新探测旧执行体", "请求受控终止再探测", "未确认消失时仍保持隔离"}, {"reject", "放弃此 Run", "停止处理并保持隔离", "不代表旧执行体已停止"}, {"hold", "继续等待", "保持等待和隔离", "旧执行体可能仍在运行"}}, []string{"attempt_no", "generation", "diagnostic_cause", "isolation_consequence", "recommended_action", "attempt_diagnostic_ref", "worktree_ref"}, []string{"attempt_diagnostic_ref", "worktree_ref"}, SeverityHigh, 3600 * 1000, ExpireEscalate},
+}
+
+func interruptTemplateFor(cmd EmitInterruptCmd) (interruptTemplate, bool) {
+	t, ok := interruptTemplates[cmd.Reason]
+	if !ok || cmd.Reason != InterruptFailureReview || cmd.AttemptNo != nil {
+		return t, ok
+	}
+	if cmd.Facts["failure_class"] != "report_interrupt_quota_exhausted" {
+		return t, true
+	}
+	return interruptTemplate{
+		headline: "报告打扰额度已耗尽", modality: "voice",
+		options: []InterruptOption{{"reject", "停止 Run", "Run 停止", "需人工重新发起"}, {"hold", "暂缓决定", "保持 Interrupt 人工 held", "Run 继续运行"}},
+		facts:   []string{"failure_class", "failure_evidence_ref", "recommended_action"},
+		links:   []string{"failure_evidence_ref"}, base: SeverityHigh, expires: t.expires, onExpire: t.onExpire,
+	}, true
 }
 
 type interruptDispatch struct {
@@ -335,7 +353,7 @@ func (d *DB) EmitInterrupt(ctx context.Context, cmd EmitInterruptCmd) (Interrupt
 // allowing the Gate recorder to append its frozen evidence before the
 // Interrupt is inserted. The callback must not perform external IO.
 func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error) (Interrupt, error) {
-	t, ok := interruptTemplates[cmd.Reason]
+	t, ok := interruptTemplateFor(cmd)
 	if !ok {
 		return Interrupt{}, fmt.Errorf("%w: unknown reason", ErrInterruptRejected)
 	}
@@ -517,10 +535,13 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 }
 
 func interruptBriefFragments(t interruptTemplate, facts map[string]string) []string {
+	if t.headline == "报告打扰额度已耗尽" {
+		return []string{"请人工处理", "额度已耗尽"}
+	}
 	fragments := make([]string, 0, len(t.facts))
 	for _, key := range t.facts {
 		if value, ok := facts[key]; ok && safeT4Fragment(value) {
-			fragments = append(fragments, key+"="+value)
+			fragments = append(fragments, value)
 		}
 	}
 	sort.Strings(fragments)
@@ -541,8 +562,13 @@ func canonicalRecommendedAction(options []InterruptOption, action string) bool {
 }
 
 func acceptInterruptT4(in InterruptT4Input, out InterruptT4Output) (bool, string) {
-	if out.Headline != in.Headline || !containsString(in.Fragments, out.Conclusion) || len(out.KeyPoints) < 1 || len(out.KeyPoints) > 3 {
+	if out.Headline != in.Headline || !containsString(in.Fragments, out.Conclusion) || len(out.KeyPoints) < 1 || len(out.KeyPoints) > 3 || len(out.Options) != len(in.Options) {
 		return false, ""
+	}
+	for i, option := range in.Options {
+		if out.Options[i] != option.ID {
+			return false, ""
+		}
 	}
 	seen := map[string]bool{}
 	for _, point := range out.KeyPoints {
@@ -671,7 +697,11 @@ func promoteSeverity(s InterruptSeverity) InterruptSeverity {
 }
 
 func interruptGenerationKey(run string, reason InterruptReason, g InterruptGeneration) (string, error) {
-	fields := [][2]string{{"string:domain", "sift.interrupt.generation"}, {"uint:version", "1"}, {"string:run_id", run}, {"enum:reason", string(reason)}}
+	domain := "sift.interrupt.generation"
+	if reason == InterruptFailureReview && g.AttemptNo == 0 && g.ReportDailyBucketStartMS > 0 {
+		domain = "sift.interrupt.report-quota.generation"
+	}
+	fields := [][2]string{{"string:domain", domain}, {"uint:version", "1"}, {"string:run_id", run}, {"enum:reason", string(reason)}}
 	add := func(t, n, v string) { fields = append(fields, [2]string{t + ":" + n, v}) }
 	switch reason {
 	case InterruptDesignApproval:
@@ -692,6 +722,11 @@ func interruptGenerationKey(run string, reason InterruptReason, g InterruptGener
 		add("git_oid", "head_sha", g.HeadSHA)
 		add("sha256", "conflict_digest", g.ConflictDigest)
 	case InterruptFailureReview:
+		if g.AttemptNo == 0 && g.ReportDailyBucketStartMS > 0 {
+			add("uint", "day_bucket_start_ms", fmt.Sprint(g.ReportDailyBucketStartMS))
+			add("sha256", "failure_digest", g.FailureDigest)
+			break
+		}
 		add("uint", "attempt_no", fmt.Sprint(g.AttemptNo))
 		add("uint", "generation", fmt.Sprint(g.Generation))
 		add("sha256", "failure_digest", g.FailureDigest)
