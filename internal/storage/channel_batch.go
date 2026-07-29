@@ -47,7 +47,7 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 	} else if err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT m.delivery_id,m.interrupt_id,m.interrupt_version,m.nonce,m.headline,m.reason,m.severity,m.links_json,m.options_json,i.run_id FROM attention_batch_members m JOIN interrupts i ON i.id=m.interrupt_id WHERE m.batch_id=? AND m.excluded_at_ms IS NULL AND i.status='open' AND i.version=m.interrupt_version AND i.nonce=m.nonce ORDER BY m.interrupt_id`, batchID)
+	rows, err := tx.QueryContext(ctx, `SELECT m.delivery_id,m.interrupt_id,m.interrupt_version,m.nonce,m.headline,i.brief_markdown,m.reason,m.severity,m.links_json,m.options_json,i.run_id FROM attention_batch_members m JOIN interrupts i ON i.id=m.interrupt_id WHERE m.batch_id=? AND m.excluded_at_ms IS NULL AND i.status='open' AND i.version=m.interrupt_version AND i.nonce=m.nonce ORDER BY m.interrupt_id`, batchID)
 	if err != nil {
 		return err
 	}
@@ -55,16 +55,16 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 	members := []map[string]any{}
 	texts := []string{}
 	for rows.Next() {
-		var delivery, id, nonce, headline, reason, severity, links, options, runID string
+		var delivery, id, nonce, headline, brief, reason, severity, links, options, runID string
 		var version int
-		if err := rows.Scan(&delivery, &id, &version, &nonce, &headline, &reason, &severity, &links, &options, &runID); err != nil {
+		if err := rows.Scan(&delivery, &id, &version, &nonce, &headline, &brief, &reason, &severity, &links, &options, &runID); err != nil {
 			return err
 		}
 		var l, o any
 		if json.Unmarshal([]byte(links), &l) != nil || json.Unmarshal([]byte(options), &o) != nil {
 			return fmt.Errorf("storage: corrupt batch member")
 		}
-		rendered, commandLines, err := renderChannelInterrupt(headline, "", links, options, runID, nonce)
+		rendered, commandLines, err := renderChannelInterrupt(headline, brief, links, options, runID, nonce)
 		if err != nil {
 			return err
 		}
@@ -112,7 +112,7 @@ func joinBatchText(parts []string) string {
 	out := ""
 	for i, p := range parts {
 		if i > 0 {
-			out += "\n\n"
+			out += "；"
 		}
 		out += p
 	}

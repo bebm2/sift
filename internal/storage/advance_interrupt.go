@@ -205,7 +205,14 @@ func admitCriticalTx(ctx context.Context, tx *sql.Tx, id string, finalSeverity I
 	key := id + ":critical"
 	var kind, existing string
 	if err := tx.QueryRowContext(ctx, `SELECT id,kind FROM attention_admissions WHERE admission_key=?`, key).Scan(&existing, &kind); err == nil {
-		return kind == "critical_admitted", existing, "", nil
+		if kind == "critical_admitted" {
+			return true, existing, "", nil
+		}
+		var scope string
+		if err := tx.QueryRowContext(ctx, `SELECT b.scope FROM attention_batch_members m JOIN attention_batches b ON b.id=m.batch_id WHERE m.admission_id=? AND b.kind='critical_fuse' ORDER BY b.created_at_ms LIMIT 1`, existing).Scan(&scope); err != nil {
+			return false, existing, "", err
+		}
+		return false, existing, scope, nil
 	} else if err != sql.ErrNoRows {
 		return false, "", "", err
 	}
@@ -357,6 +364,14 @@ func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, v
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batch_members(batch_id,interrupt_id,admission_id,member_key,channel_id,channel_snapshot_json,delivery_id,interrupt_version,nonce,headline,reason,severity,links_json,options_json,joined_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, id, admission, batch+":"+id, channel, snapshot, batch+":"+id, version, nonce, headline, reason, severity, links, opts, now)
 	if err != nil {
 		return fmt.Errorf("add attention batch member: %w", err)
+	}
+	var gotChannel, gotSnapshot, gotNonce string
+	var gotVersion int
+	if err := tx.QueryRowContext(ctx, `SELECT channel_id,channel_snapshot_json,interrupt_version,nonce FROM attention_batch_members WHERE batch_id=? AND interrupt_id=?`, batch, id).Scan(&gotChannel, &gotSnapshot, &gotVersion, &gotNonce); err != nil {
+		return err
+	}
+	if gotChannel != channel || gotSnapshot != snapshot || int64(gotVersion) != version || gotNonce != nonce {
+		return fmt.Errorf("%w: batch member identity collision", ErrInterruptRejected)
 	}
 	return nil
 }
