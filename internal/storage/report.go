@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ReportSubmitCmd is the daemon-side production port for report.submit. The
@@ -115,12 +116,48 @@ func (d *DB) RecordReport(ctx context.Context, cmd ReportSubmitCmd) (ReportResul
 	if _, err = tx.ExecContext(ctx, `UPDATE rate_limit_buckets SET available_units=?,last_refill_at_ms=?,version=version+1 WHERE kind='report' AND scope_id=?`, available, last, "run:"+cmd.RunID+":attempt:"+fmt.Sprint(cmd.AttemptNo)); err != nil {
 		return ReportResult{}, err
 	}
-	payload, _ := json.Marshal(map[string]any{"report_key": cmd.ReportKey, "payload_digest": digest, "generation": cmd.Generation, "report": cmd.Payload})
 	eventID, receiptID := newID(), newID()
+	var reportChargeID string
+	var reportCfg reportRuntimeConfig
+	if cmd.Kind == "blocker" {
+		var raw string
+		if err := tx.QueryRowContext(ctx, `SELECT canonical_json FROM config_snapshots WHERE id=?`, snapshotID).Scan(&raw); err != nil {
+			return ReportResult{}, err
+		}
+		if err := json.Unmarshal([]byte(raw), &reportCfg); err != nil || reportCfg.Report.InterruptsPerRunDailyQuota < 1 {
+			return ReportResult{}, errors.New("report: invalid snapshot")
+		}
+		start, end, err := reportDayBucket(cmd.NowMS, reportCfg.Attention.DayTimezone)
+		if err != nil {
+			return ReportResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO budget_counters(kind,scope,scope_id,bucket_start_ms,bucket_end_ms,limit_value,consumed_value,version,updated_at_ms) VALUES('report','run',?,?,?, ?,0,1,?) ON CONFLICT DO NOTHING`, cmd.RunID, start, end, reportCfg.Report.InterruptsPerRunDailyQuota, cmd.NowMS); err != nil {
+			return ReportResult{}, err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE budget_counters SET consumed_value=consumed_value+1,version=version+1,updated_at_ms=? WHERE kind='report' AND scope='run' AND scope_id=? AND bucket_start_ms=? AND consumed_value<limit_value`, cmd.NowMS, cmd.RunID, start)
+		if err != nil {
+			return ReportResult{}, err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			if err := tx.Commit(); err != nil {
+				return ReportResult{}, err
+			}
+			_, emitErr := d.RecordReportQuotaExhaustion(ctx, reportQuotaCmd(cmd, runVersion, start, end, reportCfg))
+			if emitErr != nil && !errors.Is(emitErr, ErrInterruptRejected) {
+				return ReportResult{}, emitErr
+			}
+			return ReportResult{}, errors.New("report: report_interrupt_quota_exhausted")
+		}
+		reportChargeID = newID()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO budget_entries(id,kind,scope,scope_id,bucket_start_ms,amount,reason,run_id,operation_key,created_at_ms) VALUES(?,'report','run',?,?,1,'report_agent_blocked',?,?,?)`, reportChargeID, cmd.RunID, start, cmd.RunID, "report-interrupt-quota:"+receiptID, cmd.NowMS); err != nil {
+			return ReportResult{}, err
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{"report_key": cmd.ReportKey, "payload_digest": digest, "generation": cmd.Generation, "report": cmd.Payload})
 	if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,run_id,attempt_no,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?,?,?,?, 'agent',1,?,?,?)`, eventID, cmd.RunID, cmd.AttemptNo, projectID, "report."+cmd.Kind, string(payload), cmd.NowMS, cmd.NowMS); err != nil {
 		return ReportResult{}, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO report_receipts(id,run_id,attempt_no,report_key,report_kind,payload_digest,event_id,received_at_ms) VALUES(?,?,?,?,?,?,?,?)`, receiptID, cmd.RunID, cmd.AttemptNo, cmd.ReportKey, cmd.Kind, digest, eventID, cmd.NowMS); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO report_receipts(id,run_id,attempt_no,report_key,report_kind,payload_digest,event_id,report_interrupt_charge_entry_id,received_at_ms) VALUES(?,?,?,?,?,?,?,?,?)`, receiptID, cmd.RunID, cmd.AttemptNo, cmd.ReportKey, cmd.Kind, digest, eventID, nullable(reportChargeID), cmd.NowMS); err != nil {
 		return ReportResult{}, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -132,44 +169,55 @@ func (d *DB) RecordReport(ctx context.Context, cmd ReportSubmitCmd) (ReportResul
 	}
 	// Blocker is deliberately routed through the same production emitter as all
 	// other HITL causes. It is not a second Report-specific write port.
-	var rawConfig, worktree string
-	if err := d.db.QueryRowContext(ctx, `SELECT c.canonical_json,a.worktree_path FROM config_snapshots c JOIN runs r ON r.config_snapshot_id=c.id JOIN attempts a ON a.run_id=r.id AND a.attempt_no=? WHERE r.id=?`, cmd.AttemptNo, cmd.RunID).Scan(&rawConfig, &worktree); err == nil {
-		var cfg struct {
-			Attention struct {
-				DayTimezone string `json:"day_timezone"`
-				DailyQuota  struct {
-					Low    int `json:"low"`
-					Normal int `json:"normal"`
-					High   int `json:"high"`
-				} `json:"daily_quota"`
-				MaxEscalations int `json:"max_escalations"`
-				CriticalFuse   struct {
-					Window      int64 `json:"window"`
-					TotalLimit  int   `json:"total_limit"`
-					PerRunLimit int   `json:"per_run_limit"`
-				} `json:"critical_fuse"`
-				DailySummaryAt string `json:"daily_summary_at"`
-			} `json:"attention"`
-		}
-		if json.Unmarshal([]byte(rawConfig), &cfg) == nil {
-			if cfg.Attention.DailyQuota.Normal < 1 {
-				cfg.Attention.DailyQuota.Normal = 1
-			}
-			if cfg.Attention.DailyQuota.High < 1 {
-				cfg.Attention.DailyQuota.High = 1
-			}
-			if cfg.Attention.DailyQuota.Low < 1 {
-				cfg.Attention.DailyQuota.Low = 1
-			}
-			n := cmd.AttemptNo
-			facts := map[string]string{"blocker_summary": cmd.Payload["blocker_summary"].(string), "attempted_summary": cmd.Payload["attempted_summary"].(string), "recommended_action": cmd.Payload["recommended_action"].(string), "agent_log_ref": strings.TrimRight(worktree, "/") + "/agent.log"}
-			in, emitErr := d.EmitInterrupt(ctx, EmitInterruptCmd{RunID: cmd.RunID, ExpectedRunVersion: runVersion, AttemptNo: &n, Reason: InterruptAgentBlocked, Facts: facts, Generation: InterruptGeneration{AttemptNo: cmd.AttemptNo, Generation: cmd.Generation, ReportID: receiptID}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, MaxEscalations: cfg.Attention.MaxEscalations, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, Source: SourceAgent, NowMS: cmd.NowMS})
-			if emitErr == nil {
-				_, _ = d.db.ExecContext(ctx, `UPDATE report_receipts SET direct_interrupt_id=? WHERE id=?`, in.ID, receiptID)
-			}
-		}
+	var worktree string
+	if err := d.db.QueryRowContext(ctx, `SELECT worktree_path FROM attempts WHERE run_id=? AND attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&worktree); err != nil {
+		return ReportResult{}, err
+	}
+	n := cmd.AttemptNo
+	facts := map[string]string{"blocker_summary": cmd.Payload["blocker_summary"].(string), "attempted_summary": cmd.Payload["attempted_summary"].(string), "recommended_action": cmd.Payload["recommended_action"].(string), "agent_log_ref": strings.TrimRight(worktree, "/") + "/agent.log"}
+	in, emitErr := d.EmitInterrupt(ctx, EmitInterruptCmd{RunID: cmd.RunID, ExpectedRunVersion: runVersion, AttemptNo: &n, Reason: InterruptAgentBlocked, Facts: facts, Generation: InterruptGeneration{AttemptNo: cmd.AttemptNo, Generation: cmd.Generation, ReportID: receiptID}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, MaxEscalations: reportCfg.Attention.MaxEscalations, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: reportCfg.Attention.DailyQuota.Low, SeverityNormal: reportCfg.Attention.DailyQuota.Normal, SeverityHigh: reportCfg.Attention.DailyQuota.High}, DayTimezone: reportCfg.Attention.DayTimezone, DailySummaryAt: reportCfg.Attention.DailySummaryAt, CriticalWindowMS: reportCfg.Attention.CriticalFuse.Window, CriticalTotalLimit: reportCfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: reportCfg.Attention.CriticalFuse.PerRunLimit, Source: SourceAgent, NowMS: cmd.NowMS})
+	if emitErr != nil {
+		return ReportResult{}, emitErr
+	}
+	if _, err := d.db.ExecContext(ctx, `UPDATE report_receipts SET direct_interrupt_id=? WHERE id=? AND direct_interrupt_id IS NULL`, in.ID, receiptID); err != nil {
+		return ReportResult{}, err
 	}
 	return ReportResult{"accepted", receiptID, eventID}, nil
+}
+
+type reportRuntimeConfig struct {
+	Attention struct {
+		DayTimezone string `json:"day_timezone"`
+		DailyQuota  struct {
+			Low    int `json:"low"`
+			Normal int `json:"normal"`
+			High   int `json:"high"`
+		} `json:"daily_quota"`
+		MaxEscalations int `json:"max_escalations"`
+		CriticalFuse   struct {
+			Window      int64 `json:"window"`
+			TotalLimit  int   `json:"total_limit"`
+			PerRunLimit int   `json:"per_run_limit"`
+		} `json:"critical_fuse"`
+		DailySummaryAt string `json:"daily_summary_at"`
+	} `json:"attention"`
+	Report struct {
+		InterruptsPerRunDailyQuota int `json:"interrupts_per_run_daily_quota"`
+	} `json:"report"`
+}
+
+func reportDayBucket(nowMS int64, zone string) (int64, int64, error) {
+	loc, err := time.LoadLocation(timezoneOrUTC(zone))
+	if err != nil {
+		return 0, 0, fmt.Errorf("report: invalid day timezone: %w", err)
+	}
+	now := time.UnixMilli(nowMS).In(loc)
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	return start.UnixMilli(), start.AddDate(0, 0, 1).UnixMilli(), nil
+}
+
+func reportQuotaCmd(cmd ReportSubmitCmd, version, start, end int64, cfg reportRuntimeConfig) ReportQuotaExhaustionCmd {
+	return ReportQuotaExhaustionCmd{RunID: cmd.RunID, ExpectedRunVersion: version, DailyBucketStartMS: start, DailyBucketEndMS: end, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, NowMS: cmd.NowMS}
 }
 
 func validateReportPayload(kind string, p map[string]any) error {
