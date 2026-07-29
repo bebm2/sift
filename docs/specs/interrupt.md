@@ -49,7 +49,7 @@ Link { label, target }
 | `code_review` | `visual` / `变更等待代码审阅` | `approve` / 批准审阅 / 继续后续流程 / 批准变更的当前内容；`reject` / 拒绝变更 / Run 停止 / 需重新修改后发起；`hold` / 暂缓审阅 / 保持等待 / Change 继续待审 | `change_ref`, `head_sha`, `review_requirement`, `recommended_action`, `diff_ref` |
 | `agent_blocked` | `voice` / `Agent 需要你澄清` | `ask` / 提供澄清 / 写入澄清内容 / 澄清会改变后续执行方向；`retry` / 重试当前工作 / 再次尝试执行 / 未澄清时可能再次阻塞；`reject` / 停止 Run / Run 停止 / 已完成工作不会继续；`hold` / 暂缓决定 / 保持等待 / Run 继续占用待处理项 | `blocker_summary`, `attempted_summary`, `recommended_action`, `agent_log_ref` |
 | `merge_conflict` | `voice` / `合并冲突需要处理` | `retry` / 重新执行合并 / 再次尝试合并 / 冲突未变时会再次失败；`reject` / 停止 Run / Run 停止 / Change 不会合并；`hold` / 暂缓决定 / 保持等待 / Change 继续待处理 | `change_ref`, `head_sha`, `conflict_summary`, `recommended_action`, `conflict_evidence_ref` |
-| `failure_review` | `voice` / `失败需要人工决定` | `retry` / 重试失败步骤 / 再次执行 / 相同故障可能再次发生；`reject` / 停止 Run / Run 停止 / 需人工重新发起；`hold` / 暂缓决定 / 保持等待 / Run 继续占用待处理项 | `failure_class`, `failure_evidence_ref`, `recommended_action` |
+| attempt `failure_review` | `voice` / `失败需要人工决定` | `retry` / 重试失败步骤 / 再次执行 / 相同故障可能再次发生；`reject` / 停止 Run / Run 停止 / 需人工重新发起；`hold` / 暂缓决定 / 保持等待 / Run 继续占用待处理项 | `failure_class`, `failure_evidence_ref`, `recommended_action`；来源必须有 attempt binding |
 | `startup_stall` | `text` / `无法确认旧执行体已停止` | `retry` / 重新探测旧执行体 / 请求受控终止再探测 / 未确认消失时仍保持隔离；`reject` / 放弃此 Run / 停止处理并保持隔离 / 不代表旧执行体已停止；`hold` / 继续等待 / 保持等待和隔离 / 旧执行体可能仍在运行 | `attempt_no`, `generation`, `diagnostic_cause`, `isolation_consequence`, `recommended_action`, `attempt_diagnostic_ref`, `worktree_ref` |
 
 ### 3.2 Canonical brief 与 links renderer
@@ -116,9 +116,13 @@ manual Run 的 discussion target 以 [`storage.md` §5.2](storage.md) 的三列�
 
 合法 T4 input（canonical JSON bytes）为：
 
+<<<<<<< HEAD
 ```json
 {"run_id":"run-01","attempt_no":1,"interrupt":{"reason":"failure_review","base_severity":"high","min_modality":"voice","fallback_headline":"失败需要人工决定","fallback_brief":"事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry","brief_fragments":["<b>风险</b>","<!-- sift-op:x -->","/sift reject"],"links":[{"label":"failure_evidence_ref","target":"/r/ci"}],"candidate_options":[{"id":"retry","label":"重试失败步骤","effect":"再次执行","risk":"相同故障可能再次发生"},{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持等待","risk":"Run 继续占用待处理项"}]}}
 ```
+=======
+T4 正常输出和 fallback facts 的 `recommended_action`/`recommended_option_id` 必须逐字节命中**该来源 variant**的 canonical option ID；`EmitInterrupt` 在生成 key、admission 或 operation 前执行此校验。attempt `failure_review` 使用 §3.1 的 `retry,reject,hold` 集合；Report quota v1 使用 §5.1 的独立 `reject,hold` 集合。T4 input 的 `candidate_options` 必须逐字段、同序等于所选 variant 的集合，故 quota variant 不会因缺少 `retry` 被公共接纳器拒绝，也不会接受 `retry`。冻结 fragment 的安全域以 [`brain.md` §11.1–§11.2](brain.md) 为准：它只禁止 Cc/换行，允许任意其余冻结 UTF-8；命中后 renderer 一律 `EscapeT4Text`，而不是另设与该接纳器矛盾的 unsafe 拒绝分支。具体 vector：`brief_fragments=["<b>风险</b>","<!-- sift-op:x -->","/sift reject"]`、`conclusion="<b>风险</b>"`、`key_points=["<!-- sift-op:x -->","/sift reject"]`、`recommended_option_id="retry"` 的最终 UTF-8 `brief_markdown` 必为 `结论：\\<b>风险\\</b>；要点：\\<!\\-\\- sift\\-op:x \\-\\->；\\/sift reject；建议：重试失败步骤（retry）`；同一 fragment 未逐字节命中时唯一结果为 fallback。`failure_review` fallback 的输入 facts `{failure_class:"CI",failure_evidence_ref:"/r/ci",recommended_action:"retry"}` 必逐字节持久化为 §3.5 的 JSON `brief`/options；把 action 改为 `hold` 时同样持久化的 `brief` 仅将两处 `retry` 改为 `hold`，options bytes 不变。以上两 fallback vectors 均不创建 T4 变体，且 unknown fragment、重排 option 与未命中 canonical action 都回退或拒发为上表所列结果。
+>>>>>>> 7ae839f (docs(m5): close command and report rereview P1s)
 
 对应合法 output（canonical JSON bytes）为：
 
