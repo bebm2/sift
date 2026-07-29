@@ -30,7 +30,9 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -40,8 +42,24 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
+	sqlite "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
 )
+
+func init() {
+	_ = sqlite.RegisterDeterministicScalarFunction("sift_sha256", 1, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		var input []byte
+		switch v := args[0].(type) {
+		case string:
+			input = []byte(v)
+		case []byte:
+			input = v
+		default:
+			return nil, fmt.Errorf("sift_sha256: invalid input")
+		}
+		sum := sha256.Sum256(input)
+		return sum[:], nil
+	})
+}
 
 // Opening contract values (specs/storage.md §2). These are verified after
 // every open, not merely requested.
