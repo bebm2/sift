@@ -98,12 +98,14 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	if err := os.Remove(filepath.Join(b.RunDir, "reaper-result.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("wrapper: clear reaper result: %w", err)
 	}
-	self, err := os.Executable()
+	self, err := runtime.ProcessExecutable(os.Getpid())
 	if err != nil {
 		return err
 	}
 	pid := int64(os.Getpid())
-	started := time.Now().UnixMilli()
+	// Align with PlatformProcessInspector's procfs identity so recovery
+	// liveness checks can match the persisted fields on Linux.
+	started := runtime.ProcessStartedAtMS(os.Getpid())
 	instance, session := secret(), secret()
 	wi := map[string]any{"pid": pid, "started_at_ms": started, "executable": self, "pgid": pid}
 	base := map[string]any{"run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "dispatch_id": b.DispatchID, "wrapper_instance_id": instance, "session_candidate": session, "wrapper_identity": wi}
@@ -118,6 +120,9 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	}
 	permit := secret()
 	pp := map[string]any{"run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "wrapper_instance_id": instance, "wrapper_identity": wi, "control_digest": digest, "control_nonce_hash": hash(nonce), "permit_candidate": permit}
+	if err := pauseForTest("before-permit-rpc"); err != nil {
+		return err
+	}
 	// A lost response is not a new permit request: replay the exact candidate
 	// and params with a new envelope request ID until the bounded deadline.
 	if _, err := callPermit(ctx, b.RunDir, map[string]any{"kind": "wrapper_session", "session": session}, pp); err != nil {
@@ -171,6 +176,9 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 		return errors.Join(err, terminateAndReap(cmd, b.RunDir))
 	}
 	sp := map[string]any{"run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "wrapper_instance_id": instance, "agent_identity": ai, "control_digest": digest, "result_digest": nil}
+	if err := pauseForTest("before-started-rpc"); err != nil {
+		return err
+	}
 	if _, err = call(ctx, b.RunDir, "claim.started", map[string]any{"kind": "wrapper_started", "session": session, "permit": permit}, sp); err != nil {
 		return errors.Join(err, terminateAndReap(cmd, b.RunDir))
 	}
@@ -187,7 +195,13 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	}
 	exitCode, signal := resultStatus(waitErr)
 	result := map[string]any{"schema_version": 1, "run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "wrapper_instance_id": instance, "agent_identity": ai, "exit_code": exitCode, "signal": signal, "finished_at_ms": time.Now().UnixMilli(), "final_head_sha": headSHA(b.WorktreePath), "control_digest": digest}
+	if err := pauseForTest("before-result-rename"); err != nil {
+		return err
+	}
 	if _, err := writeJSON(filepath.Join(b.RunDir, "result.json"), result); err != nil {
+		return err
+	}
+	if err := pauseForTest("after-result-rename"); err != nil {
 		return err
 	}
 	return waitErr
