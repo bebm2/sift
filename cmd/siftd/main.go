@@ -82,19 +82,8 @@ func main() {
 	s.SetOperatorAction(func(ctx context.Context, method, runID string, version int64) error {
 		return termination.Operator(ctx, runID, version, method == "ops.retry")
 	})
-	go func() {
-		ticker := time.NewTicker(snapshot.Config.Scheduler.SupervisorInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = termination.Timeout(ctx)
-				_ = workers.Tick(ctx)
-			}
-		}
-	}()
+	startSchedulers(ctx, db, workers, termination, snapshot.Config.Scheduler)
+	defer db.SetOutboxWakeup(nil)
 	if err := s.Serve(ctx); err != nil {
 		fatal(err)
 	}
@@ -110,6 +99,59 @@ func hasEnabledProjects(cfg *config.Config) bool {
 
 func attentionQuota(q config.DailyQuota) map[storage.InterruptSeverity]int {
 	return map[storage.InterruptSeverity]int{storage.SeverityLow: q.Low, storage.SeverityNormal: q.Normal, storage.SeverityHigh: q.High}
+}
+
+// startSchedulers is the sole owner of siftd's three DESIGN §6.1 clocks.
+// Intake's cursor still determines whether a poll is due; the supervisor
+// interval also bounds recovery of persisted outbox retry deadlines.
+func startSchedulers(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, cfg config.Scheduler) {
+	intake := storage.NewIntakeScheduler(reportSchedulerError("intake", workers.IntakeTick))
+	supervisor := storage.NewSupervisorScheduler(reportSchedulerError("supervisor", termination.Timeout))
+	outbox := storage.NewOutboxScheduler(reportSchedulerError("outbox", workers.OutboxTick))
+	db.SetOutboxWakeup(outbox.Wake)
+
+	go runScheduler(ctx, intake, minIntakeInterval(cfg))
+	go runScheduler(ctx, supervisor, cfg.SupervisorInterval)
+	go runScheduler(ctx, outbox, cfg.SupervisorInterval)
+}
+
+type wakeScheduler interface {
+	Wake()
+	Run(context.Context) error
+}
+
+func runScheduler(ctx context.Context, scheduler wakeScheduler, interval time.Duration) {
+	go func() { _ = scheduler.Run(ctx) }()
+	scheduler.Wake() // startup recovery must not wait for a clock edge.
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			scheduler.Wake()
+		}
+	}
+}
+
+func minIntakeInterval(cfg config.Scheduler) time.Duration {
+	interval := cfg.IntakeIdleInterval
+	for _, candidate := range []time.Duration{cfg.IntakeActiveInterval, cfg.IntakeInterruptInterval} {
+		if candidate > 0 && (interval == 0 || candidate < interval) {
+			interval = candidate
+		}
+	}
+	return interval
+}
+
+func reportSchedulerError(name string, run func(context.Context) error) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if err := run(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "siftd: %s scheduler: %v\n", name, err)
+		}
+		return nil
+	}
 }
 
 func fatal(err error) { fmt.Fprintln(os.Stderr, "siftd:", err); os.Exit(1) }

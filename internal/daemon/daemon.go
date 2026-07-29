@@ -35,7 +35,8 @@ type Daemon struct {
 	Replies     []*intake.ReplyConsumer
 	Launch      *launchworker.Worker
 	Now         func() time.Time
-	mu          sync.Mutex
+	intakeMu    sync.Mutex
+	outboxMu    sync.Mutex
 }
 
 // Assemble probes and records auto-merge capability, then creates one
@@ -118,12 +119,12 @@ func operators(o config.Operators, k forge.Kind) []string {
 	return append([]string(nil), o.GitHub...)
 }
 
-// Tick advances Intake, reverse-sync reconciliation, and then one comment
-// operation per project. A project failure is returned with its identity; the
-// scheduler may continue other projects on the next tick.
-func (d *Daemon) Tick(ctx context.Context) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// IntakeTick advances persisted-cursor polling and all Forge fact
+// reconciliation. PollOnce consults each cursor's NextPollAtMS, so the named
+// intake scheduler may wake more often without changing its adaptive cadence.
+func (d *Daemon) IntakeTick(ctx context.Context) error {
+	d.intakeMu.Lock()
+	defer d.intakeMu.Unlock()
 	for i, p := range d.Pollers {
 		if err := p.PollOnce(ctx); err != nil {
 			return fmt.Errorf("intake[%d]: %w", i, err)
@@ -139,24 +140,33 @@ func (d *Daemon) Tick(ctx context.Context) error {
 			return fmt.Errorf("reply[%d]: %w", i, err)
 		}
 	}
-	for i, w := range d.Comments {
-		if err := w.RunOnce(ctx); err != nil {
-			return fmt.Errorf("comment[%d]: %w", i, err)
-		}
-	}
 	for i, r := range d.Successes {
 		if err := r.ReconcileOnce(ctx); err != nil {
 			return fmt.Errorf("gate-success[%d]: %w", i, err)
 		}
 	}
-	for i, w := range d.Changes {
-		if err := w.RunOnce(ctx); err != nil {
-			return fmt.Errorf("change[%d]: %w", i, err)
-		}
-	}
 	for i, r := range d.Gates {
 		if err := r.ReconcileOnce(ctx); err != nil {
 			return fmt.Errorf("gate[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// OutboxTick advances committed external effects independently of Forge fact
+// intake. It is woken after every outbox-writing transaction and periodically
+// to discover durable retry deadlines after a restart.
+func (d *Daemon) OutboxTick(ctx context.Context) error {
+	d.outboxMu.Lock()
+	defer d.outboxMu.Unlock()
+	for i, w := range d.Comments {
+		if err := w.RunOnce(ctx); err != nil {
+			return fmt.Errorf("comment[%d]: %w", i, err)
+		}
+	}
+	for i, w := range d.Changes {
+		if err := w.RunOnce(ctx); err != nil {
+			return fmt.Errorf("change[%d]: %w", i, err)
 		}
 	}
 	for i, w := range d.Merges {
@@ -170,4 +180,13 @@ func (d *Daemon) Tick(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Tick preserves the integration-test entry point while production schedules
+// its two independently paced domains through IntakeTick and OutboxTick.
+func (d *Daemon) Tick(ctx context.Context) error {
+	if err := d.IntakeTick(ctx); err != nil {
+		return err
+	}
+	return d.OutboxTick(ctx)
 }
