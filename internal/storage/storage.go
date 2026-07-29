@@ -211,6 +211,9 @@ func Open(ctx context.Context, cfg OpenConfig) (*DB, error) {
 	if err := applyMigrations(ctx, pool, cfg.BinaryVersion, cfg.Now); err != nil {
 		return fail(err)
 	}
+	if err := ensureChannelSchema(ctx, pool); err != nil {
+		return fail(fmt.Errorf("storage: ensure channel schema: %w", err))
+	}
 	return &DB{db: pool, path: cfg.Path}, nil
 }
 
