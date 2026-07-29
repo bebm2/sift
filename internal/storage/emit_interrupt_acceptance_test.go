@@ -52,6 +52,36 @@ func TestEmitInterruptBindingIdentityAcceptanceMatrix(t *testing.T) {
 	}
 }
 
+func TestEmitInterruptBindingFailureRollsBackFiveThings(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, `CREATE TRIGGER fail_emit_binding BEFORE INSERT ON interrupt_command_effect_bindings BEGIN SELECT RAISE(ABORT, 'injected binding failure'); END`)
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptDesignApproval,
+		Facts:      map[string]string{"risk_summary": "risk", "recommended_action": "approve", "task_spec_ref": "/task"},
+		Generation: InterruptGeneration{TaskSpecSnapshotID: "task-01"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone,
+		AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
+	if _, err := db.EmitInterrupt(ctx, cmd); err == nil || !strings.Contains(err.Error(), "injected binding failure") {
+		t.Fatalf("EmitInterrupt error = %v", err)
+	}
+	for _, table := range []string{"interrupts", "attention_admissions", "budget_entries", "events", "outbox_operations", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
+		assertCount(t, db, table, 0)
+	}
+	var status string
+	var version int
+	if err := db.db.QueryRow(`SELECT status,version FROM runs WHERE id='run'`).Scan(&status, &version); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || version != 1 {
+		t.Fatalf("run transition leaked: status=%s version=%d", status, version)
+	}
+}
+
 func TestAcceptInterruptT4RejectsUnknownFragmentAndPreservesCanonicalBytes(t *testing.T) {
 	in := InterruptT4Input{RunID: "run-01", Reason: InterruptFailureReview, Severity: SeverityHigh, Modality: "voice", Headline: "失败需要人工决定", Fragments: []string{"/sift reject", "<!-- sift-op:x -->", "<b>风险</b>"}, Options: []InterruptOption{{"retry", "重试失败步骤", "再次执行", "相同故障可能再次发生"}, {"reject", "停止 Run", "Run 停止", "需人工重新发起"}, {"hold", "暂缓决定", "保持等待", "Run 继续占用待处理项"}}}
 	valid := InterruptT4Output{Headline: in.Headline, Conclusion: "<b>风险</b>", KeyPoints: []string{"<!-- sift-op:x -->", "/sift reject"}, Options: []string{"retry", "reject", "hold"}, RecommendedOptionID: "retry"}

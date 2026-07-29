@@ -152,7 +152,9 @@ func TestGateT4NormalAndInvalidFallbackPreserveEmissionIdentity(t *testing.T) {
 		out             storage.InterruptT4Output
 	}{
 		{"normal", "结论：required；要点：required；建议：批准审阅（approve）", storage.InterruptT4Output{Headline: "变更等待代码审阅", Conclusion: "required", KeyPoints: []string{"required"}, Options: []string{"approve", "reject", "hold"}, RecommendedOptionID: "approve"}},
-		{"invalid", "事实：change_ref=https://forge.example/change/42；head_sha=0123456789012345678901234567890123456789；review_requirement=required；recommended_action=approve；diff_ref=https://forge.example/change/42/diff。建议：approve", storage.InterruptT4Output{Headline: "变更等待代码审阅", Conclusion: "required", KeyPoints: []string{"required"}, Options: []string{"reject", "approve", "hold"}, RecommendedOptionID: "approve"}},
+		{"option reorder fallback", "事实：change_ref=https://forge.example/change/42；head_sha=0123456789012345678901234567890123456789；review_requirement=required；recommended_action=approve；diff_ref=https://forge.example/change/42/diff。建议：approve", storage.InterruptT4Output{Headline: "变更等待代码审阅", Conclusion: "required", KeyPoints: []string{"required"}, Options: []string{"reject", "approve", "hold"}, RecommendedOptionID: "approve"}},
+		{"unknown fragment fallback", "事实：change_ref=https://forge.example/change/42；head_sha=0123456789012345678901234567890123456789；review_requirement=required；recommended_action=approve；diff_ref=https://forge.example/change/42/diff。建议：approve", storage.InterruptT4Output{Headline: "变更等待代码审阅", Conclusion: "unfrozen", KeyPoints: []string{"required"}, Options: []string{"approve", "reject", "hold"}, RecommendedOptionID: "approve"}},
+		{"unknown option fallback", "事实：change_ref=https://forge.example/change/42；head_sha=0123456789012345678901234567890123456789；review_requirement=required；recommended_action=approve；diff_ref=https://forge.example/change/42/diff。建议：approve", storage.InterruptT4Output{Headline: "变更等待代码审阅", Conclusion: "required", KeyPoints: []string{"required"}, Options: []string{"approve", "reject", "hold"}, RecommendedOptionID: "retry"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
