@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -185,6 +186,120 @@ func TestEmitInterruptRejectsNonCanonicalRecommendedActionBeforeAnyWrite(t *test
 	assertCount(t, db, "budget_entries", 0)
 }
 
+func TestAcceptInterruptT4AttemptGolden(t *testing.T) {
+	in := InterruptT4Input{RunID: "run-01", Reason: InterruptFailureReview, Severity: SeverityHigh, Modality: "voice", Headline: "失败需要人工决定", Fragments: []string{"/sift reject", "<!-- sift-op:x -->", "<b>风险</b>"}, Options: []InterruptOption{{"retry", "重试失败步骤", "再次执行", "相同故障可能再次发生"}, {"reject", "停止 Run", "Run 停止", "需人工重新发起"}, {"hold", "暂缓决定", "保持等待", "Run 继续占用待处理项"}}}
+	out := InterruptT4Output{Headline: "失败需要人工决定", Conclusion: "<b>风险</b>", KeyPoints: []string{"<!-- sift-op:x -->", "/sift reject"}, Options: []string{"retry", "reject", "hold"}, RecommendedOptionID: "retry"}
+	accepted, brief := acceptInterruptT4(in, out)
+	if !accepted || brief != "结论：\\<b\\>风险\\</b\\>；要点：\\<\\!\\-\\- sift\\-op:x \\-\\-\\>；/sift reject；建议：重试失败步骤（retry）" {
+		t.Fatalf("attempt golden accepted=%v brief=%q", accepted, brief)
+	}
+	out.Options = []string{"reject", "retry", "hold"}
+	if accepted, _ := acceptInterruptT4(in, out); accepted {
+		t.Fatal("reordered attempt options accepted")
+	}
+	out.Options = []string{"retry", "reject", "hold"}
+	out.RecommendedOptionID = "retry_report_interrupt_quota"
+	if accepted, _ := acceptInterruptT4(in, out); accepted {
+		t.Fatal("unknown attempt option accepted")
+	}
+}
+
+func TestEmitInterruptFailureReviewVariantsUseClosedSourceAndExactGoldens(t *testing.T) {
+	ctx := context.Background()
+	newDB := func(t *testing.T) *DB {
+		t.Helper()
+		db, _ := openTestDB(t)
+		if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SeedForgeRunForTest(ctx, "run-01", "project", "cfg", "42", testNow); err != nil {
+			t.Fatal(err)
+		}
+		insertTaskSpec(t, db, "spec", "run-01", 1)
+		insertAttempt(t, db, "run-01", 1, "spec")
+		return db
+	}
+	attemptCmd := func() EmitInterruptCmd {
+		attempt := 1
+		return EmitInterruptCmd{RunID: "run-01", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, Facts: map[string]string{"failure_class": "CI", "failure_evidence_ref": "/r/ci", "recommended_action": "retry"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
+	}
+	quotaCmd := func() EmitInterruptCmd {
+		return EmitInterruptCmd{RunID: "run-01", ExpectedRunVersion: 1, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewReportQuota, Facts: map[string]string{"failure_class": "report_interrupt_quota_exhausted", "failure_evidence_ref": "sift://event/00000000000000000000000000000001", "recommended_action": "hold"}, Generation: InterruptGeneration{ReportDailyBucketStartMS: 1754000000000, ReportDailyBucketEndMS: 1754086400000, SecurityEventID: 1, FailureDigest: "59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
+	}
+
+	db := newDB(t)
+	db.SetInterruptT4(func(_ context.Context, in InterruptT4Input) (InterruptT4Output, error) {
+		if got := []string{in.Options[0].ID, in.Options[1].ID, in.Options[2].ID}; strings.Join(got, ",") != "retry,reject,hold" {
+			t.Fatalf("attempt options = %v", got)
+		}
+		return InterruptT4Output{Headline: in.Headline, Conclusion: "CI", KeyPoints: []string{"CI"}, Options: []string{"reject", "retry", "hold"}, RecommendedOptionID: "retry"}, nil
+	})
+	got, err := db.EmitInterrupt(ctx, attemptCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Brief != "事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry" || got.Headline != "失败需要人工决定" {
+		t.Fatalf("attempt fallback = %#v", got)
+	}
+	options, _ := json.Marshal(got.Options)
+	if string(options) != `[{"effect":"再次执行","id":"retry","label":"重试失败步骤","risk":"相同故障可能再次发生"},{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持等待","id":"hold","label":"暂缓决定","risk":"Run 继续占用待处理项"}]` {
+		t.Fatalf("attempt options JSON = %s", options)
+	}
+
+	db = newDB(t)
+	if _, err := db.db.Exec(`UPDATE runs SET status='running' WHERE id='run-01'`); err != nil {
+		t.Fatal(err)
+	}
+	db.SetInterruptT4(func(_ context.Context, in InterruptT4Input) (InterruptT4Output, error) {
+		if got := []string{in.Options[0].ID, in.Options[1].ID}; strings.Join(got, ",") != "reject,hold" {
+			t.Fatalf("quota options = %v", got)
+		}
+		return InterruptT4Output{Headline: in.Headline, Conclusion: "额度已耗尽", KeyPoints: []string{"请人工处理"}, Options: []string{"reject", "hold"}, RecommendedOptionID: "hold"}, nil
+	})
+	got, err = db.EmitInterrupt(ctx, quotaCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Brief != "结论：额度已耗尽；要点：请人工处理；建议：暂缓决定（hold）" || got.GenerationKey != "cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083" {
+		t.Fatalf("quota interrupt = %#v", got)
+	}
+	var status string
+	if err := db.db.QueryRow(`SELECT status FROM runs WHERE id='run-01'`).Scan(&status); err != nil || status != "running" {
+		t.Fatalf("quota changed run status=%q err=%v", status, err)
+	}
+	for _, out := range []InterruptT4Output{
+		{Headline: "报告打扰额度已耗尽", Conclusion: "额度已耗尽", KeyPoints: []string{"请人工处理"}, Options: []string{"hold", "reject"}, RecommendedOptionID: "hold"},
+		{Headline: "报告打扰额度已耗尽", Conclusion: "额度已耗尽", KeyPoints: []string{"请人工处理"}, Options: []string{"reject", "hold", "retry"}, RecommendedOptionID: "hold"},
+		{Headline: "报告打扰额度已耗尽", Conclusion: "额度已耗尽", KeyPoints: []string{"请人工处理"}, Options: []string{"reject", "hold"}, RecommendedOptionID: "retry"},
+	} {
+		db := newDB(t)
+		if _, err := db.db.Exec(`UPDATE runs SET status='running' WHERE id='run-01'`); err != nil {
+			t.Fatal(err)
+		}
+		db.SetInterruptT4(func(context.Context, InterruptT4Input) (InterruptT4Output, error) { return out, nil })
+		fallback, err := db.EmitInterrupt(ctx, quotaCmd())
+		if err != nil || fallback.Brief != "事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/00000000000000000000000000000001；recommended_action=hold。建议：hold" || fallback.Severity != SeverityHigh || fallback.GenerationKey != "cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083" || strings.Join([]string{fallback.Options[0].ID, fallback.Options[1].ID}, ",") != "reject,hold" {
+			t.Fatalf("quota invalid T4 fallback=%#v err=%v", fallback, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		cmd  EmitInterruptCmd
+	}{
+		{"quota with attempt", func() EmitInterruptCmd { c := quotaCmd(); n := 1; c.AttemptNo = &n; return c }()},
+		{"attempt without identity", func() EmitInterruptCmd { c := attemptCmd(); c.AttemptNo = nil; return c }()},
+		{"attempt with quota fields", func() EmitInterruptCmd { c := attemptCmd(); c.Generation.ReportDailyBucketStartMS = 1; return c }()},
+		{"quota with attempt generation", func() EmitInterruptCmd { c := quotaCmd(); c.Generation.AttemptNo = 1; return c }()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateFailureReviewVariant(tc.cmd); err == nil {
+				t.Fatal("cross-contaminated variant accepted")
+			}
+		})
+	}
+}
+
 func TestEmitInterruptRejectsBeforeAnyWrite(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
@@ -194,7 +309,8 @@ func TestEmitInterruptRejectsBeforeAnyWrite(t *testing.T) {
 	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
 		t.Fatal(err)
 	}
-	_, err := db.EmitInterrupt(ctx, EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptFailureReview, Facts: map[string]string{"failure_class": "CI", "failure_evidence_ref": "/tmp/evidence", "recommended_action": "retry\nnow"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow})
+	attempt := 1
+	_, err := db.EmitInterrupt(ctx, EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, Facts: map[string]string{"failure_class": "CI", "failure_evidence_ref": "/tmp/evidence", "recommended_action": "retry\nnow"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow})
 	if err == nil || !strings.Contains(err.Error(), "interrupt_brief_lf_rejected") {
 		t.Fatalf("error = %v", err)
 	}

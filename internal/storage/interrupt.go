@@ -22,6 +22,7 @@ type GatePhase string
 type GuardrailLevel string
 
 type ExpireAction string
+type FailureReviewVariant string
 
 const (
 	InterruptDesignApproval     InterruptReason = "design_approval"
@@ -47,10 +48,30 @@ const (
 	ExpireHold       ExpireAction   = "hold"
 	ExpireEscalate   ExpireAction   = "escalate"
 	ExpireAutoReject ExpireAction   = "auto_reject"
+
+	FailureReviewAttempt     FailureReviewVariant = "attempt"
+	FailureReviewReportQuota FailureReviewVariant = "report_quota"
 )
 
-type InterruptOption struct{ ID, Label, Effect, Risk string }
-type InterruptLink struct{ Label, Target string }
+type InterruptOption struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Effect string `json:"effect"`
+	Risk   string `json:"risk"`
+}
+type InterruptLink struct {
+	Label  string `json:"label"`
+	Target string `json:"target"`
+}
+
+func (o InterruptOption) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Effect string `json:"effect"`
+		ID     string `json:"id"`
+		Label  string `json:"label"`
+		Risk   string `json:"risk"`
+	}{o.Effect, o.ID, o.Label, o.Risk})
+}
 
 // ActiveInterruptReasons is the canonical active Interrupt reason set.
 func ActiveInterruptReasons() []InterruptReason {
@@ -128,6 +149,7 @@ type EmitInterruptCmd struct {
 	ExpectedRunVersion              int64
 	AttemptNo                       *int
 	Reason                          InterruptReason
+	FailureReviewVariant            FailureReviewVariant
 	Facts                           map[string]string
 	Generation                      InterruptGeneration
 	GatePhase                       GatePhase
@@ -192,11 +214,8 @@ var interruptTemplates = map[InterruptReason]interruptTemplate{
 
 func interruptTemplateFor(cmd EmitInterruptCmd) (interruptTemplate, bool) {
 	t, ok := interruptTemplates[cmd.Reason]
-	if !ok || cmd.Reason != InterruptFailureReview || cmd.AttemptNo != nil {
+	if !ok || cmd.Reason != InterruptFailureReview || cmd.FailureReviewVariant != FailureReviewReportQuota {
 		return t, ok
-	}
-	if cmd.Facts["failure_class"] != "report_interrupt_quota_exhausted" {
-		return t, true
 	}
 	return interruptTemplate{
 		headline: "报告打扰额度已耗尽", modality: "voice",
@@ -204,6 +223,35 @@ func interruptTemplateFor(cmd EmitInterruptCmd) (interruptTemplate, bool) {
 		facts:   []string{"failure_class", "failure_evidence_ref", "recommended_action"},
 		links:   []string{"failure_evidence_ref"}, base: SeverityHigh, expires: t.expires, onExpire: t.onExpire,
 	}, true
+}
+
+func validateFailureReviewVariant(cmd EmitInterruptCmd) error {
+	if cmd.Reason != InterruptFailureReview {
+		if cmd.FailureReviewVariant != "" {
+			return fmt.Errorf("%w: failure_review variant on another reason", ErrInterruptRejected)
+		}
+		return nil
+	}
+	facts := cmd.Facts
+	if len(facts) != 3 {
+		return fmt.Errorf("%w: failure_review facts are not closed", ErrInterruptRejected)
+	}
+	switch cmd.FailureReviewVariant {
+	case FailureReviewAttempt:
+		if cmd.AttemptNo == nil || *cmd.AttemptNo < 1 || cmd.Generation.AttemptNo != *cmd.AttemptNo || cmd.Generation.Generation < 1 || cmd.Generation.ReportDailyBucketStartMS != 0 || cmd.Generation.ReportDailyBucketEndMS != 0 || cmd.Generation.SecurityEventID != 0 || facts["failure_class"] == "" || facts["failure_class"] == "report_interrupt_quota_exhausted" || facts["recommended_action"] == "" || facts["failure_evidence_ref"] == "" {
+			return fmt.Errorf("%w: invalid failure_review attempt variant", ErrInterruptRejected)
+		}
+	case FailureReviewReportQuota:
+		quotaDigest := sha256.Sum256([]byte(fmt.Sprintf(`{"daily_bucket_end_ms":%d,"daily_bucket_start_ms":%d,"failure_class":"report_interrupt_quota_exhausted","recommended_action":"hold","run_id":%q}`, cmd.Generation.ReportDailyBucketEndMS, cmd.Generation.ReportDailyBucketStartMS, cmd.RunID)))
+		if cmd.AttemptNo != nil || cmd.Generation.AttemptNo != 0 || cmd.Generation.Generation != 0 || cmd.Generation.ReportDailyBucketStartMS <= 0 || cmd.Generation.ReportDailyBucketEndMS <= cmd.Generation.ReportDailyBucketStartMS || cmd.Generation.SecurityEventID <= 0 || cmd.Generation.FailureDigest != hex.EncodeToString(quotaDigest[:]) || facts["failure_class"] != "report_interrupt_quota_exhausted" || facts["recommended_action"] != "hold" || facts["failure_evidence_ref"] != fmt.Sprintf("sift://event/%032x", cmd.Generation.SecurityEventID) {
+			return fmt.Errorf("%w: invalid failure_review report quota variant", ErrInterruptRejected)
+		}
+	case "":
+		return fmt.Errorf("%w: failure_review variant is required", ErrInterruptRejected)
+	default:
+		return fmt.Errorf("%w: unknown failure_review variant", ErrInterruptRejected)
+	}
+	return nil
 }
 
 type interruptDispatch struct {
@@ -353,6 +401,9 @@ func (d *DB) EmitInterrupt(ctx context.Context, cmd EmitInterruptCmd) (Interrupt
 // allowing the Gate recorder to append its frozen evidence before the
 // Interrupt is inserted. The callback must not perform external IO.
 func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error) (Interrupt, error) {
+	if err := validateFailureReviewVariant(cmd); err != nil {
+		return Interrupt{}, err
+	}
 	t, ok := interruptTemplateFor(cmd)
 	if !ok {
 		return Interrupt{}, fmt.Errorf("%w: unknown reason", ErrInterruptRejected)
@@ -386,7 +437,7 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if err != nil {
 		return Interrupt{}, err
 	}
-	key, err := interruptGenerationKey(cmd.RunID, cmd.Reason, cmd.Generation)
+	key, err := interruptGenerationKeyFor(cmd)
 	if err != nil {
 		return Interrupt{}, err
 	}
@@ -445,7 +496,11 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if version != cmd.ExpectedRunVersion {
 		return Interrupt{}, ErrRejectedStale
 	}
-	if RunStatus(status) != RunWaitingHuman {
+	if cmd.FailureReviewVariant == FailureReviewReportQuota {
+		if RunStatus(status) != RunRunning {
+			return Interrupt{}, fmt.Errorf("%w: report quota run is not running", ErrInterruptRejected)
+		}
+	} else if RunStatus(status) != RunWaitingHuman {
 		if !legalTransition(RunStatus(status), RunWaitingHuman) {
 			return Interrupt{}, fmt.Errorf("%w: %s cannot wait for human", ErrInterruptRejected, status)
 		}
@@ -667,7 +722,7 @@ func escapeBrief(v string) (string, error) {
 			return "", fmt.Errorf("%w: interrupt_brief_control_rejected", ErrInterruptRejected)
 		}
 	}
-	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>").Replace(v), nil
+	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>").Replace(v), nil
 }
 func nullableInt64(v *int64) any {
 	if v == nil {
@@ -675,7 +730,13 @@ func nullableInt64(v *int64) any {
 	}
 	return *v
 }
-func validLink(v string) bool { return strings.HasPrefix(v, "/") || strings.HasPrefix(v, "https://") }
+func validLink(v string) bool {
+	if strings.HasPrefix(v, "/") || strings.HasPrefix(v, "https://") {
+		return true
+	}
+	const prefix = "sift://event/"
+	return strings.HasPrefix(v, prefix) && len(v) == len(prefix)+32 && lowerHex(v[len(prefix):])
+}
 func indexOf(a []string, s string) int {
 	for i, v := range a {
 		if v == s {
@@ -825,8 +886,15 @@ func lowerHex(s string) bool {
 	return true
 }
 
+func interruptGenerationKeyFor(cmd EmitInterruptCmd) (string, error) {
+	if err := validateFailureReviewVariant(cmd); err != nil {
+		return "", err
+	}
+	return interruptGenerationKey(cmd.RunID, cmd.Reason, cmd.Generation)
+}
+
 func mustGenerationKey(cmd EmitInterruptCmd) string {
-	k, err := interruptGenerationKey(cmd.RunID, cmd.Reason, cmd.Generation)
+	k, err := interruptGenerationKeyFor(cmd)
 	if err != nil {
 		panic(err)
 	}
