@@ -23,6 +23,7 @@ type GuardrailLevel string
 
 type ExpireAction string
 type FailureReviewVariant string
+type FailureReviewRetryKind string
 
 const (
 	InterruptDesignApproval     InterruptReason = "design_approval"
@@ -49,8 +50,10 @@ const (
 	ExpireEscalate   ExpireAction   = "escalate"
 	ExpireAutoReject ExpireAction   = "auto_reject"
 
-	FailureReviewAttempt     FailureReviewVariant = "attempt"
-	FailureReviewReportQuota FailureReviewVariant = "report_quota"
+	FailureReviewAttempt     FailureReviewVariant   = "attempt"
+	FailureReviewReportQuota FailureReviewVariant   = "report_quota"
+	FailureReviewNewAttempt  FailureReviewRetryKind = "new_attempt"
+	FailureReviewGateRecheck FailureReviewRetryKind = "gate_recheck"
 )
 
 type InterruptOption struct {
@@ -85,7 +88,8 @@ func ActiveInterruptReasons() []InterruptReason {
 type InterruptGeneration struct {
 	TaskSpecSnapshotID, PolicySnapshotID, ViolationCode, SubjectDigest string
 	ChangeID, HeadSHA, ReportID, ConflictDigest, FailureDigest         string
-	ReportDailyBucketStartMS, ReportDailyBucketEndMS, SecurityEventID  int64
+	ReportDailyBucketStartMS, ReportDailyBucketEndMS                   int64
+	SecurityEventID                                                    string
 	AttemptNo, Generation                                              int
 }
 
@@ -178,6 +182,7 @@ type EmitInterruptCmd struct {
 	AttemptNo                       *int
 	Reason                          InterruptReason
 	FailureReviewVariant            FailureReviewVariant
+	FailureReviewRetryKind          FailureReviewRetryKind
 	Facts                           map[string]string
 	Generation                      InterruptGeneration
 	GatePhase                       GatePhase
@@ -269,12 +274,12 @@ func validateFailureReviewVariant(cmd EmitInterruptCmd) error {
 	}
 	switch cmd.FailureReviewVariant {
 	case FailureReviewAttempt:
-		if cmd.AttemptNo == nil || *cmd.AttemptNo < 1 || cmd.Generation.AttemptNo != *cmd.AttemptNo || cmd.Generation.Generation < 1 || cmd.Generation.ReportDailyBucketStartMS != 0 || cmd.Generation.ReportDailyBucketEndMS != 0 || cmd.Generation.SecurityEventID != 0 || facts["failure_class"] == "" || facts["failure_class"] == "report_interrupt_quota_exhausted" || facts["recommended_action"] == "" || facts["failure_evidence_ref"] == "" {
+		if cmd.AttemptNo == nil || *cmd.AttemptNo < 1 || cmd.Generation.AttemptNo != *cmd.AttemptNo || cmd.Generation.Generation < 1 || cmd.Generation.ReportDailyBucketStartMS != 0 || cmd.Generation.ReportDailyBucketEndMS != 0 || cmd.Generation.SecurityEventID != "" || facts["failure_class"] == "" || facts["failure_class"] == "report_interrupt_quota_exhausted" || facts["recommended_action"] == "" || facts["failure_evidence_ref"] == "" || (cmd.FailureReviewRetryKind != "" && cmd.FailureReviewRetryKind != FailureReviewNewAttempt && cmd.FailureReviewRetryKind != FailureReviewGateRecheck) {
 			return fmt.Errorf("%w: invalid failure_review attempt variant", ErrInterruptRejected)
 		}
 	case FailureReviewReportQuota:
 		quotaDigest := sha256.Sum256([]byte(fmt.Sprintf(`{"daily_bucket_end_ms":%d,"daily_bucket_start_ms":%d,"failure_class":"report_interrupt_quota_exhausted","recommended_action":"hold","run_id":%q}`, cmd.Generation.ReportDailyBucketEndMS, cmd.Generation.ReportDailyBucketStartMS, cmd.RunID)))
-		if cmd.AttemptNo != nil || cmd.Generation.AttemptNo != 0 || cmd.Generation.Generation != 0 || cmd.Generation.ReportDailyBucketStartMS <= 0 || cmd.Generation.ReportDailyBucketEndMS <= cmd.Generation.ReportDailyBucketStartMS || cmd.Generation.SecurityEventID <= 0 || cmd.Generation.FailureDigest != hex.EncodeToString(quotaDigest[:]) || facts["failure_class"] != "report_interrupt_quota_exhausted" || facts["recommended_action"] != "hold" || facts["failure_evidence_ref"] != fmt.Sprintf("sift://event/%032x", cmd.Generation.SecurityEventID) {
+		if cmd.AttemptNo != nil || cmd.Generation.AttemptNo != 0 || cmd.Generation.Generation != 0 || cmd.Generation.ReportDailyBucketStartMS <= 0 || cmd.Generation.ReportDailyBucketEndMS <= cmd.Generation.ReportDailyBucketStartMS || len(cmd.Generation.SecurityEventID) != 32 || !lowerHex(cmd.Generation.SecurityEventID) || cmd.Generation.FailureDigest != hex.EncodeToString(quotaDigest[:]) || facts["failure_class"] != "report_interrupt_quota_exhausted" || facts["recommended_action"] != "hold" || facts["failure_evidence_ref"] != "sift://event/"+cmd.Generation.SecurityEventID {
 			return fmt.Errorf("%w: invalid failure_review report quota variant", ErrInterruptRejected)
 		}
 	case "":
@@ -540,7 +545,8 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 		}
 		// The quota arm is accepted only for the exhaustion fact that created it.
 		// The caller cannot manufacture a bucket or security-event identity.
-		var endMS, eventID int64
+		var endMS int64
+		var eventID string
 		var digest, generationKey, source string
 		if err := tx.QueryRowContext(ctx, `SELECT daily_bucket_end_ms,security_event_id,failure_digest,generation_key FROM report_quota_exhaustions WHERE run_id=? AND daily_bucket_start_ms=?`, cmd.RunID, cmd.Generation.ReportDailyBucketStartMS).Scan(&endMS, &eventID, &digest, &generationKey); err != nil {
 			return Interrupt{}, fmt.Errorf("%w: report quota exhaustion binding: %v", ErrInterruptRejected, err)
@@ -548,8 +554,26 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 		if endMS != cmd.Generation.ReportDailyBucketEndMS || eventID != cmd.Generation.SecurityEventID || digest != cmd.Generation.FailureDigest || generationKey != key {
 			return Interrupt{}, fmt.Errorf("%w: report quota exhaustion binding mismatch", ErrInterruptRejected)
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT source FROM events WHERE id=?`, fmt.Sprintf("%d", eventID)).Scan(&source); err != nil || source != string(SourceSystem) {
+		if err := tx.QueryRowContext(ctx, `SELECT source FROM events WHERE id=?`, eventID).Scan(&source); err != nil || source != string(SourceSystem) {
 			return Interrupt{}, fmt.Errorf("%w: report quota security event binding", ErrInterruptRejected)
+		}
+	} else if cmd.FailureReviewVariant == FailureReviewAttempt {
+		var phase string
+		var exitCode sql.NullInt64
+		var signal sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT phase,result_exit_code,result_signal FROM attempts WHERE run_id=? AND attempt_no=? AND generation=?`, cmd.RunID, *cmd.AttemptNo, cmd.Generation.Generation).Scan(&phase, &exitCode, &signal); err != nil {
+			return Interrupt{}, fmt.Errorf("%w: failure_review attempt binding: %v", ErrInterruptRejected, err)
+		}
+		if cmd.FailureReviewRetryKind != FailureReviewGateRecheck && (phase != "finished" || (!exitCode.Valid || exitCode.Int64 == 0) && !signal.Valid) {
+			return Interrupt{}, fmt.Errorf("%w: failure_review requires failed attempt generation", ErrInterruptRejected)
+		}
+		if RunStatus(status) != RunWaitingHuman {
+			if !legalTransition(RunStatus(status), RunWaitingHuman) {
+				return Interrupt{}, fmt.Errorf("%w: %s cannot wait for human", ErrInterruptRejected, status)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='waiting_human',version=version+1,updated_at_ms=? WHERE id=? AND version=?`, cmd.NowMS, cmd.RunID, version); err != nil {
+				return Interrupt{}, err
+			}
 		}
 	} else if RunStatus(status) != RunWaitingHuman {
 		if !legalTransition(RunStatus(status), RunWaitingHuman) {
@@ -690,12 +714,19 @@ func interruptEffectBinding(cmd EmitInterruptCmd) ([]byte, string) {
 		return b, "failure_review"
 	}
 	if cmd.Reason == InterruptFailureReview {
-		b, _ := json.Marshal(map[string]any{
-			"arm": "failure_review_attempt", "run_id": cmd.RunID,
-			"attempt_no": *cmd.AttemptNo, "generation": cmd.Generation.Generation,
-			"retry_kind": "new_attempt", "change_id": nil, "head_sha": nil,
-			"terminal_attempt_no": *cmd.AttemptNo, "terminal_generation": cmd.Generation.Generation,
-		})
+		retryKind := cmd.FailureReviewRetryKind
+		if retryKind == "" {
+			retryKind = FailureReviewNewAttempt
+		}
+		fields := map[string]any{"arm": "failure_review_attempt", "run_id": cmd.RunID, "attempt_no": *cmd.AttemptNo, "generation": cmd.Generation.Generation, "retry_kind": retryKind}
+		if retryKind == FailureReviewGateRecheck {
+			fields["change_id"], fields["head_sha"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA
+			fields["terminal_attempt_no"], fields["terminal_generation"] = nil, nil
+		} else {
+			fields["change_id"], fields["head_sha"] = nil, nil
+			fields["terminal_attempt_no"], fields["terminal_generation"] = *cmd.AttemptNo, cmd.Generation.Generation
+		}
+		b, _ := json.Marshal(fields)
 		return b, "failure_review"
 	}
 	fields := map[string]any{"arm": string(cmd.Reason), "run_id": cmd.RunID}

@@ -143,6 +143,50 @@ func TestEvaluateRecordAndEmitInterruptCommitsGateShadowAndHITLTogether(t *testi
 	}
 }
 
+func TestGateT4NormalAndInvalidFallbackPreserveEmissionIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantBrief string
+		out             storage.InterruptT4Output
+	}{
+		{"normal", "结论：required；要点：required；建议：批准审阅（approve）", storage.InterruptT4Output{Headline: "变更等待代码审阅", Conclusion: "required", KeyPoints: []string{"required"}, Options: []string{"approve", "reject", "hold"}, RecommendedOptionID: "approve"}},
+		{"invalid", "事实：change_ref=https://forge.example/change/42；head_sha=0123456789012345678901234567890123456789；review_requirement=required；recommended_action=approve；diff_ref=https://forge.example/change/42/diff。建议：approve", storage.InterruptT4Output{Headline: "变更等待代码审阅", Conclusion: "required", KeyPoints: []string{"required"}, Options: []string{"reject", "approve", "hold"}, RecommendedOptionID: "approve"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			const now = int64(1_700_000_000_000)
+			db, err := storage.Open(ctx, storage.OpenConfig{Path: filepath.Join(t.TempDir(), "sift.db"), BinaryVersion: "test", Now: time.UnixMilli(now)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := db.SeedProjectForTest(ctx, "cfg", "p", now); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SeedForgeRunForTest(ctx, "r", "p", "cfg", "42", now); err != nil {
+				t.Fatal(err)
+			}
+			db.SetInterruptT4(func(context.Context, storage.InterruptT4Input) (storage.InterruptT4Output, error) { return tc.out, nil })
+			in := input(t)
+			in.Risk.Source = Source{Kind: "fallback", Version: "T3/fallback/v1", Reason: "provider_disabled"}
+			in.EffectivePolicy.ReviewPolicy = config.ReviewPolicyAlways
+			in.Change.ReviewState = "not_approved"
+			policyJSON, err := canonical(in.EffectivePolicy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			in.EffectivePolicyHash = digest(policyJSON)
+			cmd := storage.EmitInterruptCmd{RunID: "r", ExpectedRunVersion: 1, Reason: storage.InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/42", "head_sha": in.Change.HeadSHA, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/42/diff"}, Generation: storage.InterruptGeneration{ChangeID: "42", HeadSHA: in.Change.HeadSHA}, GatePhase: storage.GateReview, GuardrailLevel: storage.GuardrailNone, AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 5, storage.SeverityHigh: 5}, DayTimezone: "UTC", Source: storage.SourceSystem, NowMS: now}
+			_, record, got, err := EvaluateRecordAndEmitInterrupt(ctx, db, in, false, []byte(`{"schema_version":1}`), cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Brief != tc.wantBrief || got.Severity != storage.SeverityNormal || got.GenerationKey == "" || record.CalibrationID == "" {
+				t.Fatalf("record=%#v interrupt=%#v", record, got)
+			}
+		})
+	}
+}
+
 func TestSoftExemptionIsBoundToPaths(t *testing.T) {
 	in := input(t)
 	in.EffectivePolicy.ProtectedPaths.Soft = []string{"docs/**"} // policy changes require frozen hash refresh
