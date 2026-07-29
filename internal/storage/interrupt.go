@@ -701,7 +701,7 @@ func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, befor
 	binding, bindingReason := interruptEffectBinding(cmd)
 	bindingDigest := sha256.Sum256(binding)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) VALUES(?,?,1,?,?,?)`, in.ID, bindingReason, string(binding), hex.EncodeToString(bindingDigest[:]), cmd.NowMS); err != nil {
-		return Interrupt{}, err
+		return Interrupt{}, fmt.Errorf("%w: interrupt effect binding: %v", ErrInterruptRejected, err)
 	}
 	eventID := newID()
 	eventPayload, _ := json.Marshal(map[string]any{"interrupt_id": in.ID, "reason": in.Reason, "generation_key": in.GenerationKey})

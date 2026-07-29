@@ -298,7 +298,7 @@ func TestSchemaInventory(t *testing.T) {
 		"config_snapshots", "daemon_boots", "projects", "project_hook_baselines",
 		"task_spec_snapshots", "runs", "attempts", "attempt_claims", "attempt_probes",
 		"interrupts", "interrupt_deliveries",
-		"events", "forge_cursors", "forge_reply_state", "forge_event_receipts", "report_receipts", "report_quota_exhaustions", "interrupt_command_effect_bindings",
+		"events", "forge_cursors", "forge_reply_state", "forge_event_receipts", "report_receipts", "report_quota_exhaustions", "report_emission_diagnostics", "interrupt_command_effect_bindings",
 		"intake_items", "intake_assessments",
 		"outbox_operations", "outbox_attempts", "outbox_attempt_results",
 		"budget_counters", "rate_limit_buckets", "budget_entries",

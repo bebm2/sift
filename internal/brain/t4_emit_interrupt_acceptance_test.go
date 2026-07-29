@@ -84,14 +84,19 @@ func TestEmitInterruptT4ProductionInvalidOutputFallsBackToPersistedBytes(t *test
 		t.Fatal(err)
 	}
 	var record struct {
-		Status         string          `json:"status"`
-		FallbackReason string          `json:"fallback_reason"`
-		Validated      json.RawMessage `json:"validated_output"`
+		RecordID             string          `json:"record_id"`
+		Touchpoint           string          `json:"touchpoint"`
+		PromptVersion        string          `json:"prompt_version"`
+		OutputSchemaVersion  int             `json:"output_schema_version"`
+		Status               string          `json:"status"`
+		FallbackReason       string          `json:"fallback_reason"`
+		Validated            json.RawMessage `json:"validated_output"`
+		GateInputSnapshotIDs []string        `json:"gate_input_snapshot_ids"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(trace.Bytes()), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record.Status != "fallback" || record.FallbackReason == "" || string(record.Validated) != "null" {
+	if record.RecordID == "" || record.Touchpoint != "T4" || !strings.HasPrefix(record.PromptVersion, "T4/v1/") || record.OutputSchemaVersion != 1 || record.Status != "fallback" || record.FallbackReason != "invalid_output" || string(record.Validated) != "null" || len(record.GateInputSnapshotIDs) != 0 {
 		t.Fatalf("fallback trace = %#v", record)
 	}
 }
@@ -119,13 +124,17 @@ func TestEmitInterruptQuotaT4ProductionInvalidOutputFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	var record struct {
-		Status         string `json:"status"`
-		FallbackReason string `json:"fallback_reason"`
+		RecordID            string `json:"record_id"`
+		Touchpoint          string `json:"touchpoint"`
+		PromptVersion       string `json:"prompt_version"`
+		OutputSchemaVersion int    `json:"output_schema_version"`
+		Status              string `json:"status"`
+		FallbackReason      string `json:"fallback_reason"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(trace.Bytes()), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record.Status != "fallback" || record.FallbackReason == "" {
+	if record.RecordID == "" || record.Touchpoint != "T4" || !strings.HasPrefix(record.PromptVersion, "T4/v1/") || record.OutputSchemaVersion != 1 || record.Status != "fallback" || record.FallbackReason != "invalid_output" {
 		t.Fatalf("quota fallback trace = %#v", record)
 	}
 }
