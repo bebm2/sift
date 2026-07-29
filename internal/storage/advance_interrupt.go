@@ -130,6 +130,9 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 			return false, err
 		}
 	}
+	if err := excludeStaleBatchMembersTx(ctx, tx, cmd.InterruptID, cmd.NowMS); err != nil {
+		return false, err
+	}
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.escalated")
 }
 
@@ -164,7 +167,24 @@ func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceI
 	if err != nil {
 		return false, err
 	}
+	if err := excludeStaleBatchMembersTx(ctx, tx, cmd.InterruptID, cmd.NowMS); err != nil {
+		return false, err
+	}
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.expired_auto_reject")
+}
+
+func excludeStaleBatchMembersTx(ctx context.Context, tx *sql.Tx, interruptID string, nowMS int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE attention_batch_members AS m
+		SET excluded_at_ms=?
+		WHERE m.interrupt_id=? AND m.excluded_at_ms IS NULL
+			AND EXISTS (SELECT 1 FROM attention_batches b WHERE b.id=m.batch_id AND b.state='collecting')
+			AND NOT EXISTS (
+				SELECT 1 FROM attention_batch_member_authority a
+				JOIN interrupts i ON i.id=m.interrupt_id
+				WHERE a.batch_id=m.batch_id AND a.interrupt_id=m.interrupt_id
+					AND i.status='open' AND i.version=a.interrupt_version AND i.nonce=a.nonce
+			)`, nowMS, interruptID)
+	return err
 }
 
 // MergeConflictDigest identifies the exact durable conflicting Change observation.

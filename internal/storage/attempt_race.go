@@ -181,6 +181,14 @@ func nullableString(v string) any {
 }
 
 func closeStartupStallTx(ctx context.Context, tx *sql.Tx, runID string, attemptNo int, reason string, nowMS int64) error {
-	_, err := tx.ExecContext(ctx, `UPDATE interrupts SET status='closed',close_reason=?,closed_at_ms=?,updated_at_ms=? WHERE id=(SELECT id FROM interrupts WHERE run_id=? AND attempt_no=? AND reason='startup_stall' AND status='open' ORDER BY created_at_ms DESC LIMIT 1)`, reason, nowMS, nowMS, runID, attemptNo)
-	return err
+	var interruptID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM interrupts WHERE run_id=? AND attempt_no=? AND reason='startup_stall' AND status='open' ORDER BY created_at_ms DESC LIMIT 1`, runID, attemptNo).Scan(&interruptID); err == sql.ErrNoRows {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET status='closed',close_reason=?,closed_at_ms=?,updated_at_ms=? WHERE id=? AND status='open'`, reason, nowMS, nowMS, interruptID); err != nil {
+		return err
+	}
+	return excludeStaleBatchMembersTx(ctx, tx, interruptID, nowMS)
 }
