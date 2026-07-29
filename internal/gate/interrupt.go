@@ -26,6 +26,7 @@ func interruptCommand(c storage.GateCandidate, in Input, v Verdict, attention co
 	default:
 		cmd.Reason = storage.InterruptFailureReview
 		cmd.FailureReviewVariant = storage.FailureReviewAttempt
+		cmd.FailureReviewRetryKind = storage.FailureReviewGateRecheck
 		cmd.AttemptNo = &c.AttemptNo
 		cmd.Generation.AttemptNo, cmd.Generation.Generation = c.AttemptNo, c.Generation
 		digest := sha256.Sum256([]byte(in.Change.HeadSHA + "\x00" + in.Checks.ExternalURL + "\x00" + v.Code))

@@ -217,11 +217,14 @@ func TestEmitInterruptFailureReviewVariantsUseClosedSourceAndExactGoldens(t *tes
 		}
 		insertTaskSpec(t, db, "spec", "run-01", 1)
 		insertAttempt(t, db, "run-01", 1, "spec")
-		// Report-quota failure_review is bound to this durable security fact.
-		if _, err := db.db.Exec(`INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES('1','run-01','project','security.report_quota_exhausted','system',1,'{}',1754000000000,1754000000000)`); err != nil {
+		if _, err := db.db.Exec(`UPDATE attempts SET phase='finished',result_exit_code=1,result_digest='failed',result_observed_at_ms=?,finished_at_ms=? WHERE run_id='run-01' AND attempt_no=1`, testNow, testNow); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.db.Exec(`INSERT INTO report_quota_exhaustions(run_id,daily_bucket_start_ms,daily_bucket_end_ms,security_event_id,failure_digest,generation_key,created_at_ms) VALUES('run-01',1754000000000,1754086400000,'1','59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509','cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083',1754000000000)`); err != nil {
+		// Report-quota failure_review is bound to this durable security fact.
+		if _, err := db.db.Exec(`INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES('0123456789abcdef0123456789abcdef','run-01','project','security.report_quota_exhausted','system',1,'{}',1754000000000,1754000000000)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.db.Exec(`INSERT INTO report_quota_exhaustions(run_id,daily_bucket_start_ms,daily_bucket_end_ms,security_event_id,failure_digest,generation_key,created_at_ms) VALUES('run-01',1754000000000,1754086400000,'0123456789abcdef0123456789abcdef','59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509','cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083',1754000000000)`); err != nil {
 			t.Fatal(err)
 		}
 		return db
@@ -231,7 +234,7 @@ func TestEmitInterruptFailureReviewVariantsUseClosedSourceAndExactGoldens(t *tes
 		return EmitInterruptCmd{RunID: "run-01", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, Facts: map[string]string{"failure_class": "CI", "failure_evidence_ref": "/r/ci", "recommended_action": "retry"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
 	}
 	quotaCmd := func() EmitInterruptCmd {
-		return EmitInterruptCmd{RunID: "run-01", ExpectedRunVersion: 1, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewReportQuota, Facts: map[string]string{"failure_class": "report_interrupt_quota_exhausted", "failure_evidence_ref": "sift://event/00000000000000000000000000000001", "recommended_action": "hold"}, Generation: InterruptGeneration{ReportDailyBucketStartMS: 1754000000000, ReportDailyBucketEndMS: 1754086400000, SecurityEventID: 1, FailureDigest: "59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
+		return EmitInterruptCmd{RunID: "run-01", ExpectedRunVersion: 1, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewReportQuota, Facts: map[string]string{"failure_class": "report_interrupt_quota_exhausted", "failure_evidence_ref": "sift://event/0123456789abcdef0123456789abcdef", "recommended_action": "hold"}, Generation: InterruptGeneration{ReportDailyBucketStartMS: 1754000000000, ReportDailyBucketEndMS: 1754086400000, SecurityEventID: "0123456789abcdef0123456789abcdef", FailureDigest: "59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
 	}
 
 	db := newDB(t)
@@ -285,7 +288,7 @@ func TestEmitInterruptFailureReviewVariantsUseClosedSourceAndExactGoldens(t *tes
 		}
 		db.SetInterruptT4(func(context.Context, InterruptT4Input) (InterruptT4Output, error) { return out, nil })
 		fallback, err := db.EmitInterrupt(ctx, quotaCmd())
-		if err != nil || fallback.Brief != "事实：failure_class=report\\_interrupt\\_quota\\_exhausted；failure_evidence_ref=sift://event/00000000000000000000000000000001；recommended_action=hold。建议：hold" || fallback.Severity != SeverityHigh || fallback.GenerationKey != "cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083" || strings.Join([]string{fallback.Options[0].ID, fallback.Options[1].ID}, ",") != "reject,hold" {
+		if err != nil || fallback.Brief != "事实：failure_class=report\\_interrupt\\_quota\\_exhausted；failure_evidence_ref=sift://event/0123456789abcdef0123456789abcdef；recommended_action=hold。建议：hold" || fallback.Severity != SeverityHigh || fallback.GenerationKey != "cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083" || strings.Join([]string{fallback.Options[0].ID, fallback.Options[1].ID}, ",") != "reject,hold" {
 			t.Fatalf("quota invalid T4 fallback=%#v err=%v", fallback, err)
 		}
 	}
@@ -304,6 +307,51 @@ func TestEmitInterruptFailureReviewVariantsUseClosedSourceAndExactGoldens(t *tes
 				t.Fatal("cross-contaminated variant accepted")
 			}
 		})
+	}
+}
+
+func TestEmitInterruptFailureReviewRequiresFailedBoundGeneration(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	insertTaskSpec(t, db, "spec", "run", 1)
+	insertAttempt(t, db, "run", 1, "spec")
+	attempt := 1
+	_, err := db.EmitInterrupt(ctx, EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, Facts: map[string]string{"failure_class": "CI", "failure_evidence_ref": "/r/ci", "recommended_action": "retry"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow})
+	if err == nil || !strings.Contains(err.Error(), "requires failed attempt generation") {
+		t.Fatalf("error = %v", err)
+	}
+	assertCount(t, db, "interrupts", 0)
+	assertCount(t, db, "interrupt_command_effect_bindings", 0)
+}
+
+func TestRecordReportQuotaExhaustionUsesSystemEventIdentity(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.Exec(`UPDATE runs SET status='running' WHERE id='run'`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.RecordReportQuotaExhaustion(ctx, ReportQuotaExhaustionCmd{RunID: "run", ExpectedRunVersion: 1, DailyBucketStartMS: 1754000000000, DailyBucketEndMS: 1754086400000, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", NowMS: testNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eventID, source, ref string
+	if err := db.db.QueryRow(`SELECT q.security_event_id,e.source,i.brief_markdown FROM report_quota_exhaustions q JOIN events e ON e.id=q.security_event_id JOIN interrupts i ON i.generation_key=q.generation_key`).Scan(&eventID, &source, &ref); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID == "" || len(eventID) != 32 || source != "system" || !strings.Contains(ref, "sift://event/"+eventID) {
+		t.Fatalf("interrupt=%#v event=%q source=%q brief=%q", got, eventID, source, ref)
 	}
 }
 
