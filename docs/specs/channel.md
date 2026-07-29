@@ -1,12 +1,12 @@
 ---
-status: draft
+status: active
 created: 2026-07-29
 summary: 首个通知 Channel、投递标识与 Forge 失败兜底契约
 ---
 
 # Channel 规格
 
-本文冻结 V0 首个通知 Channel 和推送失败兜底的字段及行为。它是实现契约，不表示 Channel 已实现，也不把本 draft 转为 `active`。字段权威分别在 [`config.md` §3.7.1](config.md)、[`storage.md` §6.2–§6.6](storage.md) 和 [`outbox.md` §10](outbox.md)；本文只规定 Channel 的边界和跨规格语义。
+本文冻结 V0 首个通知 Channel 和推送失败兜底的字段及行为。它是实现契约；规格为 `active` 仅表示字段评审已完成，不表示 Channel 已实现。字段评审结论见 [第三次定向复审 PASS WITH NOTES](../reviews/2026-07-29-m5-channel-field-rereview-3-pi-gpt-5.6-sol.md)；其 outbox ASCII 图缺 terminal reclaim 分支的非阻断注记不改变本规格的 terminal 语义。字段权威分别在 [`config.md` §3.7.1](config.md)、[`storage.md` §6.2–§6.6](storage.md) 和 [`outbox.md` §10](outbox.md)；本文只规定 Channel 的边界和跨规格语义。
 
 ## 1. V0 选择、目标与适配层边界
 
