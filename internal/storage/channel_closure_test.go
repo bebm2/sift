@@ -58,6 +58,45 @@ func TestMemberedBatchCannotBeRetargeted(t *testing.T) {
 	}
 }
 
+func TestLegacyDailyBatchWithNullCriticalLimitsCanBeReopened(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	at := int64(testNow + 1)
+	cmd := t6Command(testNow)
+	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
+	cmd.Channels = []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"visual"}}}
+	cmd.BatchAtMS = &at
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch, nonce, snapshot, zone, summary string
+	var version int64
+	if err := db.db.QueryRowContext(ctx, `SELECT m.batch_id,i.nonce,i.channel_snapshot_json,i.day_timezone,i.daily_summary_at,i.version FROM attention_batch_members m JOIN interrupts i ON i.id=m.interrupt_id WHERE m.interrupt_id=?`, in.ID).Scan(&batch, &nonce, &snapshot, &zone, &summary, &version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batches SET critical_window_ms=NULL,critical_total_limit=NULL,critical_per_run_limit=NULL WHERE id=?`, batch); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := addDailyBatchMemberTx(ctx, tx, in.ID, version, nonce, testNow+2, "ops", snapshot, zone, summary); err != nil {
+		tx.Rollback()
+		t.Fatalf("reopen legacy daily batch: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
