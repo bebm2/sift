@@ -127,11 +127,11 @@ func insertInterrupt(t *testing.T, db *DB, id, runID, entryID string) {
 		(id, run_id, attempt_no, generation_key, reason, severity, headline, brief_markdown,
 		 options_json, min_modality, links_json, nonce, version, status, dispatch_state,
 		 expires_at_ms, on_expire, escalation_count, max_escalations, close_reason, closed_at_ms,
-		 charged_budget_entry_id, created_at_ms, updated_at_ms)
+		 charged_budget_entry_id, created_at_ms, updated_at_ms, nonce_issued_at_ms)
 		VALUES (?, ?, NULL, ?, 'code_review', 'normal', 'review change', 'brief',
 		 '[{"id":"approve"}]', 'visual', '[]', 'nonce-1', 1, 'open', 'ready',
-		 ?, 'hold', 0, 3, NULL, NULL, ?, ?, ?)`,
-		id, runID, "gk-"+id, testNow+3_600_000, entryID, testNow, testNow)
+		 ?, 'hold', 0, 3, NULL, NULL, ?, ?, ?, ?)`,
+		id, runID, "gk-"+id, testNow+3_600_000, entryID, testNow, testNow, testNow)
 }
 
 func insertInterruptDelivery(t *testing.T, db *DB, id, interruptID, opKey string) {

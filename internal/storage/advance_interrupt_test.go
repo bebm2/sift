@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,34 @@ func TestSupervisorInterruptTickDispatches(t *testing.T) {
 	}
 }
 
+func TestQuotaExhaustionCreatesBatchedInterruptWithoutCharge(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	cmd := t6Command(testNow)
+	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 1}
+	cmd.DailySummaryAt = "09:00"
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	got, err := db.EmitInterrupt(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kind, charge, state string
+	if err := db.db.QueryRow(`SELECT a.kind,COALESCE(a.attention_charge_entry_id,''),i.dispatch_state FROM attention_admissions a JOIN interrupts i ON i.id=a.interrupt_id WHERE a.interrupt_id=?`, got.ID).Scan(&kind, &charge, &state); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "quota_batched" || charge != "" || state != "batched" {
+		t.Fatalf("admission=%s charge=%q state=%s", kind, charge, state)
+	}
+	assertCount(t, db, "budget_entries", 0)
+	assertCount(t, db, "attention_batch_members", 1)
+}
+
 func TestAdvanceInterruptStartupStallAtLimitHoldsRatherThanAutoRejecting(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
@@ -126,5 +155,18 @@ func TestAdvanceInterruptStartupStallAtLimitHoldsRatherThanAutoRejecting(t *test
 	}
 	if status != "open" || held != "max_escalations" {
 		t.Fatalf("startup stall = %s/%s", status, held)
+	}
+}
+
+func TestChannelRendererIncludesCanonicalCommands(t *testing.T) {
+	rendered, commands, err := renderChannelInterrupt("标题", "说明", `[{"label":"log","target":"/log"}]`, `[{"id":"hold","label":"暂缓","effect":"等待","risk":"延迟"}]`, "run-1", "nonce-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 1 || commands[0] != "/sift hold run-1 nonce-1 1h" {
+		t.Fatalf("commands=%q rendered=%q", commands, rendered)
+	}
+	if !strings.Contains(rendered, "log: /log") || !strings.Contains(rendered, commands[0]) {
+		t.Fatalf("incomplete renderer: %q", rendered)
 	}
 }
