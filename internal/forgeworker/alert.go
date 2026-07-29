@@ -21,6 +21,7 @@ type AlertWorker struct {
 	Now      func() time.Time
 	Lease    time.Duration
 	WorkerID string
+	Complete func(context.Context, storage.ClaimedOperation, storage.CompleteOutcome) error
 }
 
 type alertPayload struct {
@@ -56,6 +57,12 @@ func (w *AlertWorker) RunOnce(ctx context.Context) error {
 	}
 	ref := forge.ProjectRef{Kind: forge.Kind(p.ForgeKind), Host: p.ForgeHost, ProjectKey: p.ForgeProjectKey}
 	target := forge.TargetRef{Kind: forge.TargetKind(p.TargetKind), ID: p.TargetID}
+	if target.Kind != forge.TargetIssue && target.Kind != forge.TargetChange {
+		return w.finish(ctx, *c, storage.CompleteOutcome{State: storage.OperationFailed, ErrorClass: storage.ErrorContract, ErrorSummary: "invalid forge alert target", NowMS: now.UnixMilli()})
+	}
+	// An outbox attempt is the replay identity for every evidence lookup and
+	// comment call. Production adapters reject calls without this stable base.
+	ctx = forge.WithChargeKey(ctx, "forge-call:"+c.AttemptID)
 	var comments []forge.Comment
 	if target.Kind == forge.TargetChange {
 		comments, _, err = client.ListChangeComments(ctx, ref, target.ID, "")
@@ -78,13 +85,32 @@ func (w *AlertWorker) RunOnce(ctx context.Context) error {
 	}
 	var ce *forge.ClassifiedError
 	o := storage.CompleteOutcome{State: storage.OperationRetryable, ErrorClass: storage.ErrorTransient, ErrorSummary: "forge alert delivery failed", NowMS: now.UnixMilli(), Backoff: storage.BackoffPolicy{InitialDelayMS: 1000, MaxDelayMS: 60000, Multiplier: 2}}
-	if errors.As(err, &ce) && errors.Is(err, forge.ErrAuthOrCapability) {
-		o.State, o.ErrorClass, o.ErrorSummary = storage.OperationFailed, storage.ErrorAuthCapability, ce.Summary
+	if errors.As(err, &ce) {
+		o.ErrorSummary = ce.Summary
+		switch {
+		case errors.Is(err, forge.ErrAuthOrCapability):
+			o.State, o.ErrorClass = storage.OperationFailed, storage.ErrorAuthCapability
+		case errors.Is(err, forge.ErrContractViolation):
+			o.State, o.ErrorClass = storage.OperationFailed, storage.ErrorContract
+		case errors.Is(err, forge.ErrSemanticConflict):
+			o.State, o.ErrorClass = storage.OperationConflict, storage.ErrorSemanticConflict
+		case errors.Is(err, forge.ErrRateLimited):
+			o.ErrorClass = storage.ErrorRateLimited
+			if !ce.RetryAt.IsZero() {
+				o.RetryAfterMS = ce.RetryAt.Sub(now).Milliseconds()
+				if o.RetryAfterMS < 0 {
+					o.RetryAfterMS = 0
+				}
+			}
+		}
 	}
 	return w.finish(ctx, *c, o)
 }
 
 func (w *AlertWorker) finish(ctx context.Context, c storage.ClaimedOperation, o storage.CompleteOutcome) error {
+	if w.Complete != nil {
+		return w.Complete(ctx, c, o)
+	}
 	if w.DB == nil {
 		return fmt.Errorf("forge alert: database is required")
 	}
