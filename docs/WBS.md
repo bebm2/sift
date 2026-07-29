@@ -126,7 +126,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] `Recommendation → DomainCommand → Transition` 类型隔离；只有 `transition()` 写 Run 状态（`internal/storage/transition.go`）
 - [x] CAS 拒绝过期命令；非法转移报错并记审计事件（`ErrRejectedStale` + `auditIllegalTransition`）
 - [x] transactional outbox、稳定 operation key、提交唤醒与退避框架（`internal/storage/outbox.go` + `wakeOutbox` + `BackoffPolicy`）
-- [x] 三组具名调度器与提交唤醒生产接线：`siftd` 分别驱动 Intake / Supervisor / Outbox；事务提交经 `DB.SetOutboxWakeup` 立即推进 outbox，独立时钟只在 `startSchedulers` 集中创建（#302；`cmd/siftd/main_test.go` 覆盖 production `startSchedulers` 下 `EnqueueOperation` / `EmitInterrupt` 到真实 comment worker，`internal/storage/scheduler_test.go` 覆盖职责隔离与并发 wake）。此前 `scheduler.go` 的 Intake/Reconciler/Supervisor 仅为骨架，不是生产步频证据
+- [x] 三组具名调度器与提交唤醒生产接线：`siftd` 分别驱动 Intake / Supervisor / Outbox；事务提交经 `DB.SetOutboxWakeup` 立即推进 outbox，独立时钟只在 `startSchedulers` 集中创建。`cmd/siftd/main_test.go` 以 production wiring factory 逐边验证 Intake 的未到期 `NextPollAtMS` skip、Supervisor/Outbox 不串联，且 outbox startup sweep drained 后 `EnqueueOperation` / `EmitInterrupt` 经 commit wake 到真实 comment worker；`internal/storage/scheduler_test.go` 只覆盖 storage seam 的并发 wake 收敛，不声称 production 职责/步频证据。此前 `scheduler.go` 的 Intake/Reconciler/Supervisor 仅为骨架，不是生产步频证据
 - [ ] V1 与 V2 核心崩溃注入；当前已实现的状态、Forge Run/receipt、Task Spec、Brain trace/token、outbox claim/completion 写入族均以末写入点 abort 注入验证全有或全无（`TestV1RunTransitionGraphAndCAS`、`TestV2TransitionCrashAtomicity`、`TestV2CurrentWritePortsCrashAtomicity`）；项目健康、Forge 收费、Interrupt 推进与 delivery 在各自写端口实现时补入同一门禁，不得以 schema 代替崩溃证据
 
 #### 1.4 配置与启动生命周期

@@ -82,7 +82,9 @@ func main() {
 	s.SetOperatorAction(func(ctx context.Context, method, runID string, version int64) error {
 		return termination.Operator(ctx, runID, version, method == "ops.retry")
 	})
-	startSchedulers(ctx, db, workers, termination, snapshot.Config.Scheduler)
+	if err := startSchedulers(ctx, db, workers, termination, snapshot.Config.Scheduler); err != nil {
+		fatal(err)
+	}
 	defer db.SetOutboxWakeup(nil)
 	if err := s.Serve(ctx); err != nil {
 		fatal(err)
@@ -104,25 +106,87 @@ func attentionQuota(q config.DailyQuota) map[storage.InterruptSeverity]int {
 // startSchedulers is the sole owner of siftd's three DESIGN §6.1 clocks.
 // Intake's cursor still determines whether a poll is due; the supervisor
 // interval also bounds recovery of persisted outbox retry deadlines.
-func startSchedulers(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, cfg config.Scheduler) {
-	intake := storage.NewIntakeScheduler(reportSchedulerError("intake", workers.IntakeTick))
-	supervisor := storage.NewSupervisorScheduler(reportSchedulerError("supervisor", termination.Timeout))
-	outbox := storage.NewOutboxScheduler(reportSchedulerError("outbox", workers.OutboxTick))
-	db.SetOutboxWakeup(outbox.Wake)
-
-	go runScheduler(ctx, intake, minIntakeInterval(cfg))
-	go runScheduler(ctx, supervisor, cfg.SupervisorInterval)
-	go runScheduler(ctx, outbox, cfg.SupervisorInterval)
+func startSchedulers(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, cfg config.Scheduler) error {
+	return startSchedulersWithFactory(ctx, db, workers, termination, cfg, productionSchedulerFactory{}, schedulerHooks{})
 }
 
 type wakeScheduler interface {
 	Wake()
+	WakeAndWait(context.Context) error
 	Run(context.Context) error
+}
+
+type schedulerFactory interface {
+	Intake(func(context.Context) error) wakeScheduler
+	Supervisor(func(context.Context) error) wakeScheduler
+	Outbox(func(context.Context) error) wakeScheduler
+}
+
+type productionSchedulerFactory struct{}
+
+func (productionSchedulerFactory) Intake(run func(context.Context) error) wakeScheduler {
+	return storage.NewIntakeScheduler(run)
+}
+func (productionSchedulerFactory) Supervisor(run func(context.Context) error) wakeScheduler {
+	return storage.NewSupervisorScheduler(run)
+}
+func (productionSchedulerFactory) Outbox(run func(context.Context) error) wakeScheduler {
+	return storage.NewOutboxScheduler(run)
+}
+
+// schedulerHooks make the production wiring observable in bounded tests. They
+// are deliberately invoked at the same call sites as the real daemon methods.
+type schedulerHooks struct {
+	Intake, Supervisor, Outbox func()
+}
+
+func startSchedulersWithFactory(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, cfg config.Scheduler, factory schedulerFactory, hooks schedulerHooks) error {
+	intake := factory.Intake(reportSchedulerError("intake", func(ctx context.Context) error {
+		if hooks.Intake != nil {
+			hooks.Intake()
+		}
+		return workers.IntakeTick(ctx)
+	}))
+	supervisor := factory.Supervisor(reportSchedulerError("supervisor", func(ctx context.Context) error {
+		if hooks.Supervisor != nil {
+			hooks.Supervisor()
+		}
+		return termination.Timeout(ctx)
+	}))
+	outbox := factory.Outbox(reportSchedulerError("outbox", func(ctx context.Context) error {
+		if hooks.Outbox != nil {
+			hooks.Outbox()
+		}
+		return workers.OutboxTick(ctx)
+	}))
+	db.SetOutboxWakeup(outbox.Wake)
+
+	go runScheduler(ctx, intake, minIntakeInterval(cfg))
+	go runScheduler(ctx, supervisor, cfg.SupervisorInterval)
+	if err := startScheduler(ctx, outbox, cfg.SupervisorInterval); err != nil {
+		return fmt.Errorf("outbox startup recovery: %w", err)
+	}
+	return nil
+}
+
+// startScheduler waits for the first outbox sweep before returning, so a later
+// commit wakeup cannot be mistaken for a delayed startup wake.
+func startScheduler(ctx context.Context, scheduler wakeScheduler, interval time.Duration) error {
+	go func() { _ = scheduler.Run(ctx) }()
+	if err := scheduler.WakeAndWait(ctx); err != nil {
+		return err
+	}
+	go runSchedulerClock(ctx, scheduler, interval)
+	return nil
 }
 
 func runScheduler(ctx context.Context, scheduler wakeScheduler, interval time.Duration) {
 	go func() { _ = scheduler.Run(ctx) }()
-	scheduler.Wake() // startup recovery must not wait for a clock edge.
+	scheduler.Wake()
+	runSchedulerClock(ctx, scheduler, interval)
+}
+
+func runSchedulerClock(ctx context.Context, scheduler wakeScheduler, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

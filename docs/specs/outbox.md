@@ -317,7 +317,7 @@ Payload不含任何 capability 明文：
 
 M1 必须完整实现通用 claim/complete、退避、immutable attempts/results 与 `launch_agent`；其他 kind 的 payload decoder、operation key builder 和 fake adapter 契约在 M1 建立，随对应里程碑启用。不得用一个 `map[string]any` payload 占位后绕过 schema。
 
-生产接线由 `cmd/siftd` 的唯一 `startSchedulers` 负责：提交后的 `DB.SetOutboxWakeup` 唤醒独立 Outbox scheduler，启动和 supervisor 时钟只补偿重启后的 durable retry deadline，不能代替提交唤醒。`cmd/siftd/main_test.go` 通过生产 `startSchedulers` 和真实 `Daemon.OutboxTick` 覆盖 `EnqueueOperation` 与 `EmitInterrupt` 两条写口；`TestOutboxCommitWakeupClaimsWithoutPeriodicTick` 仍是 storage seam 测试，不单独声称 production wiring。
+生产接线由 `cmd/siftd` 的唯一 `startSchedulers` 负责：提交后的 `DB.SetOutboxWakeup` 唤醒独立 Outbox scheduler，启动和 supervisor 时钟只补偿重启后的 durable retry deadline，不能代替提交唤醒。`startSchedulers` 返回前等待 outbox startup sweep 完成，令后续 commit wake 与 startup wake 可判别；`cmd/siftd/main_test.go` 通过 production wiring 和真实 `Daemon.OutboxTick` 覆盖 `EnqueueOperation` 与 `EmitInterrupt` 两条写口，并验证移除 wake hook 后不能由迟到 startup wake 推进。`TestOutboxCommitWakeupClaimsWithoutPeriodicTick` 仍是 storage seam 测试，不单独声称 production wiring。
 
 ## 14. 验收
 
