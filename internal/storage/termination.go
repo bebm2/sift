@@ -32,6 +32,7 @@ type RecordTerminationObservationCmd struct {
 	CriticalWindowMS               int64
 	CriticalTotalLimit             int
 	CriticalPerRunLimit            int
+	Channels                       []InterruptChannel
 }
 
 // RecordTerminationObservation is the persistence half of the shared
@@ -56,7 +57,7 @@ func (d *DB) RecordTerminationObservation(ctx context.Context, cmd RecordTermina
 			RunID: cmd.RunID, ExpectedRunVersion: cmd.ExpectedRunVersion, AttemptNo: &attempt, Reason: InterruptStartupStall,
 			Facts:      map[string]string{"attempt_no": fmt.Sprint(attempt), "generation": fmt.Sprint(cmd.ExpectedGeneration), "diagnostic_cause": cmd.DiagnosticCause, "isolation_consequence": "worktree 保持隔离", "recommended_action": "retry", "attempt_diagnostic_ref": nonEmptyRef(cmd.DiagnosticRef, worktree), "worktree_ref": worktree},
 			Generation: InterruptGeneration{AttemptNo: attempt, Generation: cmd.ExpectedGeneration}, GatePhase: GateNone, GuardrailLevel: GuardrailNone,
-			AttentionDailyQuota: cmd.AttentionDailyQuota, DayTimezone: cmd.DayTimezone, DailySummaryAt: cmd.DailySummaryAt, CriticalWindowMS: cmd.CriticalWindowMS, CriticalTotalLimit: cmd.CriticalTotalLimit, CriticalPerRunLimit: cmd.CriticalPerRunLimit, Source: terminationEventSource(cmd.Source), NowMS: cmd.NowMS,
+			AttentionDailyQuota: cmd.AttentionDailyQuota, DayTimezone: cmd.DayTimezone, DailySummaryAt: cmd.DailySummaryAt, CriticalWindowMS: cmd.CriticalWindowMS, CriticalTotalLimit: cmd.CriticalTotalLimit, CriticalPerRunLimit: cmd.CriticalPerRunLimit, Channels: cmd.Channels, Source: terminationEventSource(cmd.Source), NowMS: cmd.NowMS,
 		})
 		if err != nil {
 			return Run{}, err

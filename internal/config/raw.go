@@ -158,9 +158,11 @@ type RawAttentionReasonDefault struct {
 }
 
 type RawAttentionChannel struct {
-	ID     string `json:"id"`
-	Type   string `json:"type"`
-	Target struct {
+	ID       string `json:"id"`
+	Enabled  *bool  `json:"enabled,omitempty"`
+	Renderer string `json:"renderer"`
+	Type     string `json:"type"`
+	Target   struct {
 		SecretRef string `json:"secret_ref"`
 	} `json:"target"`
 	Capabilities []string `json:"capabilities"`

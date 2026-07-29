@@ -211,8 +211,17 @@ func admitCriticalTx(ctx context.Context, tx *sql.Tx, id string, now int64, sour
 	return kind == "critical_admitted", admission, err
 }
 
+// NextDailySummaryAt returns the next frozen local summary occurrence.
+func NextDailySummaryAt(now int64, zone, clock string) (int64, bool) {
+	return nextSummary(now, zone, clock)
+}
+
 func nextSummary(now int64, zone, clock string) (int64, bool) {
-	loc, err := time.LoadLocation(zone)
+	loc := time.Local
+	var err error
+	if zone != "local" {
+		loc, err = time.LoadLocation(zone)
+	}
 	if err != nil {
 		return 0, false
 	}

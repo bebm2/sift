@@ -34,6 +34,7 @@ type TerminationCoordinator struct {
 	CriticalWindowMS     int64
 	CriticalTotalLimit   int
 	CriticalPerRunLimit  int
+	Channels             []storage.InterruptChannel
 	ControlRoot          string
 }
 
@@ -84,7 +85,7 @@ func (c *TerminationCoordinator) RecoverStartup(ctx context.Context, bootID stri
 					RunID: attempt.RunID, AttemptNo: attempt.AttemptNo,
 					ExpectedRunVersion: attempt.RunVersion, ExpectedGeneration: attempt.Generation,
 					Source: storage.TerminationRecovery, DiagnosticCause: "process_identity_unknown",
-					AttentionDailyQuota: c.AttentionDailyQuota, DayTimezone: c.DayTimezone, DailySummaryAt: c.DailySummaryAt, CriticalWindowMS: c.CriticalWindowMS, CriticalTotalLimit: c.CriticalTotalLimit, CriticalPerRunLimit: c.CriticalPerRunLimit, NowMS: c.nowMS(),
+					AttentionDailyQuota: c.AttentionDailyQuota, DayTimezone: c.DayTimezone, DailySummaryAt: c.DailySummaryAt, CriticalWindowMS: c.CriticalWindowMS, CriticalTotalLimit: c.CriticalTotalLimit, CriticalPerRunLimit: c.CriticalPerRunLimit, Channels: c.Channels, NowMS: c.nowMS(),
 				})
 				if err == storage.ErrRejectedStale {
 					continue
@@ -340,7 +341,7 @@ func (c *TerminationCoordinator) terminate(ctx context.Context, attempt storage.
 	if c.Now != nil {
 		now = c.Now
 	}
-	cmd := storage.RecordTerminationObservationCmd{RunID: attempt.RunID, AttemptNo: attempt.AttemptNo, ExpectedRunVersion: expectedVersion, ExpectedGeneration: attempt.Generation, Source: source, NowMS: now().UnixMilli(), AttentionDailyQuota: c.AttentionDailyQuota, DayTimezone: c.DayTimezone, DailySummaryAt: c.DailySummaryAt, CriticalWindowMS: c.CriticalWindowMS, CriticalTotalLimit: c.CriticalTotalLimit, CriticalPerRunLimit: c.CriticalPerRunLimit}
+	cmd := storage.RecordTerminationObservationCmd{RunID: attempt.RunID, AttemptNo: attempt.AttemptNo, ExpectedRunVersion: expectedVersion, ExpectedGeneration: attempt.Generation, Source: source, NowMS: now().UnixMilli(), AttentionDailyQuota: c.AttentionDailyQuota, DayTimezone: c.DayTimezone, DailySummaryAt: c.DailySummaryAt, CriticalWindowMS: c.CriticalWindowMS, CriticalTotalLimit: c.CriticalTotalLimit, CriticalPerRunLimit: c.CriticalPerRunLimit, Channels: c.Channels}
 	identity := runtimepkg.ProcessIdentity{PID: attempt.WrapperPID, StartedAtMS: attempt.WrapperStartedAtMS, Executable: attempt.WrapperExecutable, PGID: attempt.WrapperPGID, ControlNonceHash: attempt.ControlNonceHash, ControlPath: c.controlPath(attempt)}
 	if identity.PID <= 0 || identity.StartedAtMS <= 0 || identity.Executable == "" || identity.PGID <= 0 || identity.ControlNonceHash == "" {
 		cmd.DiagnosticCause = "process_identity_unknown"

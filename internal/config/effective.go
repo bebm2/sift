@@ -158,6 +158,8 @@ type AttentionReasonDefault struct {
 
 type AttentionChannel struct {
 	ID           string   `json:"id"`
+	Enabled      bool     `json:"enabled"`
+	Renderer     string   `json:"renderer"`
 	Type         string   `json:"type"`
 	TargetRef    string   `json:"target_ref"`
 	Capabilities []string `json:"capabilities"`

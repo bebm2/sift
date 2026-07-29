@@ -36,7 +36,18 @@ CREATE TABLE IF NOT EXISTS channel_failure_episodes (
  consecutive_failures INTEGER NOT NULL CHECK(consecutive_failures>=0),
  state TEXT NOT NULL CHECK(state IN ('open','alerted','ended_delivered','ended_failed')),
  last_error_class TEXT, alert_operation_key TEXT UNIQUE, created_at_ms INTEGER NOT NULL,
- updated_at_ms INTEGER NOT NULL, ended_at_ms INTEGER, PRIMARY KEY(subject_id,generation));`)
+ updated_at_ms INTEGER NOT NULL, ended_at_ms INTEGER, PRIMARY KEY(subject_id,generation));
+CREATE UNIQUE INDEX IF NOT EXISTS attention_batches_identity ON attention_batches(project_id,kind,channel_id,scope,scope_id,forge_kind,forge_host,forge_project_key,target_kind,target_id);
+CREATE INDEX IF NOT EXISTS channel_failure_episodes_state ON channel_failure_episodes(state,updated_at_ms);
+CREATE INDEX IF NOT EXISTS interrupt_deliveries_channel_state ON interrupt_deliveries(surface,state,created_at_ms);
+CREATE TRIGGER IF NOT EXISTS channel_delivery_target_required
+BEFORE INSERT ON interrupt_deliveries
+WHEN NEW.surface='channel' AND NEW.delivery_id IS NOT NULL AND (NEW.channel_id IS NULL OR NEW.channel_snapshot_json IS NULL OR NEW.forge_kind IS NULL OR NEW.forge_host IS NULL OR NEW.forge_project_key IS NULL OR NEW.forge_alert_target_kind IS NULL OR NEW.forge_alert_target_id IS NULL)
+BEGIN SELECT RAISE(ABORT,'channel delivery requires frozen target'); END;
+CREATE TRIGGER IF NOT EXISTS attention_batch_sealed_immutable
+BEFORE UPDATE ON attention_batches
+WHEN OLD.state IN ('sealed','delivered','cancelled') AND (NEW.payload_json IS NOT OLD.payload_json OR NEW.payload_digest IS NOT OLD.payload_digest OR NEW.operation_key IS NOT OLD.operation_key OR NEW.delivery_id IS NOT OLD.delivery_id)
+BEGIN SELECT RAISE(ABORT,'sealed attention batch is immutable'); END;`)
 	if err != nil {
 		return err
 	}
@@ -85,36 +96,36 @@ func channelSubject(p channelPayload) string { return p.DeliveryID }
 // ChannelDiagnostics reads the durable Channel projections used by operator
 // views. It intentionally does not infer state from in-memory workers.
 func (d *DB) ChannelDiagnostics(ctx context.Context) ([]map[string]any, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(o.state,'') FROM interrupt_deliveries d LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations o ON o.operation_key=e.alert_operation_key WHERE d.surface='channel' ORDER BY d.created_at_ms,d.delivery_id`)
+	rows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,d.channel_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(o.next_attempt_at_ms,0),COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(o.state,'') FROM interrupt_deliveries d LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations o ON o.operation_key=e.alert_operation_key WHERE d.surface='channel' ORDER BY d.created_at_ms,d.delivery_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, key, state, last string
-		var attempts, created, failures int64
+		var id, channelID, key, state, last string
+		var attempts, created, nextRetry, failures int64
 		var episode, errorClass, alertKey, alertState string
-		if err := rows.Scan(&id, &key, &state, &attempts, &last, &created, &failures, &episode, &errorClass, &alertKey, &alertState); err != nil {
+		if err := rows.Scan(&id, &channelID, &key, &state, &attempts, &last, &created, &nextRetry, &failures, &episode, &errorClass, &alertKey, &alertState); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"delivery_id": id, "operation_key": key, "state": state, "attempt_count": attempts, "last_error": last, "created_at_ms": created, "consecutive_failures": failures, "episode_state": episode, "last_error_class": errorClass, "alert_operation_key": alertKey, "alert_state": alertState, "generated_not_delivered": state != "delivered"})
+		out = append(out, map[string]any{"delivery_id": id, "channel_id": channelID, "operation_key": key, "state": state, "attempt_count": attempts, "last_error": last, "created_at_ms": created, "next_attempt_at_ms": nextRetry, "consecutive_failures": failures, "episode_state": episode, "last_error_class": errorClass, "alert_operation_key": alertKey, "alert_state": alertState, "generated_not_delivered": state != "delivered"})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	batchRows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(o.state,'') FROM batch_deliveries d LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations o ON o.operation_key=e.alert_operation_key ORDER BY d.created_at_ms,d.delivery_id`)
+	batchRows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,b.channel_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(o.next_attempt_at_ms,0),COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(o.state,'') FROM batch_deliveries d JOIN attention_batches b ON b.id=d.batch_id LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations o ON o.operation_key=e.alert_operation_key ORDER BY d.created_at_ms,d.delivery_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer batchRows.Close()
 	for batchRows.Next() {
-		var id, key, state, last, episode, errorClass, alertKey, alertState string
-		var attempts, created, failures int64
-		if err := batchRows.Scan(&id, &key, &state, &attempts, &last, &created, &failures, &episode, &errorClass, &alertKey, &alertState); err != nil {
+		var id, channelID, key, state, last, episode, errorClass, alertKey, alertState string
+		var attempts, created, nextRetry, failures int64
+		if err := batchRows.Scan(&id, &channelID, &key, &state, &attempts, &last, &created, &nextRetry, &failures, &episode, &errorClass, &alertKey, &alertState); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"delivery_id": id, "operation_key": key, "state": state, "attempt_count": attempts, "last_error": last, "created_at_ms": created, "consecutive_failures": failures, "episode_state": episode, "last_error_class": errorClass, "alert_operation_key": alertKey, "alert_state": alertState, "generated_not_delivered": state != "delivered"})
+		out = append(out, map[string]any{"delivery_id": id, "channel_id": channelID, "operation_key": key, "state": state, "attempt_count": attempts, "last_error": last, "created_at_ms": created, "next_attempt_at_ms": nextRetry, "consecutive_failures": failures, "episode_state": episode, "last_error_class": errorClass, "alert_operation_key": alertKey, "alert_state": alertState, "generated_not_delivered": state != "delivered"})
 	}
 	return out, batchRows.Err()
 }
@@ -173,15 +184,22 @@ func applyChannelOutcomeTx(ctx context.Context, tx *sql.Tx, claim ClaimedOperati
 			// deterministic id makes completion/replay idempotent.
 			var members []struct{ ID, RunID string }
 			rows, qerr := tx.QueryContext(ctx, `SELECT m.interrupt_id,i.run_id FROM attention_batch_members m JOIN interrupts i ON i.id=m.interrupt_id WHERE m.batch_id=? AND m.excluded_at_ms IS NULL`, p.BatchID)
-			if qerr == nil {
-				for rows.Next() {
-					var m struct{ ID, RunID string }
-					if rows.Scan(&m.ID, &m.RunID) == nil {
-						members = append(members, m)
-					}
-				}
-				rows.Close()
+			if qerr != nil {
+				return qerr
 			}
+			for rows.Next() {
+				var m struct{ ID, RunID string }
+				if err := rows.Scan(&m.ID, &m.RunID); err != nil {
+					rows.Close()
+					return err
+				}
+				members = append(members, m)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
 			for _, m := range members {
 				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ledger_entries(id,run_id,interrupt_id,entry_kind,features_schema_version,features_json,created_at_ms) VALUES(?,?,?,'attention_delivery',1,?,?)`, "channel_delivery:"+subject+":"+m.ID, m.RunID, m.ID, `{"surface":"channel","delivery_state":"delivered"}`, outcome.NowMS)
 				if err != nil {
@@ -287,7 +305,11 @@ func (d *DB) EnqueueChannelPublish(ctx context.Context, op Operation, deliveryID
 		if json.Unmarshal(p.Channel, &channel) != nil || channel.ID == "" {
 			return fmt.Errorf("storage: invalid channel snapshot")
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries(id,delivery_id,interrupt_id,surface,channel_id,channel_snapshot_json,interrupt_version,nonce,escalation_no,priority,operation_key,state,attempt_count,created_at_ms) VALUES(?,?,?,'channel',?,?,?,?,?,'normal',?,'pending',0,?)`, newID(), deliveryID, p.InterruptID, channel.ID, string(p.Channel), p.InterruptVersion, p.Nonce, p.EscalationNo, op.Key, nowMS)
+		var forgeKind, forgeHost, forgeProject, targetKind, targetID string
+		if err := tx.QueryRowContext(ctx, `SELECT r.forge_kind,r.forge_host,r.forge_project_key,CASE WHEN r.issue_id IS NOT NULL THEN 'issue' ELSE r.discussion_target_kind END,COALESCE(r.issue_id,r.discussion_target_id) FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, p.InterruptID).Scan(&forgeKind, &forgeHost, &forgeProject, &targetKind, &targetID); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries(id,delivery_id,interrupt_id,surface,channel_id,channel_snapshot_json,interrupt_version,nonce,escalation_no,priority,operation_key,state,attempt_count,forge_kind,forge_host,forge_project_key,forge_alert_target_kind,forge_alert_target_id,created_at_ms) VALUES(?,?,?,'channel',?,?,?,?,?,'normal',?,'pending',0,?,?,?,?,?,?)`, newID(), deliveryID, p.InterruptID, channel.ID, string(p.Channel), p.InterruptVersion, p.Nonce, p.EscalationNo, op.Key, forgeKind, forgeHost, forgeProject, targetKind, targetID, nowMS)
 	}
 	if err != nil {
 		return err

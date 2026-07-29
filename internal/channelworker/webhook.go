@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,11 @@ var (
 	ErrTransient         = errors.New("channel: transient")
 	ErrRateLimited       = errors.New("channel: rate limited")
 )
+
+type RateLimitedError struct{ RetryAfterMS int64 }
+
+func (e RateLimitedError) Error() string { return ErrRateLimited.Error() }
+func (e RateLimitedError) Unwrap() error { return ErrRateLimited }
 
 type SecretResolver interface {
 	Resolve(context.Context, string) (string, error)
@@ -159,7 +165,13 @@ func (s HTTPWebhookSender) Send(ctx context.Context, endpoint, body string) (str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return "", ErrRateLimited
+		var retryAfter int64
+		if value := resp.Header.Get("Retry-After"); value != "" {
+			if seconds, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64); parseErr == nil && seconds >= 0 {
+				retryAfter = seconds * 1000
+			}
+		}
+		return "", RateLimitedError{RetryAfterMS: retryAfter}
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return "", ErrAuthOrCapability
@@ -222,7 +234,7 @@ func (a WebhookAdapter) Publish(ctx context.Context, payload []byte, operationKe
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrRateLimited):
-			return nil, ErrRateLimited
+			return nil, err
 		case errors.Is(err, ErrAuthOrCapability):
 			return nil, ErrAuthOrCapability
 		case errors.Is(err, ErrContractViolation):
@@ -270,6 +282,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		outcome.State, outcome.ErrorClass, outcome.ErrorSummary = storage.OperationFailed, storage.ErrorContract, "channel payload or endpoint contract violation"
 	case errors.Is(err, ErrRateLimited):
 		outcome.ErrorClass, outcome.ErrorSummary = storage.ErrorRateLimited, "channel rate limited"
+		var limited RateLimitedError
+		if errors.As(err, &limited) {
+			outcome.RetryAfterMS = limited.RetryAfterMS
+		}
 	}
 	return w.DB.CompleteOutboxAttempt(ctx, *claim, outcome)
 }
