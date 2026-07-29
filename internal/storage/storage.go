@@ -75,6 +75,7 @@ type DB struct {
 
 	wakeupMu     sync.RWMutex
 	outboxWakeup func()
+	interruptT4  InterruptT4Caller
 }
 
 // SetOutboxWakeup installs the post-commit wakeup hook used by the named
@@ -92,6 +93,21 @@ func (d *DB) wakeOutbox() {
 	if wakeup != nil {
 		wakeup()
 	}
+}
+
+// SetInterruptT4 installs the single production T4 caller used by every
+// EmitInterrupt path. The caller itself is always invoked before the write
+// transaction.
+func (d *DB) SetInterruptT4(caller InterruptT4Caller) {
+	d.wakeupMu.Lock()
+	defer d.wakeupMu.Unlock()
+	d.interruptT4 = caller
+}
+
+func (d *DB) interruptT4Caller() InterruptT4Caller {
+	d.wakeupMu.RLock()
+	defer d.wakeupMu.RUnlock()
+	return d.interruptT4
 }
 
 // Path returns the database file path this handle opened.

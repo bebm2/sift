@@ -139,7 +139,6 @@ type EmitInterruptCmd struct {
 	// CalibrationID is set only by RecordGateEvaluationAndEmitInterrupt. It
 	// binds a Gate HITL to the shadow prediction frozen in this transaction.
 	CalibrationID string
-	T4            InterruptT4Caller
 	T6            InterruptT6Caller
 	Channels      []InterruptChannel
 	// NextWindowAtMS and BatchAtMS are availability/daily-summary instants
@@ -355,6 +354,9 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if cmd.ExpiresAfterMS <= 0 || (cmd.OnExpire != ExpireHold && cmd.OnExpire != ExpireEscalate && cmd.OnExpire != ExpireAutoReject) || (cmd.Reason == InterruptStartupStall && cmd.OnExpire == ExpireAutoReject) {
 		return Interrupt{}, fmt.Errorf("%w: invalid expiry policy", ErrInterruptRejected)
 	}
+	if !canonicalRecommendedAction(t.options, cmd.Facts["recommended_action"]) {
+		return Interrupt{}, fmt.Errorf("%w: recommended_action is not a canonical option", ErrInterruptRejected)
+	}
 	brief, links, err := renderInterrupt(t, cmd.Facts, cmd.Reason)
 	if err != nil {
 		return Interrupt{}, err
@@ -375,9 +377,9 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	headline := t.headline
 	// T4 is advisory and deliberately runs before, never inside, the five-write
 	// transaction. Any provider, schema, or admission failure keeps fallback.
-	if cmd.T4 != nil {
+	if t4 := d.interruptT4Caller(); t4 != nil {
 		candidate := InterruptT4Input{RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, Reason: cmd.Reason, Severity: severity, Modality: t.modality, Headline: t.headline, Brief: brief, Fragments: interruptBriefFragments(t, cmd.Facts), Links: links, Options: t.options}
-		if out, callErr := cmd.T4(ctx, candidate); callErr == nil {
+		if out, callErr := t4(ctx, candidate); callErr == nil {
 			if accepted, rendered := acceptInterruptT4(candidate, out); accepted {
 				headline, brief = out.Headline, rendered
 			}
@@ -512,14 +514,25 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 func interruptBriefFragments(t interruptTemplate, facts map[string]string) []string {
 	fragments := make([]string, 0, len(t.facts))
 	for _, key := range t.facts {
-		if value, ok := facts[key]; ok {
-			if escaped, err := escapeBrief(value); err == nil {
-				fragments = append(fragments, key+"="+escaped)
-			}
+		if value, ok := facts[key]; ok && safeT4Fragment(value) {
+			fragments = append(fragments, key+"="+value)
 		}
 	}
 	sort.Strings(fragments)
 	return fragments
+}
+
+func safeT4Fragment(value string) bool {
+	return !strings.ContainsAny(value, "\r\n") && strings.IndexFunc(value, unicode.IsControl) < 0
+}
+
+func canonicalRecommendedAction(options []InterruptOption, action string) bool {
+	for _, option := range options {
+		if action == option.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func acceptInterruptT4(in InterruptT4Input, out InterruptT4Output) (bool, string) {

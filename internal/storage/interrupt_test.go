@@ -141,6 +141,50 @@ func TestConcurrentStartupStallDiscoveryConverges(t *testing.T) {
 	assertCount(t, db, "outbox_operations", 1)
 }
 
+func TestEmitInterruptT4UsesConfiguredSeamAndEscapesFragmentsOnce(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	db.SetInterruptT4(func(_ context.Context, in InterruptT4Input) (InterruptT4Output, error) {
+		called = true
+		if !containsString(in.Fragments, "review_requirement=<b>risk</b>") {
+			t.Fatalf("fragments were pre-escaped: %#v", in.Fragments)
+		}
+		return InterruptT4Output{Headline: in.Headline, Conclusion: "review_requirement=<b>risk</b>", KeyPoints: []string{"review_requirement=<b>risk</b>"}, RecommendedOptionID: "approve"}, nil
+	})
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "<b>risk</b>", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789abcdef0123456789abcdef01234567"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
+	got, err := db.EmitInterrupt(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || got.Brief != "结论：review_requirement=\\<b\\>risk\\</b\\>；要点：review_requirement=\\<b\\>risk\\</b\\>；建议：批准审阅（approve）" {
+		t.Fatalf("called=%v interrupt=%#v", called, got)
+	}
+}
+
+func TestEmitInterruptRejectsNonCanonicalRecommendedActionBeforeAnyWrite(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "required", "recommended_action": "bogus", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789abcdef012345678901234567890123456789"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
+	if _, err := db.EmitInterrupt(ctx, cmd); err == nil || !strings.Contains(err.Error(), "recommended_action") {
+		t.Fatalf("error = %v", err)
+	}
+	assertCount(t, db, "interrupts", 0)
+	assertCount(t, db, "budget_entries", 0)
+}
+
 func TestEmitInterruptRejectsBeforeAnyWrite(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()

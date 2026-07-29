@@ -51,6 +51,13 @@ func TestReplayBrainJSONLReplaysValidAndFallbackT3(t *testing.T) {
 	}
 }
 
+func TestReplayBrainJSONLFailsClosedForT4WithoutContract(t *testing.T) {
+	line := []byte(`{"record_type":"brain_call","record_id":"t4-1","touchpoint":"T4","prompt_version":"T4/v1","output_schema_version":1,"status":"fallback","attempts":[]}` + "\n")
+	if _, err := ReplayBrainJSONL(bytes.NewReader(line), map[string]brain.TouchpointContract{}); err == nil {
+		t.Fatal("missing T4 contract replay succeeded")
+	}
+}
+
 func TestReplayGateJSONLUsesFrozenInput(t *testing.T) {
 	cert := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	effective, hash, _, _, err := policy.Assemble(policy.Missing(), config.GateDefaults{ReviewPolicy: config.ReviewPolicyNever, RiskyReviewThreshold: 1, AutoMerge: true, ChecksPendingTimeout: time.Hour, FlakyRetryLimit: 1}, "feature", policy.CertificationProjection{TaskKind: "feature", CertificationVersion: cert, Certified: true}, true)

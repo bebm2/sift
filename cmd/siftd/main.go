@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/miaoxiaoyong/sift/internal/brain"
 	"github.com/miaoxiaoyong/sift/internal/config"
 	"github.com/miaoxiaoyong/sift/internal/controlplane"
 	"github.com/miaoxiaoyong/sift/internal/daemon"
@@ -43,6 +44,10 @@ func main() {
 	if err := db.ActivateConfig(ctx, snapshot, controlplane.Version, now.UnixMilli()); err != nil {
 		fatal(err)
 	}
+	// All production Interrupt sources, including startup recovery, use this
+	// single T4 seam; EmitInterrupt keeps the provider call outside its write transaction.
+	t4 := brain.NewShell(db, snapshot.Config.Brain, brain.SubprocessProvider{Executable: snapshot.Config.Brain.Executable, Args: snapshot.Config.Brain.Args}, time.Now)
+	db.SetInterruptT4(t4.CallT4)
 	bootID, err := db.StartDaemonBoot(ctx, snapshot.Hash, controlplane.Version, controlplane.ProtocolMajor, os.Getpid(), now.UnixMilli())
 	if err != nil {
 		fatal(err)
