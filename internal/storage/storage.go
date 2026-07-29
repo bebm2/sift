@@ -73,13 +73,29 @@ type DB struct {
 	db   *sql.DB
 	path string
 
-	wakeupMu     sync.RWMutex
-	outboxWakeup func()
-	interruptT4  InterruptT4Caller
+	wakeupMu           sync.RWMutex
+	outboxWakeup       func()
+	interruptT4        InterruptT4Caller
+	channelPolicyMu    sync.RWMutex
+	channelAlertAfter  int
+	channelMaxAttempts int
 }
 
 // SetOutboxWakeup installs the post-commit wakeup hook used by the named
 // SupervisorScheduler. It never runs inside a database transaction.
+// SetChannelPolicy installs the frozen effective policy used by reclaim. It is
+// configured once during daemon assembly; zero max attempts means retry forever.
+func (d *DB) SetChannelPolicy(alertAfter, maxAttempts int) {
+	d.channelPolicyMu.Lock()
+	defer d.channelPolicyMu.Unlock()
+	d.channelAlertAfter, d.channelMaxAttempts = alertAfter, maxAttempts
+}
+func (d *DB) channelPolicy() (int, int) {
+	d.channelPolicyMu.RLock()
+	defer d.channelPolicyMu.RUnlock()
+	return d.channelAlertAfter, d.channelMaxAttempts
+}
+
 func (d *DB) SetOutboxWakeup(wakeup func()) {
 	d.wakeupMu.Lock()
 	defer d.wakeupMu.Unlock()

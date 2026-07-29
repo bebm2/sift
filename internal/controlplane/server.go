@@ -248,7 +248,15 @@ func (s *Server) operatorRequest(req Request) Response {
 		if !onlyKeys(req.Params, "run_id", "project_id", "status", "limit", "after_run_id") {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)
 		}
-		return success(req.RequestID, map[string]any{"runs": []any{}, "next_after_run_id": nil, "attention_remaining": map[string]int{"low": 3, "normal": 5, "high": 5}})
+		result := map[string]any{"runs": []any{}, "next_after_run_id": nil, "attention_remaining": map[string]int{"low": 3, "normal": 5, "high": 5}, "channel_deliveries": []any{}}
+		if s.db != nil {
+			projections, err := s.db.ChannelDiagnostics(context.Background())
+			if err != nil {
+				return failure(req.RequestID, "storage", "channel projections unavailable", true)
+			}
+			result["channel_deliveries"] = projections
+		}
+		return success(req.RequestID, result)
 	case "ops.logs":
 		if !onlyKeys(req.Params, "run_id", "attempt_no", "offset", "limit") {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)

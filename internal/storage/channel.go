@@ -13,6 +13,11 @@ import (
 // port.
 func ensureChannelSchema(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS attention_batches (
+ id TEXT NOT NULL PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('collecting','sealed','delivered','failed','cancelled')),
+ project_id TEXT NOT NULL, channel_id TEXT NOT NULL, channel_snapshot_json TEXT NOT NULL,
+ forge_kind TEXT NOT NULL, forge_host TEXT NOT NULL, forge_project_key TEXT NOT NULL,
+ target_kind TEXT NOT NULL, target_id TEXT NOT NULL, operation_key TEXT, updated_at_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS batch_deliveries (
  batch_id TEXT NOT NULL PRIMARY KEY, delivery_id TEXT NOT NULL UNIQUE,
  operation_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
@@ -55,6 +60,29 @@ type forgeAlertTarget struct {
 
 func channelSubject(p channelPayload) string { return p.DeliveryID }
 
+// ChannelDiagnostics reads the durable Channel projections used by operator
+// views. It intentionally does not infer state from in-memory workers.
+func (d *DB) ChannelDiagnostics(ctx context.Context) ([]map[string]any, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT delivery_id,operation_key,state,attempt_count,COALESCE(last_error,''),created_at_ms FROM interrupt_deliveries WHERE surface='channel' ORDER BY created_at_ms,delivery_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, key, state, last string
+		var attempts, created int64
+		if err := rows.Scan(&id, &key, &state, &attempts, &last, &created); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"delivery_id": id, "operation_key": key, "state": state, "attempt_count": attempts, "last_error": last, "created_at_ms": created})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func applyChannelOutcomeTx(ctx context.Context, tx *sql.Tx, claim ClaimedOperation, outcome CompleteOutcome, _ bool) error {
 	var p channelPayload
 	if err := json.Unmarshal(claim.Payload, &p); err != nil || p.DeliveryID == "" {
@@ -82,6 +110,15 @@ func applyChannelOutcomeTx(ctx context.Context, tx *sql.Tx, claim ClaimedOperati
 		}
 		return fmt.Errorf("storage: missing channel delivery projection")
 	}
+	if batch && outcome.State != OperationSucceeded {
+		state := "pending"
+		if outcome.State != OperationRetryable {
+			state = "failed"
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE attention_batches SET state=?,updated_at_ms=? WHERE id=? AND state NOT IN ('delivered','failed','cancelled')`, state, outcome.NowMS, p.BatchID); err != nil {
+			return err
+		}
+	}
 	var old int
 	var oldAlert sql.NullString
 	err = tx.QueryRowContext(ctx, `SELECT consecutive_failures,alert_operation_key FROM channel_failure_episodes WHERE subject_id=? AND generation=1`, subject).Scan(&old, &oldAlert)
@@ -93,6 +130,31 @@ func applyChannelOutcomeTx(ctx context.Context, tx *sql.Tx, claim ClaimedOperati
 		return err
 	}
 	if outcome.State == OperationSucceeded {
+		if batch {
+			_, err = tx.ExecContext(ctx, `UPDATE attention_batches SET state='delivered',updated_at_ms=? WHERE id=? AND state NOT IN ('delivered','failed','cancelled')`, outcome.NowMS, p.BatchID)
+			if err != nil {
+				return err
+			}
+			// Delivery evidence is a Ledger fact for every frozen member. The
+			// deterministic id makes completion/replay idempotent.
+			var members []struct{ ID, RunID string }
+			rows, qerr := tx.QueryContext(ctx, `SELECT json_extract(value,'$.interrupt_id'), i.run_id FROM outbox_operations o, json_each(json_extract(o.payload_json,'$.members')) j JOIN interrupts i ON i.id=json_extract(j.value,'$.interrupt_id') WHERE o.id=?`, claim.ID)
+			if qerr == nil {
+				for rows.Next() {
+					var m struct{ ID, RunID string }
+					if rows.Scan(&m.ID, &m.RunID) == nil {
+						members = append(members, m)
+					}
+				}
+				rows.Close()
+			}
+			for _, m := range members {
+				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ledger_entries(id,run_id,interrupt_id,entry_kind,features_schema_version,features_json,created_at_ms) VALUES(?,?,?,'attention_delivery',1,?,?)`, "channel_delivery:"+subject+":"+m.ID, m.RunID, m.ID, `{"surface":"channel","delivery_state":"delivered"}`, outcome.NowMS)
+				if err != nil {
+					return err
+				}
+			}
+		}
 		_, err = tx.ExecContext(ctx, `UPDATE channel_failure_episodes SET consecutive_failures=0,state='ended_delivered',last_error_class=NULL,updated_at_ms=?,ended_at_ms=? WHERE subject_id=? AND generation=1 AND state NOT LIKE 'ended_%'`, outcome.NowMS, outcome.NowMS, subject)
 		return err
 	}
@@ -170,6 +232,16 @@ func (d *DB) EnqueueChannelPublish(ctx context.Context, op Operation, deliveryID
 		return fmt.Errorf("storage: channel delivery identity mismatch")
 	}
 	if p.DeliveryKind == "attention_batch" {
+		if p.BatchID == "" || deliveryID != p.BatchID+":publish:1" || p.ProjectID == "" || p.ForgeAlertTarget == nil {
+			return fmt.Errorf("storage: invalid batch identity")
+		}
+		var channel struct{ ID, Type, TargetRef, Renderer string }
+		if json.Unmarshal(p.Channel, &channel) != nil || channel.ID == "" || channel.Type != "webhook" || channel.TargetRef == "" || channel.Renderer != "plain-v1" {
+			return fmt.Errorf("storage: invalid batch channel snapshot")
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,operation_key,updated_at_ms) VALUES(?,'sealed',?,?,?,?,?,?,?,?,?,?)`, p.BatchID, p.ProjectID, channel.ID, string(p.Channel), p.ForgeAlertTarget.ForgeKind, p.ForgeAlertTarget.ForgeHost, p.ForgeAlertTarget.ForgeProjectKey, p.ForgeAlertTarget.TargetKind, p.ForgeAlertTarget.TargetID, op.Key, nowMS); err != nil {
+			return err
+		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO batch_deliveries(batch_id,delivery_id,operation_key,state,created_at_ms) VALUES(?,?,?,'pending',?)`, p.BatchID, deliveryID, op.Key, nowMS)
 	} else {
 		if p.InterruptID == "" || p.InterruptVersion < 1 || p.Nonce == "" {

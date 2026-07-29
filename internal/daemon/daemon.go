@@ -68,6 +68,14 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 		now = time.Now
 	}
 	d := &Daemon{DB: db, Now: now}
+	db.SetChannelPolicy(cfg.Attention.ChannelFailureAlertAfter, cfg.Outbox.MaxAttempts)
+	// Channel payloads are already sealed by storage. The production consumer
+	// owns the only resolver and HTTP side effect; it is not project-scoped.
+	d.AddChannelWorker(&channelworker.Worker{
+		DB: db, Adapter: channelworker.WebhookAdapter{Resolver: channelworker.EnvironmentSecretResolver{}, Sender: channelworker.HTTPWebhookSender{}},
+		Now: func() int64 { return now().UnixMilli() }, LeaseMS: cfg.Outbox.LeaseTTL.Milliseconds(), WorkerID: "siftd:channel", AlertAfter: cfg.Attention.ChannelFailureAlertAfter,
+		Backoff: storage.BackoffPolicy{InitialDelayMS: cfg.Outbox.RetryInitialDelay.Milliseconds(), MaxDelayMS: cfg.Outbox.RetryMaxDelay.Milliseconds(), Multiplier: cfg.Outbox.RetryMultiplier}, MaxAttempts: cfg.Outbox.MaxAttempts,
+	})
 	for _, p := range cfg.Projects {
 		if !p.Enabled {
 			continue
