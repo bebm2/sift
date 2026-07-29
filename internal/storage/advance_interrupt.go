@@ -465,11 +465,13 @@ func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, v
 	if err != nil {
 		return fmt.Errorf("add attention batch member: %w", err)
 	}
-	var gotChannel, gotSnapshot string
-	if err := tx.QueryRowContext(ctx, `SELECT channel_id,channel_snapshot_json FROM attention_batch_members WHERE batch_id=? AND interrupt_id=?`, batch, id).Scan(&gotChannel, &gotSnapshot); err != nil {
+	var gotAdmission, gotKey, gotChannel, gotSnapshot, gotDelivery, gotNonce, gotHeadline, gotReason, gotSeverity, gotLinks, gotOpts string
+	var gotVersion int64
+	var gotJoined int64
+	if err := tx.QueryRowContext(ctx, `SELECT admission_id,member_key,channel_id,channel_snapshot_json,delivery_id,interrupt_version,nonce,headline,reason,severity,links_json,options_json,joined_at_ms FROM attention_batch_members WHERE batch_id=? AND interrupt_id=?`, batch, id).Scan(&gotAdmission, &gotKey, &gotChannel, &gotSnapshot, &gotDelivery, &gotVersion, &gotNonce, &gotHeadline, &gotReason, &gotSeverity, &gotLinks, &gotOpts, &gotJoined); err != nil {
 		return err
 	}
-	if gotChannel != channel || gotSnapshot != snapshot {
+	if gotAdmission != admission || gotKey != batch+":"+id || gotChannel != channel || gotSnapshot != snapshot || gotDelivery != batch+":"+id || gotVersion != version || gotNonce != nonce || gotHeadline != headline || gotReason != reason || gotSeverity != severity || gotLinks != links || gotOpts != opts || gotJoined != now {
 		return fmt.Errorf("%w: batch member identity collision", ErrInterruptRejected)
 	}
 	return nil

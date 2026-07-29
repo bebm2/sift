@@ -189,7 +189,7 @@ func (d *DB) recordBlockerReport(ctx context.Context, cmd ReportSubmitCmd, diges
 	receiptID := newID()
 	facts := map[string]string{"blocker_summary": cmd.Payload["blocker_summary"].(string), "attempted_summary": cmd.Payload["attempted_summary"].(string), "recommended_action": cmd.Payload["recommended_action"].(string), "agent_log_ref": strings.TrimRight(worktree, "/") + "/agent.log"}
 	err := func() error {
-		_, emitErr := d.emitInterruptHooks(ctx, EmitInterruptCmd{RunID: cmd.RunID, ExpectedRunVersion: runVersion, AttemptNo: &n, Reason: InterruptAgentBlocked, Facts: facts, Generation: InterruptGeneration{AttemptNo: cmd.AttemptNo, Generation: cmd.Generation, ReportID: receiptID}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, MaxEscalations: cfg.Attention.MaxEscalations, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, Source: SourceAgent, NowMS: cmd.NowMS}, func(tx *sql.Tx) error {
+		_, emitErr := d.emitInterruptHooks(ctx, EmitInterruptCmd{RunID: cmd.RunID, ExpectedRunVersion: runVersion, AttemptNo: &n, Reason: InterruptAgentBlocked, Facts: facts, Generation: InterruptGeneration{AttemptNo: cmd.AttemptNo, Generation: cmd.Generation, ReportID: receiptID}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, MaxEscalations: cfg.Attention.MaxEscalations, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, Channels: reportChannels(cfg), Source: SourceAgent, NowMS: cmd.NowMS}, func(tx *sql.Tx) error {
 			var phase, tokenHash, projectID, snapshotID string
 			var generation int
 			if err := tx.QueryRowContext(ctx, `SELECT a.phase,a.generation,c.run_token_hash,r.project_id,r.config_snapshot_id,r.version FROM attempts a JOIN attempt_claims c USING(run_id,attempt_no) JOIN runs r USING(id) WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&phase, &generation, &tokenHash, &projectID, &snapshotID, &runVersion); err != nil || phase != "running" || generation != cmd.Generation || tokenHash != handoffHash(cmd.Token) {
@@ -352,6 +352,16 @@ func consumeReportTokenTx(ctx context.Context, tx *sql.Tx, cmd ReportSubmitCmd, 
 	return err
 }
 
+type reportRuntimeChannel struct {
+	ID           string   `json:"id"`
+	Enabled      bool     `json:"enabled"`
+	Type         string   `json:"type"`
+	TargetRef    string   `json:"target_ref"`
+	Capabilities []string `json:"capabilities"`
+	Renderer     string   `json:"renderer"`
+	Default      bool     `json:"default"`
+}
+
 type reportRuntimeConfig struct {
 	Attention struct {
 		DayTimezone string `json:"day_timezone"`
@@ -366,7 +376,8 @@ type reportRuntimeConfig struct {
 			TotalLimit  int   `json:"total_limit"`
 			PerRunLimit int   `json:"per_run_limit"`
 		} `json:"critical_fuse"`
-		DailySummaryAt string `json:"daily_summary_at"`
+		DailySummaryAt string                 `json:"daily_summary_at"`
+		Channels       []reportRuntimeChannel `json:"channels"`
 	} `json:"attention"`
 	Report struct {
 		InterruptsPerRunDailyQuota int `json:"interrupts_per_run_daily_quota"`
@@ -384,7 +395,15 @@ func reportDayBucket(nowMS int64, zone string) (int64, int64, error) {
 }
 
 func reportQuotaCmd(cmd ReportSubmitCmd, version, start, end int64, cfg reportRuntimeConfig) ReportQuotaExhaustionCmd {
-	return ReportQuotaExhaustionCmd{RunID: cmd.RunID, ExpectedRunVersion: version, DailyBucketStartMS: start, DailyBucketEndMS: end, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, NowMS: cmd.NowMS}
+	return ReportQuotaExhaustionCmd{RunID: cmd.RunID, ExpectedRunVersion: version, DailyBucketStartMS: start, DailyBucketEndMS: end, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, Channels: reportChannels(cfg), NowMS: cmd.NowMS}
+}
+
+func reportChannels(cfg reportRuntimeConfig) []InterruptChannel {
+	channels := make([]InterruptChannel, 0, len(cfg.Attention.Channels))
+	for _, c := range cfg.Attention.Channels {
+		channels = append(channels, InterruptChannel{ID: c.ID, Type: c.Type, TargetRef: c.TargetRef, Capabilities: c.Capabilities, Renderer: c.Renderer, Default: c.Default, Isolated: !c.Enabled})
+	}
+	return channels
 }
 
 func validateReportPayload(kind string, p map[string]any) error {
