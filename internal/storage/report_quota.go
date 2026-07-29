@@ -60,7 +60,7 @@ func (d *DB) RecordReportQuotaExhaustion(ctx context.Context, cmd ReportQuotaExh
 			return Interrupt{}, ErrRejectedStale
 		}
 		eventID = newID()
-		payload, _ := json.Marshal(map[string]any{"daily_bucket_start_ms": cmd.DailyBucketStartMS, "daily_bucket_end_ms": cmd.DailyBucketEndMS, "failure_class": "report_interrupt_quota_exhausted"})
+		payload, _ := json.Marshal(map[string]any{"daily_bucket_end_ms": cmd.DailyBucketEndMS, "daily_bucket_start_ms": cmd.DailyBucketStartMS, "failure_class": "report_interrupt_quota_exhausted", "failure_digest": digest, "generation_key": key})
 		if _, err := tx.ExecContext(ctx, `INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?,?,'security.report_quota_exhausted','system',1,?,?,?)`, eventID, cmd.RunID, projectID, string(payload), cmd.NowMS, cmd.NowMS); err != nil {
 			return Interrupt{}, err
 		}

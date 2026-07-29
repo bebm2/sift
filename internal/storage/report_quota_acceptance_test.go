@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -208,19 +209,27 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 		if err := db.db.QueryRow(`SELECT available_units FROM rate_limit_buckets WHERE kind='report' AND scope_id='run:run:attempt:1'`).Scan(&n); err != nil || n != 6 {
 			t.Fatalf("rate tokens = %d, %v", n, err)
 		}
-		var eventID, binding, bindingDigest, interruptID, admissionInterruptID string
+		var eventID, binding, bindingDigest, interruptID, admissionInterruptID, eventPayload, generationKey, failureDigest string
 		var bucketStart, bucketEnd int64
-		if err := db.db.QueryRow(`SELECT q.security_event_id,q.daily_bucket_start_ms,q.daily_bucket_end_ms,b.binding_json,b.binding_digest,i.id,a.interrupt_id
+		if err := db.db.QueryRow(`SELECT q.security_event_id,q.daily_bucket_start_ms,q.daily_bucket_end_ms,b.binding_json,b.binding_digest,i.id,a.interrupt_id,q.generation_key,q.failure_digest,e.payload_json
 			FROM report_quota_exhaustions q
 			JOIN interrupts i ON i.generation_key=q.generation_key
 			JOIN interrupt_command_effect_bindings b ON b.interrupt_id=i.id
 			JOIN attention_admissions a ON a.interrupt_id=i.id
-			WHERE q.run_id='run'`).Scan(&eventID, &bucketStart, &bucketEnd, &binding, &bindingDigest, &interruptID, &admissionInterruptID); err != nil {
+			JOIN events e ON e.id=q.security_event_id
+			WHERE q.run_id='run'`).Scan(&eventID, &bucketStart, &bucketEnd, &binding, &bindingDigest, &interruptID, &admissionInterruptID, &generationKey, &failureDigest, &eventPayload); err != nil {
 			t.Fatal(err)
 		}
 		wantBinding := `{"arm":"report_quota_failure_review","daily_bucket_end_ms":` + fmt.Sprint(bucketEnd) + `,"daily_bucket_start_ms":` + fmt.Sprint(bucketStart) + `,"run_id":"run","security_event_id":"` + eventID + `"}`
-		if binding != wantBinding || admissionInterruptID != interruptID {
-			t.Fatalf("quota object identity = binding %q, interrupt/admission %q/%q", binding, interruptID, admissionInterruptID)
+		if binding != wantBinding || admissionInterruptID != interruptID || generationKey == "" || failureDigest == "" {
+			t.Fatalf("quota object identity = binding %q, interrupt/admission %q/%q, generation/digest %q/%q", binding, interruptID, admissionInterruptID, generationKey, failureDigest)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(eventPayload), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["failure_class"] != "report_interrupt_quota_exhausted" || payload["generation_key"] != generationKey || payload["failure_digest"] != failureDigest {
+			t.Fatalf("security event payload = %s", eventPayload)
 		}
 		var digestOK int
 		if err := db.db.QueryRow(`SELECT lower(hex(sift_sha256(?)))=?`, binding, bindingDigest).Scan(&digestOK); err != nil || digestOK != 1 {

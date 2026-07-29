@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/miaoxiaoyong/sift/internal/storage"
@@ -52,6 +53,80 @@ func TestEmitInterruptT4PersistsProductionCanonicalTrace(t *testing.T) {
 	}
 	if !bytes.Equal(record.Input, wantInput) || !bytes.Equal(record.Output, wantOutput) {
 		t.Fatalf("trace input/output = %s / %s, want %s / %s", record.Input, record.Output, wantInput, wantOutput)
+	}
+}
+
+func TestEmitInterruptT4ProductionInvalidOutputFallsBackToPersistedBytes(t *testing.T) {
+	ctx := context.Background()
+	db := openShellDB(t)
+	seedIntakeSubject(t, db, "p")
+	if err := db.SeedGateCandidateForTest(ctx, "run-fallback", "p", "cfg-p", "change-fallback", shellTestBase); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedFailedAttemptForTest(ctx, "run-fallback", 1, shellTestBase); err != nil {
+		t.Fatal(err)
+	}
+	fake := &FakeProvider{Responses: []FakeResponse{{ResultText: `{"headline":"失败需要人工决定","conclusion":"未知事实","key_points":["/sift reject"],"recommended_option_id":"retry","options":["reject","retry","hold"]}`, InputTokens: 1, OutputTokens: 1}}}
+	shell := newShellAt(db, shellCfg(100), fake, shellTestBase+1, shellTestBase+2, shellTestBase+3, shellTestBase+4)
+	db.SetInterruptT4(shell.CallT4)
+	attempt := 1
+	interrupt, err := db.EmitInterrupt(ctx, storage.EmitInterruptCmd{RunID: "run-fallback", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: storage.InterruptFailureReview, FailureReviewVariant: storage.FailureReviewAttempt, FailureReviewRetryKind: storage.FailureReviewNewAttempt,
+		Facts: map[string]string{"failure_class": "CI", "failure_evidence_ref": "/r/ci", "recommended_action": "retry"}, Generation: storage.InterruptGeneration{AttemptNo: 1, Generation: 1, FailureDigest: strings.Repeat("a", 64)}, GatePhase: storage.GateNone, GuardrailLevel: storage.GuardrailNone,
+		AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 3, storage.SeverityHigh: 3}, DayTimezone: "UTC", Source: storage.SourceSystem, NowMS: shellTestBase})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interrupt.Brief != "事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry" || len(interrupt.Options) != 3 || interrupt.Options[0].ID != "retry" {
+		t.Fatalf("persisted fallback = %#v", interrupt)
+	}
+	var trace bytes.Buffer
+	if err := db.ExportBrainCallsJSONL(ctx, &trace); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Status         string          `json:"status"`
+		FallbackReason string          `json:"fallback_reason"`
+		Validated      json.RawMessage `json:"validated_output"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(trace.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "fallback" || record.FallbackReason == "" || string(record.Validated) != "null" {
+		t.Fatalf("fallback trace = %#v", record)
+	}
+}
+
+func TestEmitInterruptQuotaT4ProductionInvalidOutputFallsBack(t *testing.T) {
+	ctx := context.Background()
+	db := openShellDB(t)
+	seedIntakeSubject(t, db, "p")
+	if err := db.SeedReverseSyncRunForTest(ctx, "run-quota-fallback", "p", "cfg-p", "42", "", "running", shellTestBase); err != nil {
+		t.Fatal(err)
+	}
+	fake := &FakeProvider{Responses: []FakeResponse{{ResultText: `{"headline":"报告打扰额度已耗尽","conclusion":"额度已耗尽","key_points":["请人工处理"],"recommended_option_id":"hold","options":["hold","reject"]}`, InputTokens: 1, OutputTokens: 1}}}
+	shell := newShellAt(db, shellCfg(100), fake, shellTestBase+1, shellTestBase+2, shellTestBase+3, shellTestBase+4)
+	db.SetInterruptT4(shell.CallT4)
+	interrupt, err := db.RecordReportQuotaExhaustion(ctx, storage.ReportQuotaExhaustionCmd{RunID: "run-quota-fallback", ExpectedRunVersion: 1, DailyBucketStartMS: shellTestBase, DailyBucketEndMS: shellTestBase + 24*60*60*1000,
+		AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 3, storage.SeverityHigh: 3}, NowMS: shellTestBase})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interrupt.Brief != "事实：failure_class=report\\_interrupt\\_quota\\_exhausted；failure_evidence_ref="+interrupt.Links[0].Target+"；recommended_action=hold。建议：hold" || len(interrupt.Options) != 2 || interrupt.Options[0].ID != "reject" || interrupt.Options[1].ID != "hold" {
+		t.Fatalf("quota fallback = %#v", interrupt)
+	}
+	var trace bytes.Buffer
+	if err := db.ExportBrainCallsJSONL(ctx, &trace); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Status         string `json:"status"`
+		FallbackReason string `json:"fallback_reason"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(trace.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "fallback" || record.FallbackReason == "" {
+		t.Fatalf("quota fallback trace = %#v", record)
 	}
 }
 

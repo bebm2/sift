@@ -50,7 +50,7 @@ func TestEmitInterruptBindingIdentityAcceptanceMatrix(t *testing.T) {
 			if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd); err != nil {
 				t.Fatal(err)
 			}
-			if err := mustFail(t, db, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) SELECT id,?,?,?,?,? FROM interrupts WHERE run_id='run'`, tc.reason, 1, tc.body, strings.Repeat("f", 64), testNow); err == nil || (!strings.Contains(err.Error(), "invalid interrupt binding identity") && !strings.Contains(err.Error(), "JSON key order is not canonical")) {
+			if err := mustFail(t, db, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) SELECT id,?,?,?,?,? FROM interrupts WHERE run_id='run'`, tc.reason, 1, tc.body, strings.Repeat("f", 64), testNow); err == nil || (!strings.Contains(err.Error(), "invalid interrupt binding identity") && !strings.Contains(err.Error(), "JSON key order is not canonical") && !strings.Contains(err.Error(), "failure review provenance mismatch")) {
 				t.Fatalf("rejection = %v", err)
 			}
 			assertCount(t, db, "interrupt_command_effect_bindings", 1)
