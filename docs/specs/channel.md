@@ -47,14 +47,14 @@ worker 遵守 [`outbox.md` §1、§4、§10](outbox.md)：同领域事务先提�
 
 每个 immutable Channel operation 只有一个 durable failure episode，`generation=1`：单条的 `subject_id` 是其 `interrupt_deliveries.delivery_id`，batch 的 `subject_id` 是其 `batch_deliveries.delivery_id`。`CompleteOutboxAttempt` 与 `ClaimOutboxOperation` reclaim 分支是唯一写端口；二者都必须在各自的 owner/lease CAS 同一事务写 delivery、episode 和可能的 alert operation。reclaim 先为旧 attempt 写入 immutable `lease_expired` result，并在同一事务把该 result 计入 episode；不得由 worker 另起事务补写。
 
-- `transient`、`rate_limited` 及 reclaim 写入的 `lease_expired` result 使 `consecutive_failures` 加一；reclaim 的计数、阈值 alert 与新 attempt lease 必须同一 CAS 提交；
+- `transient`、`rate_limited` 及 reclaim 写入的 `lease_expired` result 使 `consecutive_failures` 加一；reclaim 的计数、阈值 alert 与 operation/delivery/episode 终结必须同一 CAS 提交；只有 result 后未达 `max_attempts` 才在该 CAS 创建新 attempt lease，达限绝不创建新 lease/attempt；
 - `auth_or_capability`、`contract_violation`、`semantic_conflict` 或 `max_attempts` 达限的失败 result 同样计入一次并终结为 `ended_failed`；
 - success 将计数清零并终结为 `ended_delivered`；已终结 episode 不会因旧 worker 或 alert completion 重开；
 - 从 0 到达 `attention.channel_failure_alert_after` 的事务创建且只创建一次 `forge_alert`，key 为 `alert:channel_failure:<subject_id>:1`。单条 alert 用该 Run 已冻结的 verified discussion target；batch alert 用 §3 冻结的 batch target。alert 自身失败绝不递归创建 alert。
 
 lease CAS 保证同一 operation completion/reclaim 串行；重启从 `channel_failure_episodes` 恢复，不能由内存或 attempt 文本重算。threshold 前后、lease expiry/reclaim、重启、并发 stale completion、alert 失败和 max-attempt terminal 的 exact vectors 及投影在 [`storage.md` §6.6](storage.md) 与 [`outbox.md` §10](outbox.md)。
 
-告警评论至少含 Channel operation key、episode/generation、连续失败数、最近安全错误分类、“已生成但未确认送达”或 terminal 状态，以及 `sift ps`/`sift doctor` 标记；其 closed `forge_alert` body 与 [`outbox.md` §5.1](outbox.md#51-payload) 共用必填 `markdown`，并由持久化 operation/episode 安全字段确定性渲染，canonical exact payload/digest 见 [`storage.md` §6.6](storage.md#66-channel-batch-and-failure-episode-exact-vectors)。凭据、原始 stderr、endpoint 与 query secret 按 outbox 错误摘要规则剥离。
+告警评论至少含 Channel operation key、episode/generation、连续失败数、最近安全错误分类、“已生成但未确认送达”或 terminal 状态，以及固定的 `Diagnostics: sift ps; sift doctor` 行；其 closed `forge_alert` body 与 [`outbox.md` §5.1](outbox.md#51-payload) 共用必填 `markdown`，并由持久化 operation/episode 安全字段和该固定诊断行确定性渲染，canonical exact payload/digest 见 [`storage.md` §6.6](storage.md#66-channel-batch-and-failure-episode-exact-vectors)。凭据、原始 stderr、endpoint 与 query secret 按 outbox 错误摘要规则剥离。
 
 ## 5. 升级、可见性与非目标
 
