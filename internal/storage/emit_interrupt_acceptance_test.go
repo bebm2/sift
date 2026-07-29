@@ -64,16 +64,19 @@ func TestGateFailureReviewPersistsExactBindingProvenance(t *testing.T) {
 	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+	if err := db.SeedGateCandidateForTest(ctx, "run", "project", "cfg", "change-01", testNow); err != nil {
 		t.Fatal(err)
 	}
 	const head = "0123456789012345678901234567890123456789"
-	mustExec(t, db, `UPDATE runs SET change_id='change-01',change_head_sha=? WHERE id='run'`, head)
+	mustExec(t, db, `UPDATE runs SET change_head_sha=? WHERE id='run'`, head)
 	r := gateRecord(testNow)
 	r.HeadSHA = head
-	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview,
-		Facts:      map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": head, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"},
-		Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: head}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
+	r.SnapshotJSON = []byte(`{"change":{"id":"change-01","mergeability":"unknown"},"identity":{"change_id":"change-01"},"schema_version":1}`)
+	r.VerdictJSON = []byte(`{"kind":"hitl","mergeability":"unknown","schema_version":1}`)
+	attempt := 1
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, FailureReviewRetryKind: FailureReviewGateRecheck,
+		Facts:      map[string]string{"failure_class": "gate_recheck_failed", "failure_evidence_ref": "/gate/recheck", "recommended_action": "retry"},
+		Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, ChangeID: "change-01", HeadSHA: head, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
 	if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +84,7 @@ func TestGateFailureReviewPersistsExactBindingProvenance(t *testing.T) {
 	if err := db.db.QueryRow(`SELECT b.binding_json,b.binding_digest,s.head_sha,s.effective_policy_hash,e.run_id,c.run_id FROM interrupt_command_effect_bindings b JOIN interrupts i ON i.id=b.interrupt_id JOIN calibration_entries c ON c.id=i.calibration_id JOIN gate_evaluations e ON e.id=c.gate_evaluation_id JOIN gate_input_snapshots s ON s.id=e.snapshot_id WHERE i.run_id='run'`).Scan(&binding, &digest, &snapshotHead, &policy, &evaluationRun, &calibrationRun); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"arm":"code_review","change_id":"change-01","head_sha":"` + head + `","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `"}`
+	want := `{"arm":"failure_review_attempt","attempt_no":1,"change_id":"change-01","generation":1,"head_sha":"` + head + `","retry_kind":"gate_recheck","run_id":"run","terminal_attempt_no":null,"terminal_generation":null}`
 	if binding != want || snapshotHead != head || policy != strings.Repeat("c", 64) || evaluationRun != "run" || calibrationRun != "run" {
 		t.Fatalf("provenance binding=%q snapshot=%q policy=%q evaluation=%q calibration=%q", binding, snapshotHead, policy, evaluationRun, calibrationRun)
 	}
@@ -97,21 +100,25 @@ func TestGateBindingFailureRollsBackProvenanceAndEmission(t *testing.T) {
 	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+	if err := db.SeedGateCandidateForTest(ctx, "run", "project", "cfg", "change-01", testNow); err != nil {
 		t.Fatal(err)
 	}
 	const head = "0123456789012345678901234567890123456789"
-	mustExec(t, db, `UPDATE runs SET change_id='change-01',change_head_sha=? WHERE id='run'`, head)
+	mustExec(t, db, `UPDATE runs SET change_head_sha=? WHERE id='run'`, head)
 	mustExec(t, db, `CREATE TRIGGER fail_gate_binding BEFORE INSERT ON interrupt_command_effect_bindings BEGIN SELECT RAISE(ABORT,'injected gate binding failure'); END`)
 	r := gateRecord(testNow)
 	r.HeadSHA = head
-	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": head, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: head}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
+	r.SnapshotJSON = []byte(`{"change":{"id":"change-01","mergeability":"unknown"},"identity":{"change_id":"change-01"},"schema_version":1}`)
+	r.VerdictJSON = []byte(`{"kind":"hitl","mergeability":"unknown","schema_version":1}`)
+	attempt := 1
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, FailureReviewRetryKind: FailureReviewGateRecheck, Facts: map[string]string{"failure_class": "gate_recheck_failed", "failure_evidence_ref": "/gate/recheck", "recommended_action": "retry"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, ChangeID: "change-01", HeadSHA: head, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
 	if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd); err == nil || !strings.Contains(err.Error(), "injected gate binding failure") {
 		t.Fatalf("error=%v", err)
 	}
-	for _, table := range []string{"gate_input_snapshots", "gate_evaluations", "calibration_entries", "ledger_entries", "interrupts", "attention_admissions", "budget_entries", "events", "outbox_operations", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
+	for _, table := range []string{"gate_input_snapshots", "gate_evaluations", "calibration_entries", "ledger_entries", "interrupts", "attention_admissions", "budget_entries", "events", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
 		assertCount(t, db, table, 0)
 	}
+	assertCount(t, db, "outbox_operations", 1)
 	var status string
 	var version int
 	if err := db.db.QueryRow(`SELECT status,version FROM runs WHERE id='run'`).Scan(&status, &version); err != nil {

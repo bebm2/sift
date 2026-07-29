@@ -82,6 +82,13 @@ func (d *DB) SeedGateCandidateForTest(ctx context.Context, runID, projectID, cfg
 	return nil
 }
 
+// SeedFailedAttemptForTest gives cross-package tests the failed attempt binding
+// required by failure_review's new_attempt arm.
+func (d *DB) SeedFailedAttemptForTest(ctx context.Context, runID string, attemptNo int, nowMS int64) error {
+	_, err := d.db.ExecContext(ctx, `UPDATE attempts SET phase='finished',result_exit_code=1,result_digest='failed',result_observed_at_ms=?,finished_at_ms=?,updated_at_ms=? WHERE run_id=? AND attempt_no=?`, nowMS, nowMS, nowMS, runID, attemptNo)
+	return err
+}
+
 // SetRunChangeHeadForTest completes the immutable Change identity used by Gate fixtures.
 func (d *DB) SetRunChangeHeadForTest(ctx context.Context, runID, changeID, headSHA string) error {
 	_, err := d.db.ExecContext(ctx, `UPDATE runs SET change_id=?, change_head_sha=? WHERE id=?`, changeID, headSHA, runID)
