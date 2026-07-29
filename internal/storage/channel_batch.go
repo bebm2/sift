@@ -125,28 +125,25 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 // the sealed batch is never retimed or reused.
 func openCriticalSuccessorTx(ctx context.Context, tx *sql.Tx, batchID string, nowMS int64) error {
 	var project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, scope, scopeID string
-	if err := tx.QueryRowContext(ctx, `SELECT project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,scope,scope_id FROM attention_batches WHERE id=?`, batchID).Scan(&project, &channel, &snapshot, &forgeKind, &host, &forgeProject, &targetKind, &targetID, &scope, &scopeID); err != nil {
+	var window int64
+	var limitTotal, limitRun int
+	if err := tx.QueryRowContext(ctx, `SELECT project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,scope,scope_id,critical_window_ms,critical_total_limit,critical_per_run_limit FROM attention_batches WHERE id=?`, batchID).Scan(&project, &channel, &snapshot, &forgeKind, &host, &forgeProject, &targetKind, &targetID, &scope, &scopeID, &window, &limitTotal, &limitRun); err != nil {
 		return err
 	}
-	where, args := `a.created_at_ms>? AND a.created_at_ms<=?`, []any{nowMS, nowMS}
-	var window int64
+	where, args := `a.created_at_ms>? AND a.created_at_ms<=?`, []any{nowMS - window, nowMS}
 	if scope == "run" {
 		where += " AND a.run_id=?"
 		args = append(args, scopeID)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT i.critical_window_ms FROM attention_admissions a JOIN interrupts i ON i.id=a.interrupt_id WHERE a.kind='critical_admitted'`+map[bool]string{true: " AND a.run_id=?", false: ""}[scope == "run"]+` ORDER BY a.created_at_ms,a.id LIMIT 1`, func() []any {
-		if scope == "run" {
-			return []any{scopeID}
-		}
-		return nil
-	}()...).Scan(&window); err != nil {
+	var count, limit int
+	query := `SELECT COUNT(*) FROM attention_admissions a WHERE a.kind='critical_admitted' AND ` + where
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
 		return err
 	}
-	args[0] = nowMS - window
-	var count, limit int
-	query := `SELECT COUNT(*),MIN(CASE WHEN ?='global' THEN i.critical_total_limit ELSE i.critical_per_run_limit END) FROM attention_admissions a JOIN interrupts i ON i.id=a.interrupt_id WHERE a.kind='critical_admitted' AND ` + where
-	if err := tx.QueryRowContext(ctx, query, append([]any{scope}, args...)...).Scan(&count, &limit); err != nil {
-		return err
+	if scope == "global" {
+		limit = limitTotal
+	} else {
+		limit = limitRun
 	}
 	if count < limit {
 		return nil
@@ -162,7 +159,7 @@ func openCriticalSuccessorTx(ctx context.Context, tx *sql.Tx, batchID string, no
 	enc := base64.RawURLEncoding.EncodeToString
 	id := fmt.Sprintf("critical:%s:%s:%s:%s:%s:%s:%s:%s:%s", scope, scopeID, episode, channel, forgeKind, enc([]byte(host)), enc([]byte(forgeProject)), targetKind, enc([]byte(targetID)))
 	deliveryID := id + ":publish:1"
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, "critical_fuse", deliveryID, scope, scopeID, episode, due, nowMS, nowMS)
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,critical_window_ms,critical_total_limit,critical_per_run_limit,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, "critical_fuse", deliveryID, scope, scopeID, episode, due, window, limitTotal, limitRun, nowMS, nowMS)
 	return err
 }
 
