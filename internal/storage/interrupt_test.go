@@ -217,6 +217,13 @@ func TestEmitInterruptFailureReviewVariantsUseClosedSourceAndExactGoldens(t *tes
 		}
 		insertTaskSpec(t, db, "spec", "run-01", 1)
 		insertAttempt(t, db, "run-01", 1, "spec")
+		// Report-quota failure_review is bound to this durable security fact.
+		if _, err := db.db.Exec(`INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES('1','run-01','project','security.report_quota_exhausted','system',1,'{}',1754000000000,1754000000000)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.db.Exec(`INSERT INTO report_quota_exhaustions(run_id,daily_bucket_start_ms,daily_bucket_end_ms,security_event_id,failure_digest,generation_key,created_at_ms) VALUES('run-01',1754000000000,1754086400000,'1','59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509','cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083',1754000000000)`); err != nil {
+			t.Fatal(err)
+		}
 		return db
 	}
 	attemptCmd := func() EmitInterruptCmd {
@@ -278,7 +285,7 @@ func TestEmitInterruptFailureReviewVariantsUseClosedSourceAndExactGoldens(t *tes
 		}
 		db.SetInterruptT4(func(context.Context, InterruptT4Input) (InterruptT4Output, error) { return out, nil })
 		fallback, err := db.EmitInterrupt(ctx, quotaCmd())
-		if err != nil || fallback.Brief != "事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/00000000000000000000000000000001；recommended_action=hold。建议：hold" || fallback.Severity != SeverityHigh || fallback.GenerationKey != "cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083" || strings.Join([]string{fallback.Options[0].ID, fallback.Options[1].ID}, ",") != "reject,hold" {
+		if err != nil || fallback.Brief != "事实：failure_class=report\\_interrupt\\_quota\\_exhausted；failure_evidence_ref=sift://event/00000000000000000000000000000001；recommended_action=hold。建议：hold" || fallback.Severity != SeverityHigh || fallback.GenerationKey != "cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083" || strings.Join([]string{fallback.Options[0].ID, fallback.Options[1].ID}, ",") != "reject,hold" {
 			t.Fatalf("quota invalid T4 fallback=%#v err=%v", fallback, err)
 		}
 	}

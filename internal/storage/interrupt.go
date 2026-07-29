@@ -538,6 +538,19 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 		if RunStatus(status) != RunRunning {
 			return Interrupt{}, fmt.Errorf("%w: report quota run is not running", ErrInterruptRejected)
 		}
+		// The quota arm is accepted only for the exhaustion fact that created it.
+		// The caller cannot manufacture a bucket or security-event identity.
+		var endMS, eventID int64
+		var digest, generationKey, source string
+		if err := tx.QueryRowContext(ctx, `SELECT daily_bucket_end_ms,security_event_id,failure_digest,generation_key FROM report_quota_exhaustions WHERE run_id=? AND daily_bucket_start_ms=?`, cmd.RunID, cmd.Generation.ReportDailyBucketStartMS).Scan(&endMS, &eventID, &digest, &generationKey); err != nil {
+			return Interrupt{}, fmt.Errorf("%w: report quota exhaustion binding: %v", ErrInterruptRejected, err)
+		}
+		if endMS != cmd.Generation.ReportDailyBucketEndMS || eventID != cmd.Generation.SecurityEventID || digest != cmd.Generation.FailureDigest || generationKey != key {
+			return Interrupt{}, fmt.Errorf("%w: report quota exhaustion binding mismatch", ErrInterruptRejected)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT source FROM events WHERE id=?`, fmt.Sprintf("%d", eventID)).Scan(&source); err != nil || source != string(SourceSystem) {
+			return Interrupt{}, fmt.Errorf("%w: report quota security event binding", ErrInterruptRejected)
+		}
 	} else if RunStatus(status) != RunWaitingHuman {
 		if !legalTransition(RunStatus(status), RunWaitingHuman) {
 			return Interrupt{}, fmt.Errorf("%w: %s cannot wait for human", ErrInterruptRejected, status)
@@ -627,8 +640,9 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 			}
 		}
 	}
-	binding, _ := json.Marshal(map[string]bool{"no_transition": cmd.FailureReviewVariant == FailureReviewReportQuota})
-	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,binding_json,created_at_ms) VALUES(?,?,?)`, in.ID, string(binding), cmd.NowMS); err != nil {
+	binding, bindingReason := interruptEffectBinding(cmd)
+	bindingDigest := sha256.Sum256(binding)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) VALUES(?,?,1,?,?,?)`, in.ID, bindingReason, string(binding), hex.EncodeToString(bindingDigest[:]), cmd.NowMS); err != nil {
 		return Interrupt{}, err
 	}
 	eventID := newID()
@@ -652,6 +666,47 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	}
 	d.wakeOutbox()
 	return in, nil
+}
+
+// interruptEffectBinding is the immutable closed source/effect discriminator
+// consumed by later command/expiry code. Its JSON is deliberately persisted,
+// rather than reconstructing an arm from the current Run or configuration.
+func interruptEffectBinding(cmd EmitInterruptCmd) ([]byte, string) {
+	if cmd.FailureReviewVariant == FailureReviewReportQuota {
+		b, _ := json.Marshal(map[string]any{
+			"arm": "report_quota_failure_review", "run_id": cmd.RunID,
+			"daily_bucket_start_ms": cmd.Generation.ReportDailyBucketStartMS,
+			"daily_bucket_end_ms":   cmd.Generation.ReportDailyBucketEndMS,
+			"security_event_id":     cmd.Generation.SecurityEventID,
+		})
+		return b, "failure_review"
+	}
+	if cmd.Reason == InterruptFailureReview {
+		b, _ := json.Marshal(map[string]any{
+			"arm": "failure_review_attempt", "run_id": cmd.RunID,
+			"attempt_no": *cmd.AttemptNo, "generation": cmd.Generation.Generation,
+			"retry_kind": "new_attempt", "change_id": nil, "head_sha": nil,
+			"terminal_attempt_no": *cmd.AttemptNo, "terminal_generation": cmd.Generation.Generation,
+		})
+		return b, "failure_review"
+	}
+	fields := map[string]any{"arm": string(cmd.Reason), "run_id": cmd.RunID}
+	switch cmd.Reason {
+	case InterruptDesignApproval:
+		fields["task_spec_snapshot_id"] = cmd.Generation.TaskSpecSnapshotID
+	case InterruptGuardrailViolation:
+		fields["rule_id"], fields["matched_paths_digest"] = cmd.Generation.ViolationCode, cmd.Generation.SubjectDigest
+	case InterruptCodeReview:
+		fields["change_id"], fields["head_sha"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA
+	case InterruptAgentBlocked:
+		fields["attempt_no"], fields["generation"], fields["report_id"] = cmd.Generation.AttemptNo, cmd.Generation.Generation, cmd.Generation.ReportID
+	case InterruptMergeConflict:
+		fields["change_id"], fields["head_sha"], fields["conflict_digest"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.Generation.ConflictDigest
+	case InterruptStartupStall:
+		fields["attempt_no"], fields["generation"] = cmd.Generation.AttemptNo, cmd.Generation.Generation
+	}
+	b, _ := json.Marshal(fields)
+	return b, string(cmd.Reason)
 }
 
 func interruptBriefFragments(t interruptTemplate, facts map[string]string) []string {
@@ -782,7 +837,7 @@ func escapeBrief(v string) (string, error) {
 			return "", fmt.Errorf("%w: interrupt_brief_control_rejected", ErrInterruptRejected)
 		}
 	}
-	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>").Replace(v), nil
+	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>", "_", "\\_").Replace(v), nil
 }
 func timezoneOrUTC(v string) string {
 	if v == "" || v == "local" {
