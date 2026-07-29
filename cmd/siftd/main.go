@@ -55,7 +55,7 @@ func main() {
 	termination := &daemon.TerminationCoordinator{
 		DB: db, Terminator: runtime.Terminator{Inspector: runtime.PlatformProcessInspector{}, Signaler: runtime.UnixProcessSignaler{}}, Runtime: snapshot.Config.Runtime,
 		ControlRoot:         home.Path,
-		AttentionDailyQuota: attentionQuota(snapshot.Config.Attention.DailyQuota), DayTimezone: snapshot.Config.Attention.DayTimezone, DailySummaryAt: snapshot.Config.Attention.DailySummaryAt, CriticalWindowMS: snapshot.Config.Attention.CriticalFuse.Window.Milliseconds(), CriticalTotalLimit: snapshot.Config.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: snapshot.Config.Attention.CriticalFuse.PerRunLimit, Now: time.Now,
+		AttentionDailyQuota: attentionQuota(snapshot.Config.Attention.DailyQuota), DayTimezone: snapshot.Config.Attention.DayTimezone, DailySummaryAt: snapshot.Config.Attention.DailySummaryAt, CriticalWindowMS: snapshot.Config.Attention.CriticalFuse.Window.Milliseconds(), CriticalTotalLimit: snapshot.Config.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: snapshot.Config.Attention.CriticalFuse.PerRunLimit, Channels: interruptChannels(snapshot.Config.Attention), Now: time.Now,
 	}
 	// Recovery runs before Assemble starts any worker. Incomplete process
 	// evidence deliberately fails closed and becomes a visible startup_stall
@@ -111,6 +111,17 @@ func attentionQuota(q config.DailyQuota) map[storage.InterruptSeverity]int {
 // startSchedulers is the sole owner of siftd's three DESIGN §6.1 clocks.
 // Intake's cursor still determines whether a poll is due; the supervisor
 // interval also bounds recovery of persisted outbox retry deadlines.
+func interruptChannels(attention config.Attention) []storage.InterruptChannel {
+	channels := make([]storage.InterruptChannel, 0, len(attention.Channels))
+	for _, c := range attention.Channels {
+		if !c.Enabled {
+			continue
+		}
+		channels = append(channels, storage.InterruptChannel{ID: c.ID, Type: c.Type, TargetRef: c.TargetRef, Capabilities: append([]string(nil), c.Capabilities...), Renderer: c.Renderer, Default: c.Default})
+	}
+	return channels
+}
+
 func startSchedulers(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, cfg config.Scheduler) error {
 	return startSchedulersWithFactory(ctx, db, workers, termination, cfg, productionSchedulerFactory{}, schedulerHooks{})
 }

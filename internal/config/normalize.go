@@ -586,14 +586,29 @@ func normalizeAttention(raw *RawAttention, cfg *Config) error {
 		defaults := 0
 		channels := make([]AttentionChannel, 0, len(*raw.Channels))
 		for _, c := range *raw.Channels {
-			if c.ID == "" || seen[c.ID] || c.Type != "webhook" || c.Target.SecretRef == "" || len(c.Capabilities) == 0 {
-				return configError("attention.channels", "channels must have unique id, webhook type, secret_ref and capabilities")
+			if c.ID == "" || seen[c.ID] || c.Type != "webhook" || c.Target.SecretRef == "" || len(c.Capabilities) == 0 || (c.Renderer != "" && c.Renderer != "plain-v1") {
+				return configError("attention.channels", "channels must have unique id, webhook type, secret_ref, plain-v1 renderer and capabilities")
 			}
 			seen[c.ID] = true
 			if c.Default {
 				defaults++
 			}
-			channels = append(channels, AttentionChannel{ID: c.ID, Type: c.Type, TargetRef: "secret_ref:" + c.Target.SecretRef, Capabilities: append([]string(nil), c.Capabilities...), Default: c.Default})
+			caps := append([]string(nil), c.Capabilities...)
+			sort.Strings(caps)
+			for i := 1; i < len(caps); i++ {
+				if caps[i] == caps[i-1] {
+					return configError("attention.channels", "channel capabilities must be unique")
+				}
+			}
+			enabled := true
+			if c.Enabled != nil {
+				enabled = *c.Enabled
+			}
+			renderer := c.Renderer
+			if renderer == "" {
+				renderer = "plain-v1"
+			}
+			channels = append(channels, AttentionChannel{ID: c.ID, Enabled: enabled, Renderer: renderer, Type: c.Type, TargetRef: "secret_ref:" + c.Target.SecretRef, Capabilities: caps, Default: c.Default})
 		}
 		if defaults > 1 {
 			return configError("attention.channels", "at most one default channel")

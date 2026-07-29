@@ -134,7 +134,10 @@ func (d *Daemon) AddChannelWorker(w *channelworker.Worker) {
 func interruptChannels(attention config.Attention) []storage.InterruptChannel {
 	channels := make([]storage.InterruptChannel, 0, len(attention.Channels))
 	for _, c := range attention.Channels {
-		channels = append(channels, storage.InterruptChannel{ID: c.ID, Type: c.Type, TargetRef: c.TargetRef, Capabilities: append([]string(nil), c.Capabilities...), Default: c.Default})
+		if !c.Enabled {
+			continue
+		}
+		channels = append(channels, storage.InterruptChannel{ID: c.ID, Type: c.Type, TargetRef: c.TargetRef, Renderer: c.Renderer, Capabilities: append([]string(nil), c.Capabilities...), Default: c.Default})
 	}
 	return channels
 }

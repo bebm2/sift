@@ -85,7 +85,7 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 	if kind == "critical_fuse" {
 		payloadKind = "critical_fused"
 	}
-	payload, err := json.Marshal(map[string]any{"delivery_kind": "attention_batch", "batch_id": batchID, "batch_kind": payloadKind, "channel": channel, "project_id": project, "forge_alert_target": map[string]any{"forge_kind": forgeKind, "forge_host": host, "forge_project_key": forgeProject, "target_kind": targetKind, "target_id": targetID}, "scope": scope, "scope_id": scopeID, "due_at_ms": due, "members": members, "rendered_text": joinBatchText(texts)})
+	payload, err := json.Marshal(map[string]any{"delivery_kind": "attention_batch", "batch_id": batchID, "delivery_id": deliveryID, "batch_kind": payloadKind, "channel": channel, "project_id": project, "forge_alert_target": map[string]any{"forge_kind": forgeKind, "forge_host": host, "forge_project_key": forgeProject, "target_kind": targetKind, "target_id": targetID}, "scope": scope, "scope_id": scopeID, "due_at_ms": due, "members": members, "rendered_text": joinBatchText(texts)})
 	if err != nil {
 		return err
 	}

@@ -69,6 +69,45 @@
             "null"
           ]
         },
+        "channels": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "capabilities": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "renderer": {
+                "type": "string"
+              },
+              "target": {
+                "type": "object"
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "critical_fuse": {
           "additionalProperties": false,
           "properties": {
@@ -146,6 +185,33 @@
             "integer",
             "null"
           ]
+        },
+        "reason_defaults": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "expires_after": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "on_expire": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "on_max_escalations": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "type": "object"
         }
       },
       "type": [
