@@ -157,16 +157,19 @@ type RawAttentionReasonDefault struct {
 	OnMaxEscalations *string `json:"on_max_escalations,omitempty"`
 }
 
+type RawAttentionChannelTarget struct {
+	contract.ClosedType `json:"-"`
+	SecretRef           string `json:"secret_ref"`
+}
+
 type RawAttentionChannel struct {
-	ID       string `json:"id"`
-	Enabled  *bool  `json:"enabled,omitempty"`
-	Renderer string `json:"renderer"`
-	Type     string `json:"type"`
-	Target   struct {
-		SecretRef string `json:"secret_ref"`
-	} `json:"target"`
-	Capabilities []string `json:"capabilities"`
-	Default      bool     `json:"default"`
+	ID           string                    `json:"id"`
+	Enabled      *bool                     `json:"enabled,omitempty"`
+	Renderer     string                    `json:"renderer"`
+	Type         string                    `json:"type"`
+	Target       RawAttentionChannelTarget `json:"target"`
+	Capabilities []string                  `json:"capabilities"`
+	Default      bool                      `json:"default"`
 }
 
 type RawAttention struct {

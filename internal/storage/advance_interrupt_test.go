@@ -158,6 +158,18 @@ func TestAdvanceInterruptStartupStallAtLimitHoldsRatherThanAutoRejecting(t *test
 	}
 }
 
+func TestNextDailySummaryAtSkipsTheCurrentOccurrence(t *testing.T) {
+	const at = int64(1785286800000)
+	got, ok := NextDailySummaryAt(at, "Asia/Shanghai", "09:00")
+	if !ok || got <= at {
+		t.Fatalf("next summary at instant = %d, %v", got, ok)
+	}
+	oneMSLater, ok := NextDailySummaryAt(at+1, "Asia/Shanghai", "09:00")
+	if !ok || oneMSLater != got {
+		t.Fatalf("next summary after instant = %d, %v; want %d", oneMSLater, ok, got)
+	}
+}
+
 func TestChannelRendererIncludesCanonicalCommands(t *testing.T) {
 	rendered, commands, err := renderChannelInterrupt("标题", "说明", `[{"label":"log","target":"/log"}]`, `[{"id":"hold","label":"暂缓","effect":"等待","risk":"延迟"}]`, "run-1", "nonce-1")
 	if err != nil {

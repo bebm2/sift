@@ -95,6 +95,12 @@
                 "type": "string"
               },
               "target": {
+                "additionalProperties": false,
+                "properties": {
+                  "secret_ref": {
+                    "type": "string"
+                  }
+                },
                 "type": "object"
               },
               "type": {

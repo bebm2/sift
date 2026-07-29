@@ -137,8 +137,12 @@ func insertInterrupt(t *testing.T, db *DB, id, runID, entryID string) {
 func insertInterruptDelivery(t *testing.T, db *DB, id, interruptID, opKey string) {
 	t.Helper()
 	mustExec(t, db, `INSERT INTO interrupt_deliveries
-		(id, interrupt_id, surface, priority, operation_key, state, attempt_count, created_at_ms)
-		VALUES (?, ?, 'channel', 'normal', ?, 'pending', 0, ?)`, id, interruptID, opKey, testNow)
+		(id, delivery_id, interrupt_id, surface, channel_id, channel_snapshot_json, interrupt_version, nonce, escalation_no,
+		 priority, operation_key, state, attempt_count, forge_kind, forge_host, forge_project_key,
+		 forge_alert_target_kind, forge_alert_target_id, created_at_ms)
+		VALUES (?, ?, ?, 'channel', 'ops', '{"id":"ops"}', 1, 'nonce', 0,
+		 'normal', ?, 'pending', 0, 'github', 'github.com', 'org/repo', 'issue', '1', ?)`,
+		id, "interrupt:"+interruptID+":0:ops", interruptID, opKey, testNow)
 }
 
 func insertAttemptProbe(t *testing.T, db *DB, id, runID string, no int, interruptID, eventID string) {

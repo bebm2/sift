@@ -167,8 +167,11 @@ func (s HTTPWebhookSender) Send(ctx context.Context, endpoint, body string) (str
 	if resp.StatusCode == http.StatusTooManyRequests {
 		var retryAfter int64
 		if value := resp.Header.Get("Retry-After"); value != "" {
-			if seconds, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64); parseErr == nil && seconds >= 0 {
+			value = strings.TrimSpace(value)
+			if seconds, parseErr := strconv.ParseInt(value, 10, 64); parseErr == nil && seconds >= 0 {
 				retryAfter = seconds * 1000
+			} else if when, parseErr := http.ParseTime(value); parseErr == nil && when.After(time.Now()) {
+				retryAfter = time.Until(when).Milliseconds()
 			}
 		}
 		return "", RateLimitedError{RetryAfterMS: retryAfter}

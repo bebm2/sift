@@ -95,6 +95,10 @@ type channelPayload struct {
 	Nonce            string            `json:"nonce"`
 	EscalationNo     int               `json:"escalation_no"`
 	BatchID          string            `json:"batch_id"`
+	BatchKind        string            `json:"batch_kind"`
+	Scope            string            `json:"scope"`
+	ScopeID          string            `json:"scope_id"`
+	DueAtMS          int64             `json:"due_at_ms"`
 	Channel          json.RawMessage   `json:"channel"`
 	ProjectID        string            `json:"project_id"`
 	ForgeAlertTarget *forgeAlertTarget `json:"forge_alert_target"`
@@ -112,7 +116,7 @@ func channelSubject(p channelPayload) string { return p.DeliveryID }
 // ChannelDiagnostics reads the durable Channel projections used by operator
 // views. It intentionally does not infer state from in-memory workers.
 func (d *DB) ChannelDiagnostics(ctx context.Context) ([]map[string]any, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,d.channel_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(o.next_attempt_at_ms,0),COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(o.state,'') FROM interrupt_deliveries d LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations o ON o.operation_key=e.alert_operation_key WHERE d.surface='channel' ORDER BY d.created_at_ms,d.delivery_id`)
+	rows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,d.channel_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(channel_op.next_attempt_at_ms,0),COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(alert_op.state,'') FROM interrupt_deliveries d LEFT JOIN outbox_operations channel_op ON channel_op.operation_key=d.operation_key LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations alert_op ON alert_op.operation_key=e.alert_operation_key WHERE d.surface='channel' ORDER BY d.created_at_ms,d.delivery_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +134,7 @@ func (d *DB) ChannelDiagnostics(ctx context.Context) ([]map[string]any, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	batchRows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,b.channel_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(o.next_attempt_at_ms,0),COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(o.state,'') FROM batch_deliveries d JOIN attention_batches b ON b.id=d.batch_id LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations o ON o.operation_key=e.alert_operation_key ORDER BY d.created_at_ms,d.delivery_id`)
+	batchRows, err := d.db.QueryContext(ctx, `SELECT d.delivery_id,b.channel_id,d.operation_key,d.state,d.attempt_count,COALESCE(d.last_error,''),d.created_at_ms,COALESCE(channel_op.next_attempt_at_ms,0),COALESCE(e.consecutive_failures,0),COALESCE(e.state,''),COALESCE(e.last_error_class,''),COALESCE(e.alert_operation_key,''),COALESCE(alert_op.state,'') FROM batch_deliveries d JOIN attention_batches b ON b.id=d.batch_id LEFT JOIN outbox_operations channel_op ON channel_op.operation_key=d.operation_key LEFT JOIN channel_failure_episodes e ON e.subject_id=d.delivery_id AND e.generation=1 LEFT JOIN outbox_operations alert_op ON alert_op.operation_key=e.alert_operation_key ORDER BY d.created_at_ms,d.delivery_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -217,9 +221,18 @@ func applyChannelOutcomeTx(ctx context.Context, tx *sql.Tx, claim ClaimedOperati
 			}
 			rows.Close()
 			for _, m := range members {
-				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ledger_entries(id,run_id,interrupt_id,entry_kind,features_schema_version,features_json,created_at_ms) VALUES(?,?,?,'attention_delivery',1,?,?)`, "channel_delivery:"+subject+":"+m.ID, m.RunID, m.ID, `{"surface":"channel","delivery_state":"delivered"}`, outcome.NowMS)
-				if err != nil {
+				ledgerID := "channel_delivery:" + subject + ":" + m.ID
+				features := `{"surface":"channel","delivery_state":"delivered"}`
+				if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ledger_entries(id,run_id,interrupt_id,entry_kind,features_schema_version,features_json,created_at_ms) VALUES(?,?,?,'attention_delivery',1,?,?)`, ledgerID, m.RunID, m.ID, features, outcome.NowMS); err != nil {
 					return err
+				}
+				var gotRun, gotInterrupt, gotKind, gotFeatures string
+				var gotVersion int
+				if err = tx.QueryRowContext(ctx, `SELECT run_id,interrupt_id,entry_kind,features_schema_version,features_json FROM ledger_entries WHERE id=?`, ledgerID).Scan(&gotRun, &gotInterrupt, &gotKind, &gotVersion, &gotFeatures); err != nil {
+					return err
+				}
+				if gotRun != m.RunID || gotInterrupt != m.ID || gotKind != "attention_delivery" || gotVersion != 1 || gotFeatures != features {
+					return ErrOperationConflict
 				}
 			}
 		}
@@ -307,10 +320,31 @@ func (d *DB) EnqueueChannelPublish(ctx context.Context, op Operation, deliveryID
 		if json.Unmarshal(p.Channel, &channel) != nil || channel.ID == "" || channel.Type != "webhook" || channel.TargetRef == "" || channel.Renderer != "plain-v1" {
 			return fmt.Errorf("storage: invalid batch channel snapshot")
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,operation_key,updated_at_ms) VALUES(?,'sealed',?,?,?,?,?,?,?,?,?,?)`, p.BatchID, p.ProjectID, channel.ID, string(p.Channel), p.ForgeAlertTarget.ForgeKind, p.ForgeAlertTarget.ForgeHost, p.ForgeAlertTarget.ForgeProjectKey, p.ForgeAlertTarget.TargetKind, p.ForgeAlertTarget.TargetID, op.Key, nowMS); err != nil {
+		kind := p.BatchKind
+		if kind == "critical_fused" {
+			kind = "critical_fuse"
+		}
+		if (kind != "daily_summary" && kind != "critical_fuse") || p.BatchID == "" || p.Scope == "" || p.ScopeID == "" || p.DueAtMS <= 0 {
+			return fmt.Errorf("storage: incomplete batch authority")
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,due_at_ms,operation_key,payload_json,payload_digest,created_at_ms,sealed_at_ms,updated_at_ms) VALUES(?,'sealed',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.BatchID, p.ProjectID, channel.ID, string(p.Channel), p.ForgeAlertTarget.ForgeKind, p.ForgeAlertTarget.ForgeHost, p.ForgeAlertTarget.ForgeProjectKey, p.ForgeAlertTarget.TargetKind, p.ForgeAlertTarget.TargetID, kind, deliveryID, p.Scope, p.ScopeID, p.DueAtMS, op.Key, string(op.Payload), digestJSON(op.Payload), nowMS, nowMS, nowMS); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO batch_deliveries(batch_id,delivery_id,operation_key,state,created_at_ms) VALUES(?,?,?,'pending',?)`, p.BatchID, deliveryID, op.Key, nowMS)
+		var existingKey, existingPayload string
+		if err = tx.QueryRowContext(ctx, `SELECT operation_key,payload_json FROM attention_batches WHERE id=?`, p.BatchID).Scan(&existingKey, &existingPayload); err != nil {
+			return err
+		}
+		if existingKey != op.Key || existingPayload != string(op.Payload) {
+			return ErrOperationConflict
+		}
+		_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO batch_deliveries(batch_id,delivery_id,operation_key,state,created_at_ms) VALUES(?,?,?,'pending',?)`, p.BatchID, deliveryID, op.Key, nowMS)
+		if err == nil {
+			var existingDelivery, existingKey string
+			err = tx.QueryRowContext(ctx, `SELECT delivery_id,operation_key FROM batch_deliveries WHERE batch_id=?`, p.BatchID).Scan(&existingDelivery, &existingKey)
+			if err == nil && (existingDelivery != deliveryID || existingKey != op.Key) {
+				err = ErrOperationConflict
+			}
+		}
 	} else {
 		if p.InterruptID == "" || p.InterruptVersion < 1 || p.Nonce == "" {
 			return fmt.Errorf("storage: invalid interrupt channel delivery")
