@@ -57,7 +57,7 @@ func (d *DB) RecordReport(ctx context.Context, cmd ReportSubmitCmd) (ReportResul
 	var tokenHash string
 	var projectID, snapshotID string
 	var runVersion int64
-	if err := tx.QueryRowContext(ctx, `SELECT a.phase,a.generation,c.run_token_hash,r.project_id,r.config_snapshot_id,r.version FROM attempts a JOIN attempt_claims c USING(run_id,attempt_no) JOIN runs r USING(id) WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&phase, &storedGeneration, &tokenHash, &projectID, &snapshotID, &runVersion); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT a.phase,a.generation,c.run_token_hash,r.project_id,r.config_snapshot_id,r.version FROM attempts a JOIN attempt_claims c USING(run_id,attempt_no) JOIN runs r ON r.id=a.run_id WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&phase, &storedGeneration, &tokenHash, &projectID, &snapshotID, &runVersion); err != nil {
 		return ReportResult{}, errors.New("report: unauthorized")
 	}
 	if tokenHash != handoffHash(cmd.Token) || storedGeneration != cmd.Generation {
@@ -86,7 +86,10 @@ func (d *DB) RecordReport(ctx context.Context, cmd ReportSubmitCmd) (ReportResul
 			return ReportResult{}, err
 		}
 		var c struct {
-			Report struct{ EventsPerMinute, Burst int } `json:"report"`
+			Report struct {
+				EventsPerMinute int `json:"events_per_minute"`
+				Burst           int `json:"burst"`
+			} `json:"report"`
 		}
 		if json.Unmarshal([]byte(raw), &c) != nil || c.Report.Burst < 1 || c.Report.EventsPerMinute < 1 {
 			return ReportResult{}, errors.New("report: invalid snapshot")
@@ -179,7 +182,7 @@ func (d *DB) recordBlockerReport(ctx context.Context, cmd ReportSubmitCmd, diges
 	var cfg reportRuntimeConfig
 	var runVersion int64
 	var worktree string
-	if err := d.db.QueryRowContext(ctx, `SELECT a.worktree_path,r.version FROM attempts a JOIN runs r USING(id) WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&worktree, &runVersion); err != nil {
+	if err := d.db.QueryRowContext(ctx, `SELECT a.worktree_path,r.version FROM attempts a JOIN runs r ON r.id=a.run_id WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&worktree, &runVersion); err != nil {
 		return ReportResult{}, errors.New("report: unauthorized")
 	}
 	if err := json.Unmarshal(mustReportSnapshot(ctx, d.db, cmd.RunID, cmd.AttemptNo), &cfg); err != nil {
@@ -189,10 +192,10 @@ func (d *DB) recordBlockerReport(ctx context.Context, cmd ReportSubmitCmd, diges
 	receiptID := newID()
 	facts := map[string]string{"blocker_summary": cmd.Payload["blocker_summary"].(string), "attempted_summary": cmd.Payload["attempted_summary"].(string), "recommended_action": cmd.Payload["recommended_action"].(string), "agent_log_ref": strings.TrimRight(worktree, "/") + "/agent.log"}
 	err := func() error {
-		_, emitErr := d.emitInterruptHooks(ctx, EmitInterruptCmd{RunID: cmd.RunID, ExpectedRunVersion: runVersion, AttemptNo: &n, Reason: InterruptAgentBlocked, Facts: facts, Generation: InterruptGeneration{AttemptNo: cmd.AttemptNo, Generation: cmd.Generation, ReportID: receiptID}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, MaxEscalations: cfg.Attention.MaxEscalations, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, Channels: reportChannels(cfg), Source: SourceAgent, NowMS: cmd.NowMS}, func(tx *sql.Tx) error {
+		_, emitErr := d.emitInterruptHooks(ctx, EmitInterruptCmd{RunID: cmd.RunID, ExpectedRunVersion: runVersion, AttemptNo: &n, Reason: InterruptAgentBlocked, ReportOnly: true, Facts: facts, Generation: InterruptGeneration{AttemptNo: cmd.AttemptNo, Generation: cmd.Generation, ReportID: receiptID}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, MaxEscalations: cfg.Attention.MaxEscalations, AttentionDailyQuota: map[InterruptSeverity]int{SeverityLow: cfg.Attention.DailyQuota.Low, SeverityNormal: cfg.Attention.DailyQuota.Normal, SeverityHigh: cfg.Attention.DailyQuota.High}, DayTimezone: cfg.Attention.DayTimezone, DailySummaryAt: cfg.Attention.DailySummaryAt, CriticalWindowMS: cfg.Attention.CriticalFuse.Window, CriticalTotalLimit: cfg.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: cfg.Attention.CriticalFuse.PerRunLimit, Channels: reportChannels(cfg), Source: SourceAgent, NowMS: cmd.NowMS}, func(tx *sql.Tx) error {
 			var phase, tokenHash, projectID, snapshotID string
 			var generation int
-			if err := tx.QueryRowContext(ctx, `SELECT a.phase,a.generation,c.run_token_hash,r.project_id,r.config_snapshot_id,r.version FROM attempts a JOIN attempt_claims c USING(run_id,attempt_no) JOIN runs r USING(id) WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&phase, &generation, &tokenHash, &projectID, &snapshotID, &runVersion); err != nil || phase != "running" || generation != cmd.Generation || tokenHash != handoffHash(cmd.Token) {
+			if err := tx.QueryRowContext(ctx, `SELECT a.phase,a.generation,c.run_token_hash,r.project_id,r.config_snapshot_id,r.version FROM attempts a JOIN attempt_claims c USING(run_id,attempt_no) JOIN runs r ON r.id=a.run_id WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&phase, &generation, &tokenHash, &projectID, &snapshotID, &runVersion); err != nil || phase != "running" || generation != cmd.Generation || tokenHash != handoffHash(cmd.Token) {
 				return errors.New("report: unauthorized")
 			}
 			var oldID, oldDigest, oldEvent string
@@ -280,20 +283,22 @@ func (d *DB) commitReportQuotaExhaustion(ctx context.Context, cmd ReportSubmitCm
 	defer tx.Rollback()
 	var phase, tokenHash, snapshotID string
 	var generation int
-	if err := tx.QueryRowContext(ctx, `SELECT a.phase,a.generation,c.run_token_hash,r.config_snapshot_id FROM attempts a JOIN attempt_claims c USING(run_id,attempt_no) JOIN runs r USING(id) WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&phase, &generation, &tokenHash, &snapshotID); err != nil || phase != "running" || generation != cmd.Generation || tokenHash != handoffHash(cmd.Token) {
+	if err := tx.QueryRowContext(ctx, `SELECT a.phase,a.generation,c.run_token_hash,r.config_snapshot_id FROM attempts a JOIN attempt_claims c USING(run_id,attempt_no) JOIN runs r ON r.id=a.run_id WHERE a.run_id=? AND a.attempt_no=?`, cmd.RunID, cmd.AttemptNo).Scan(&phase, &generation, &tokenHash, &snapshotID); err != nil || phase != "running" || generation != cmd.Generation || tokenHash != handoffHash(cmd.Token) {
 		return errors.New("report: unauthorized")
+	}
+	// The exhaustion row is the rate-token linearization point. Replays and
+	// later blockers reuse it without consuming another token.
+	var existing string
+	if err := tx.QueryRowContext(ctx, `SELECT security_event_id FROM report_quota_exhaustions WHERE run_id=? AND daily_bucket_start_ms=?`, cmd.RunID, start).Scan(&existing); err == nil {
+		return tx.Commit()
+	} else if err != sql.ErrNoRows {
+		return err
 	}
 	if err := consumeReportTokenTx(ctx, tx, cmd, snapshotID); err != nil {
 		return err
 	}
 	var projectID string
 	if err := tx.QueryRowContext(ctx, `SELECT project_id FROM runs WHERE id=? AND version=?`, cmd.RunID, runVersion).Scan(&projectID); err != nil {
-		return err
-	}
-	var existing string
-	if err := tx.QueryRowContext(ctx, `SELECT security_event_id FROM report_quota_exhaustions WHERE run_id=? AND daily_bucket_start_ms=?`, cmd.RunID, start).Scan(&existing); err == nil {
-		return tx.Commit()
-	} else if err != sql.ErrNoRows {
 		return err
 	}
 	eventID := newID()
@@ -307,6 +312,13 @@ func (d *DB) commitReportQuotaExhaustion(ctx context.Context, cmd ReportSubmitCm
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO report_quota_exhaustions(run_id,daily_bucket_start_ms,daily_bucket_end_ms,security_event_id,failure_digest,generation_key,created_at_ms) VALUES(?,?,?,?,?,?,?)`, cmd.RunID, start, end, eventID, digest, key, cmd.NowMS); err != nil {
+		// Another writer may have linearized this day after our initial read.
+		// Roll back the tentative token/event, then reuse the durable winner.
+		_ = tx.Rollback()
+		var winner string
+		if lookupErr := d.db.QueryRowContext(ctx, `SELECT security_event_id FROM report_quota_exhaustions WHERE run_id=? AND daily_bucket_start_ms=?`, cmd.RunID, start).Scan(&winner); lookupErr == nil {
+			return nil
+		}
 		return err
 	}
 	return tx.Commit()
@@ -322,7 +334,10 @@ func consumeReportTokenTx(ctx context.Context, tx *sql.Tx, cmd ReportSubmitCmd, 
 			return err
 		}
 		var c struct {
-			Report struct{ EventsPerMinute, Burst int } `json:"report"`
+			Report struct {
+				EventsPerMinute int `json:"events_per_minute"`
+				Burst           int `json:"burst"`
+			} `json:"report"`
 		}
 		if json.Unmarshal([]byte(raw), &c) != nil || c.Report.Burst < 1 || c.Report.EventsPerMinute < 1 {
 			return errors.New("report: invalid snapshot")
