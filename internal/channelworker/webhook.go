@@ -147,7 +147,11 @@ func (EnvironmentSecretResolver) Resolve(_ context.Context, name string) (string
 	return "", ErrAuthOrCapability
 }
 
-type HTTPWebhookSender struct{ Client *http.Client }
+type HTTPWebhookSender struct {
+	Client *http.Client
+	// Now is injectable so HTTP-date Retry-After remains deterministic in tests.
+	Now func() time.Time
+}
 
 func (s HTTPWebhookSender) Send(ctx context.Context, endpoint, body string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body))
@@ -170,8 +174,14 @@ func (s HTTPWebhookSender) Send(ctx context.Context, endpoint, body string) (str
 			value = strings.TrimSpace(value)
 			if seconds, parseErr := strconv.ParseInt(value, 10, 64); parseErr == nil && seconds >= 0 {
 				retryAfter = seconds * 1000
-			} else if when, parseErr := http.ParseTime(value); parseErr == nil && when.After(time.Now()) {
-				retryAfter = time.Until(when).Milliseconds()
+			} else {
+				now := time.Now()
+				if s.Now != nil {
+					now = s.Now()
+				}
+				if when, parseErr := http.ParseTime(value); parseErr == nil && when.After(now) {
+					retryAfter = when.Sub(now).Milliseconds()
+				}
 			}
 		}
 		return "", RateLimitedError{RetryAfterMS: retryAfter}
