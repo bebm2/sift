@@ -13,6 +13,34 @@ type GateCandidate struct {
 	AttemptNo, Generation                                  int
 }
 
+// FreezeGateChangeHead records the exact Change head that Gate is about to
+// evaluate. It returns the current Run version, advancing it only on head drift.
+func (d *DB) FreezeGateChangeHead(ctx context.Context, runID, changeID, headSHA string, expectedVersion, nowMS int64) (int64, error) {
+	if runID == "" || changeID == "" || headSHA == "" || expectedVersion < 1 || nowMS < 1 {
+		return 0, errors.New("storage: invalid gate change identity")
+	}
+	result, err := d.db.ExecContext(ctx, `UPDATE runs SET change_head_sha=?,version=version+1,updated_at_ms=? WHERE id=? AND change_id=? AND version=? AND (change_head_sha IS NULL OR change_head_sha<>?)`, headSHA, nowMS, runID, changeID, expectedVersion, headSHA)
+	if err != nil {
+		return 0, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if changed == 1 {
+		return expectedVersion + 1, nil
+	}
+	var version int64
+	var currentChange, currentHead string
+	if err := d.db.QueryRowContext(ctx, `SELECT version,change_id,COALESCE(change_head_sha,'') FROM runs WHERE id=?`, runID).Scan(&version, &currentChange, &currentHead); err != nil {
+		return 0, err
+	}
+	if version != expectedVersion || currentChange != changeID || currentHead != headSHA {
+		return 0, ErrRejectedStale
+	}
+	return version, nil
+}
+
 func (d *DB) GateCandidates(ctx context.Context, projectID string) ([]GateCandidate, error) {
 	if projectID == "" {
 		return nil, errors.New("storage: gate candidates require project")

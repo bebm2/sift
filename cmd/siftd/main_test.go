@@ -35,13 +35,18 @@ func TestProductionSchedulerWakesOutboxAfterEnqueueAndEmitInterrupt(t *testing.T
 	})
 
 	testProductionWake(t, true, func(ctx context.Context, db *storage.DB, now int64) error {
-		if err := db.SeedReverseSyncRunForTest(ctx, "run", "project", "cfg", "42", "", "queued", now); err != nil {
+		const head = "0123456789abcdef0123456789abcdef01234567"
+		if err := db.SeedReverseSyncRunForTest(ctx, "run", "project", "cfg", "42", "change-1", "queued", now); err != nil {
 			return err
 		}
-		_, err := db.EmitInterrupt(ctx, storage.EmitInterruptCmd{
-			RunID: "run", ExpectedRunVersion: 1, Reason: storage.InterruptCodeReview,
-			Facts:      map[string]string{"change_ref": "https://example.test/change/1", "head_sha": "0123456789abcdef0123456789abcdef01234567", "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://example.test/change/1/diff"},
-			Generation: storage.InterruptGeneration{ChangeID: "change-1", HeadSHA: "0123456789abcdef0123456789abcdef01234567"},
+		version, err := db.FreezeGateChangeHead(ctx, "run", "change-1", head, 1, now)
+		if err != nil {
+			return err
+		}
+		_, err = db.EmitInterrupt(ctx, storage.EmitInterruptCmd{
+			RunID: "run", ExpectedRunVersion: version, Reason: storage.InterruptMergeConflict,
+			Facts:      map[string]string{"change_ref": "https://example.test/change/1", "head_sha": head, "conflict_summary": "conflict", "recommended_action": "retry", "conflict_evidence_ref": "https://example.test/change/1/conflict"},
+			Generation: storage.InterruptGeneration{ChangeID: "change-1", HeadSHA: head, ConflictDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 			GatePhase:  storage.GateNone, GuardrailLevel: storage.GuardrailNone,
 			AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 10, storage.SeverityNormal: 10, storage.SeverityHigh: 10},
 			DayTimezone:         "UTC", Source: storage.SourceSystem, NowMS: now,

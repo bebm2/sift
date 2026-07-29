@@ -82,6 +82,12 @@ func (d *DB) SeedGateCandidateForTest(ctx context.Context, runID, projectID, cfg
 	return nil
 }
 
+// SetRunChangeHeadForTest completes the immutable Change identity used by Gate fixtures.
+func (d *DB) SetRunChangeHeadForTest(ctx context.Context, runID, changeID, headSHA string) error {
+	_, err := d.db.ExecContext(ctx, `UPDATE runs SET change_id=?, change_head_sha=? WHERE id=?`, changeID, headSHA, runID)
+	return err
+}
+
 // SeedCertificationForTest installs a current certified projection for Gate tests.
 func (d *DB) SeedCertificationForTest(ctx context.Context, kind, version string, nowMS int64) error {
 	if _, err := d.db.ExecContext(ctx, `INSERT INTO certifications

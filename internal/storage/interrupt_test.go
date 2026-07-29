@@ -12,6 +12,25 @@ func interruptQuota() map[InterruptSeverity]int {
 	return map[InterruptSeverity]int{SeverityLow: 3, SeverityNormal: 5, SeverityHigh: 5}
 }
 
+func emitTestInterrupt(t *testing.T, ctx context.Context, db *DB, cmd EmitInterruptCmd) (Interrupt, error) {
+	t.Helper()
+	if cmd.Reason != InterruptCodeReview && cmd.Reason != InterruptMergeConflict {
+		return db.EmitInterrupt(ctx, cmd)
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE runs SET change_id=?, change_head_sha=? WHERE id=?`, cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.RunID); err != nil {
+		return Interrupt{}, err
+	}
+	if cmd.Reason == InterruptMergeConflict {
+		return db.EmitInterrupt(ctx, cmd)
+	}
+	r := gateRecord(cmd.NowMS)
+	r.RunID, r.HeadSHA = cmd.RunID, cmd.Generation.HeadSHA
+	r.GateInputHash = strings.Repeat("f", 63) + "0"
+	r.EffectivePolicyHash = strings.Repeat("e", 64)
+	_, in, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd)
+	return in, err
+}
+
 func TestInterruptGenerationVectors(t *testing.T) {
 	shaA := strings.Repeat("a", 64)
 	shaB := strings.Repeat("b", 64)
@@ -51,7 +70,7 @@ func TestEmitInterruptWritesFiveThingsAndDeduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789abcdef0123456789abcdef01234567"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, MaxEscalations: 2, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
-	in, err := db.EmitInterrupt(ctx, cmd)
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +91,7 @@ func TestEmitInterruptWritesFiveThingsAndDeduplicates(t *testing.T) {
 	}
 	// A replay returns the same record even though the Run version advanced.
 	cmd.ExpectedRunVersion = 99
-	again, err := db.EmitInterrupt(ctx, cmd)
+	again, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil || again.ID != in.ID {
 		t.Fatalf("replay = %#v, %v", again, err)
 	}
@@ -160,7 +179,7 @@ func TestEmitInterruptT4UsesConfiguredSeamAndEscapesFragmentsOnce(t *testing.T) 
 		return InterruptT4Output{Headline: in.Headline, Conclusion: "<b>risk</b>", KeyPoints: []string{"<b>risk</b>"}, Options: []string{"approve", "reject", "hold"}, RecommendedOptionID: "approve"}, nil
 	})
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "<b>risk</b>", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789abcdef0123456789abcdef01234567"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
-	got, err := db.EmitInterrupt(ctx, cmd)
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +198,7 @@ func TestEmitInterruptRejectsNonCanonicalRecommendedActionBeforeAnyWrite(t *test
 		t.Fatal(err)
 	}
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "required", "recommended_action": "bogus", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789abcdef012345678901234567890123456789"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
-	if _, err := db.EmitInterrupt(ctx, cmd); err == nil || !strings.Contains(err.Error(), "recommended_action") {
+	if _, err := emitTestInterrupt(t, ctx, db, cmd); err == nil || !strings.Contains(err.Error(), "recommended_action") {
 		t.Fatalf("error = %v", err)
 	}
 	assertCount(t, db, "interrupts", 0)

@@ -102,7 +102,12 @@ func TestGateHITLIsAtomicWithCalibration(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789012345678901234567890123456789"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
-	r, in, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, gateRecord(testNow), cmd)
+	if _, err := db.db.ExecContext(ctx, `UPDATE runs SET change_id=?, change_head_sha=? WHERE id=?`, cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.RunID); err != nil {
+		t.Fatal(err)
+	}
+	record := gateRecord(testNow)
+	record.HeadSHA = cmd.Generation.HeadSHA
+	r, in, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, record, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,4 +121,10 @@ func TestGateHITLIsAtomicWithCalibration(t *testing.T) {
 	assertCount(t, db, "gate_evaluations", 1)
 	assertCount(t, db, "calibration_entries", 1)
 	assertCount(t, db, "ledger_entries", 1)
+
+	forged := `{"arm":"code_review","change_id":"forged","head_sha":"0123456789012345678901234567890123456789","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `"}`
+	if err := mustFail(t, db, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) VALUES (?,?,?,?,?,?)`, in.ID, "code_review", 1, forged, strings.Repeat("f", 64), testNow); !strings.Contains(err.Error(), "invalid interrupt binding identity") {
+		t.Fatalf("forged binding error = %v", err)
+	}
+	assertCount(t, db, "interrupt_command_effect_bindings", 1)
 }
