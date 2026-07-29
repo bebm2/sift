@@ -118,9 +118,11 @@ manual Run 的 discussion target 以 [`storage.md` §5.2](storage.md) 的三列�
 |---|---|
 | `options` 将 `retry,reject,hold` 重排为 `reject,retry,hold` | 拒绝：`interrupt_t4_options_mismatch` |
 | `conclusion` 为未出现在 `brief_fragments` 的文本 | 拒绝：`interrupt_t4_unknown_fragment` |
-| `key_points` 含 `<b>...</b>`、`<!-- sift-op:... -->` 或 `/sift reject` | 拒绝：`interrupt_t4_unsafe_fragment` |
+| `key_points` 含未被冻结的 `<b>...</b>`、`<!-- sift-op:... -->` 或 `/sift reject` | 拒绝：`interrupt_t4_unknown_fragment` |
 | `recommended_option_id=review_report_interrupt_quota`（`failure_review`） | 拒绝：`interrupt_t4_unknown_option` |
 | `links=[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}]` | 接受；该 target 是唯一合法的服务端安全事件引用 |
+
+所有来源（T4 正常输出和 fallback facts）的 `recommended_action`/`recommended_option_id` 都必须逐字节命中该 reason 在 §3.1 的 canonical option ID；`EmitInterrupt` 在生成 key、admission 或 operation 前执行此校验。T4 input 的 `candidate_options` 也必须逐字段、同序等于该 canonical 集合，故不能以一个仅 schema 合法的 option 绕过此规则。冻结 fragment 的安全域以 [`brain.md` §11.1–§11.2](brain.md) 为准：它只禁止 Cc/换行，允许任意其余冻结 UTF-8；命中后 renderer 一律 `EscapeT4Text`，而不是另设与该接纳器矛盾的 unsafe 拒绝分支。具体 vector：`brief_fragments=["<b>风险</b>","<!-- sift-op:x -->","/sift reject"]`、`conclusion="<b>风险</b>"`、`key_points=["<!-- sift-op:x -->","/sift reject"]`、`recommended_option_id="retry"` 的最终 UTF-8 `brief_markdown` 必为 `结论：\\<b>风险\\</b>；要点：\\<!\\-\\- sift\\-op:x \\-\\->；\\/sift reject；建议：重试失败步骤（retry）`；同一 fragment 未逐字节命中时唯一结果为 fallback。`failure_review` fallback 的输入 facts `{failure_class:"CI",failure_evidence_ref:"/r/ci",recommended_action:"retry"}` 必逐字节持久化为 §3.5 的 JSON `brief`/options；把 action 改为 `hold` 时同样持久化的 `brief` 仅将两处 `retry` 改为 `hold`，options bytes 不变。以上两 fallback vectors 均不创建 T4 变体，且 unknown fragment、重排 option 与未命中 canonical action 都回退或拒发为上表所列结果。
 
 当 `run_id=run-01`、当前 `nonce=n-01` 时，单条 renderer 必须逐字节包含 `/sift hold run-01 n-01 1h`；摘要成员 `interrupt_id=i-01`、`version=2`、`nonce=n-02` 必须包含 `/sift hold run-01 n-02 1h`，不得使用 batch ID、旧 nonce 或仅有动词的缩写。该命令文本只供该成员人工回复，摘要没有批量动作。
 
@@ -267,7 +269,7 @@ M5 的单条 renderer 扩展（forge comment 和 Channel）保留 §3 的既有 
 
 `held_reason` 是 closed enum：`manual | no_compatible_channel | channel_isolated | batch_after_expiry | quota_rejected | critical_fuse | expiry | max_escalations`；它与 `dispatch_state=held` 成对，其他 dispatch state 必为 NULL。`batched` 必有 batch membership，`ready` 必有非空 `next_dispatch_at_ms`，`probe_in_progress` 沿用 §6。显式 Command hold 写 `held_reason=manual`，保存的 expires 时钟按 Command 规则重算；它不改 `expires_after_ms`、on-expire、on-max、downgrade 或 Channel snapshot。
 
-Supervisor 使用注入时间分别扫描 `expires_at_ms <= now` 和 `next_dispatch_at_ms <= now`，但只调用 `AdvanceInterrupt`。该端口一次 CAS 校验 status/version；旧 tick、旧 Channel worker、重启前快照或已关闭对象不得重开、重推或覆盖 nonce。到期的唯一配方为：
+Supervisor 使用注入时间分别扫描 `expires_at_ms <= now` 和 `next_dispatch_at_ms <= now`，但只调用 `AdvanceInterrupt`。expiry scan 必须包含 `held_reason=manual` 的 held 对象，排除其余 held/probe 对象；manual 的 CAS 前态为 `open/held/manual`，并按同一冻结 expiry 配方一次性变为 `expiry`、升级 dispatch 或关闭。该端口一次 CAS 校验 status/version；旧 tick、旧 Channel worker、重启前快照或已关闭对象不得重开、重推或覆盖 nonce。到期的唯一配方为：
 
 1. `on_expire=hold`：`dispatch_state=held, held_reason=expiry, next_dispatch_at_ms=NULL`。
 2. `on_expire=escalate` 且 `escalation_count < max_escalations`：count 加一，以**创建时冻结的** downgrade 决定调用 §4.2，轮换 nonce、version 加一；令 `expires_at_ms=now+expires_after_ms`，并重算当前 dispatch/下一时点：最终 severity 为 `high|critical` 强制改为 `immediate/now`；其余一律改为 `batch` 并取该次升级后首个 summary。`next_window` 只可用于初发的一次冻结 window，绝不在升级时猜测新的 availability；没有早于新 expiry 的 summary 则 held。只有实际单条 immediate delivery 创建该 escalation 的 strong operation。
@@ -279,7 +281,7 @@ Supervisor 使用注入时间分别扫描 `expires_at_ms <= now` 和 `next_dispa
 
 attention 的 append-only admission ledger 是额度/熔断的唯一事实，详见 [`storage.md` §6.3、§9.3](storage.md)。初发 non-critical 成功 CAS 日配额时写 `quota_charged` 与正数 `budget_entry`；额度耗尽仍创建 Interrupt，写 `quota_batched`、`charged_budget_entry_id=NULL` 并入 daily batch。初发 critical 写 `critical_admitted`；升级从 non-critical **首次**到 critical 时由 `AdvanceInterrupt` 写 `critical_admitted`。升级不创建第二笔 attention charge：已有 charge 被 admission 复用，初发为 `quota_batched` 时 charge 继续为 NULL。窗口拒绝写 `critical_fused`，并按 config 的 global 优先、per-Run 次之规则入唯一 critical batch。重放、旧 tick、同一 critical 重推均由 admission 唯一约束返回既有事实。
 
-批次是既有 Interrupt 的 Channel summary，不是新 reason。`attention_batches`/`attention_batch_members` 是唯一协议：daily batch identity 为 `daily:<zone>:<due_at_ms>`，critical identity 为 `critical:<scope>:<scope_id>:<episode_admission_id>`；其 operation key 固定为 `attention-batch:<batch_id>:publish:1`。每个 identity 只允许一个 batch；global 与 per-Run 同时命中固定归 global。成员记录加入时冻结 Interrupt version/nonce、reason、admission 和展示字段；发送前 `PrepareAttentionBatch` 在同一事务重读 `status=open AND version=member_version AND nonce=member_nonce`，关闭/已变更者排除，并以剩余成员创建 immutable sealed payload。空 batch 收敛为 `cancelled`，不发空摘要。
+批次是既有 Interrupt 的 Channel summary，不是新 reason。`attention_batches`/`attention_batch_members` 是唯一协议：daily batch identity 为 `daily:<zone>:<due_at_ms>:<channel_id>`，critical identity 为 `critical:<scope>:<scope_id>:<episode_admission_id>:<channel_id>`；其 operation key 固定为 `attention-batch:<batch_id>:publish:1`。每个 identity 只允许一个 batch；global 与 per-Run 同时命中固定归 global。batch 及每个 member 都冻结相同的 `channel_id/channel_snapshot`，batch `delivery_id=<batch_id>:publish:1`，member `delivery_id=<batch_id>:<interrupt_id>`；sealed payload 必逐字段回显这些 identity。成员记录加入时冻结 Interrupt version/nonce、reason、admission 和展示字段；发送前 `PrepareAttentionBatch` 在同一事务重读 `status=open AND version=member_version AND nonce=member_nonce`，关闭/已变更者排除，并以剩余成员创建 immutable sealed payload。空 batch 收敛为 `cancelled`，不发空摘要。
 
 批次 payload 是 outbox `channel_publish` 的 `attention_batch` arm，含 batch ID/kind/scope/due_at、delivery ID、冻结成员 `{interrupt_id,version,nonce,headline,links,options}` 与 rendered text。renderer 按 member ID UTF-8 bytes 排序，逐成员输出稳定 ID、headline、links、canonical options 和 §8.1 的完整当前命令，绝不提供摘要级动作。发送准备后的 Channel 响应丢失按 at-least-once 重放同一 operation/payload；在 sealing 前关闭或版本变化的成员不可泄入 payload。
 
@@ -301,4 +303,4 @@ attention 的 append-only admission ledger 是额度/熔断的唯一事实，详
 - T6 覆盖三种 `immediate|batch|next_window` enum、最终 high/critical 强制 immediate、无效/超预算/不可用 fallback、零兼容 Channel 与隔离 Channel；后两者不调用 T6，而是 forge 首发 + 可查询 held reason。建议不能升级 severity、绕过 modality、选择未冻结 Channel 或无限 defer。
 - 创建、显式 hold、自动 hold、首次/末次升级、重启后 expiry、旧 tick 与 `max_escalations=0` 均验证 `expires_after_ms/on_expire/on_max_escalations`、next dispatch、nonce/version 与 held reason；升级复用初发 downgrade，绝不重读 config/T6。`startup_stall` 上限仍为 open + hold + 无 resolution。
 - 配额耗尽的 non-critical 并发 CAS 断言原 Interrupt 成功、`charged_budget_entry_id=NULL` 和 rejected admission；初发 critical、high→critical、重复 tick、窗口左右边界及全局/per-Run 同时命中均断言唯一 admission、global 优先归属和无重复 charge。
-- daily 与 global/per-Run critical batch 覆盖并发入批、每 scope/window 至多一次、发送前成员关闭/version 变化排除、空 batch `cancelled`、响应丢失重放同一 payload、窗口恢复及 stable batch key。摘要逐成员有 marker 和完整当前命令，永远不可批量执行；Channel 注入成功响应丢失可重复但带可见标识，连续失败到阈值只建一个 forge alert，仍继续重试且 `ps`/`doctor` 可见。
+- daily 与 global/per-Run critical batch 覆盖并发入批、每 scope/window 至多一次、发送前成员关闭/version 变化排除、空 batch `cancelled`、响应丢失重放同一 payload、窗口恢复及 stable batch key；同 zone/due 的两个 members 在相同 Channel 合入一个 `daily:<zone>:<due>:<channel>`，不同 Channel 分成两个 batch，且 sealed payload 回显各自 channel/delivery ID。摘要逐成员有 marker 和完整当前命令，永远不可批量执行；Channel 注入成功响应丢失可重复但带可见标识，连续失败到阈值只建一个 forge alert，仍继续重试且 `ps`/`doctor` 可见。

@@ -371,9 +371,8 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 | `channel_id` | TEXT | NULL；最终 Channel ID |
 | `channel_snapshot_json` | TEXT | NULL；含 type/target_ref/capabilities/renderer，不含凭据 |
 | `delivery` | TEXT | `immediate \| batch \| next_window \| held` |
-| `next_dispatch_at_ms` | INTEGER | NULL；held 时必须为 NULL |
+| `next_dispatch_at_ms` | INTEGER | NULL；仅 `dispatch_state=ready` 时非空 |
 | `held_reason` | TEXT | NULL 或 `manual \| no_compatible_channel \| channel_isolated \| batch_after_expiry \| quota_rejected \| critical_fuse \| expiry \| max_escalations` |
-| `hold_max_duration_ms` | INTEGER | NOT NULL；创建时冻结 |
 | `escalation_count` | INTEGER | NOT NULL，默认 0 |
 | `max_escalations` | INTEGER | NOT NULL；创建时冻结配置 |
 | `close_reason` | TEXT | NULL 或 `responded \| expired_auto_reject \| superseded_by_fact \| superseded_by_decision \| external_fact` |
@@ -383,7 +382,7 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 | `created_at_ms` | INTEGER | NOT NULL |
 | `updated_at_ms` | INTEGER | NOT NULL |
 
-创建、hold、expiry 与 escalation 均通过 `AdvanceInterrupt` 的 expected `version`/`nonce` CAS：创建冻结 expiry/on-max/hold/channel/delivery 快照；manual hold 只按 Command 规则重算 `expires_at_ms`，自动 hold 将 `dispatch_state=held`、`held_reason` 写入并令 `next_dispatch_at_ms=NULL`，扫描谓词为 `status=open AND dispatch_state NOT IN (held,probe_in_progress) AND expires_at_ms <= now`。每次升级原子地递增 `escalation_count`/`version`、轮换 nonce、写入 `nonce_issued_at_ms`、重算 expires/dispatch；`max_escalations=0` 直接走冻结的 on-max 去向。旧 tick、重启快照和重复请求的 CAS 失败不得产生任何 admission、delivery 或 outbox。
+创建、hold、expiry 与 escalation 均通过 `AdvanceInterrupt` 的 expected `version`/`nonce` CAS：创建冻结 expiry/on-max/hold/channel/delivery 快照；manual hold 只按 Command 规则重算 `expires_at_ms`，写 `dispatch_state=held, held_reason=manual, next_dispatch_at_ms=NULL`。自动 hold 也写 held/reason 并清空 next dispatch。expiry 扫描的唯一谓词是 `status=open AND dispatch_state != probe_in_progress AND (dispatch_state != held OR held_reason=manual) AND expires_at_ms <= now`；因此 timed manual hold 到期仍由 `AdvanceInterrupt` 扫描，其他 held 原因是终态调度结果而不重复命中。dispatch 扫描的唯一谓词是 `status=open AND dispatch_state=ready AND next_dispatch_at_ms <= now`。manual hold 到期 CAS 从 `(open, held, manual, expected_version, expected_nonce)` 进入冻结的 expiry 配方；成功后改为 `expiry`、升级后的 dispatch，或 close，绝不恢复旧 dispatch。每次升级原子地递增 `escalation_count`/`version`、轮换 nonce、写入 `nonce_issued_at_ms`、重算 expires/dispatch；`max_escalations=0` 直接走冻结的 on-max 去向。旧 tick、重启快照和重复请求的 CAS 失败不得产生任何 admission、delivery 或 outbox。
 
 约束：
 
@@ -392,6 +391,7 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 - escalation 重推不新增 budget charge；关闭不退款。
 - `charged_budget_entry_id` 只在首次发射实际写入 attention charge 时非空；`quota_batched` admission 的 Interrupt 必为 NULL，不能用零额或虚构 entry 充数。该列与 admission 的对应约束见 §6.3。
 - 初始 nonce 的 `nonce_issued_at_ms` 等于 `created_at_ms`；每次 nonce 轮换必须同一 CAS 更新 `nonce_issued_at_ms` 并递增 version。非 nonce 更新不得改写该时间。
+- `dispatch_state=held` 当且仅当 `held_reason` 非空且 `next_dispatch_at_ms` 为 NULL；`ready` 当且仅当 `held_reason` 为 NULL 且 `next_dispatch_at_ms` 非空；`batched|probe_in_progress` 时两者均为 NULL。`expires_after_ms`、`hold_max_duration_ms` 和非 NULL `next_dispatch_at_ms` 都是正整数毫秒。
 - `probe_in_progress` 时拒绝新指令，但合法迟到事实仍可经仲裁入口提交。
 - 创建或轮换 nonce 时，`approval_label_cutoff_position` 必须先 CAS 置 NULL 并递增 version；Forge 在事务外穷举目标的 label stream 后，`SetApprovalLabelCutoff(interrupt_id,expected_version,nonce,position)` 以第二笔 CAS 写入最高证明位置。空 stream 写入 sentinel `0`；没有证明位置能力或扫描未穷尽时保持 NULL，Command 对 label approval fail closed。
 
@@ -412,6 +412,7 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
 | `id` | TEXT | PK |
+| `delivery_id` | TEXT | NOT NULL UNIQUE；`interrupt:<interrupt_id>:<escalation_no>:<channel_id>`，Channel 单条 delivery 的不可变重放/指标身份 |
 | `interrupt_id` | TEXT | NOT NULL FK interrupts |
 | `surface` | TEXT | `forge_comment \| channel` |
 | `channel_id` | TEXT | NULL；`channel` surface 必填 |
@@ -441,6 +442,7 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 | `run_id` | TEXT | NOT NULL FK runs；与 Interrupt 一致，供 per-Run fuse 查询 |
 | `kind` | TEXT | `quota_charged \| quota_batched \| critical_admitted \| critical_fused` |
 | `admission_key` | TEXT | NOT NULL UNIQUE；由 interrupt ID 与 `initial` 或首次 critical transition 组成 |
+| `metric_identity` | TEXT | NOT NULL；恒为 `<interrupt_id>`，是跨 initial/critical admission 的唯一指标 lineage |
 | `attention_charge_entry_id` | TEXT | NULL FK budget_entries；仅实际 charge 非空，可被升级 admission 复用 |
 | `severity` | TEXT | 准入时的最终 severity |
 | `quota_day` | TEXT | NULL；非 critical 初发为冻结 zone 的 `YYYY-MM-DD` |
@@ -448,14 +450,16 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 | `critical_source` | TEXT | NULL 或 `initial \| escalation` |
 | `created_at_ms` | INTEGER | NOT NULL |
 
-每个 Interrupt 最多一行初发 `quota_charged|quota_batched`，或一行初发 `critical_admitted|critical_fused`；首次由 high/normal 等升级至 critical 时，至多额外一行 `critical_admitted|critical_fused`，且 `critical_source=escalation`。`critical_admitted|critical_fused` 的 `critical_source` 必填，其他 kind 为 NULL。`quota_charged` 必须引用该 Interrupt 的实际 `charged_budget_entry_id`。`critical_admitted|critical_fused` 在初发有 charge 时引用该 charge，升级 admission 复用它；若初发为 `quota_batched`，两种 critical admission 的 `attention_charge_entry_id` 均为 NULL，且不得补造 charge。`quota_batched` 的两列均为 NULL。唯一 admission key 为 `<interrupt_id>:initial` 或 `<interrupt_id>:critical`，因此重复 tick、窗口边界重放只返回既有事实。两个 partial unique index `UNIQUE(interrupt_id) WHERE kind IN (quota_charged,quota_batched)` 与 `UNIQUE(interrupt_id) WHERE kind IN (critical_admitted,critical_fused)` 保证每 Interrupt 最多一次 initial decision 与最多一次 critical transition；INSERT 后禁止 UPDATE/DELETE。
+每个 Interrupt 最多一行初发 `quota_charged|quota_batched`，或一行初发 `critical_admitted|critical_fused`；首次由 high/normal 等升级至 critical 时，至多额外一行 `critical_admitted|critical_fused`，且 `critical_source=escalation`。`critical_admitted|critical_fused` 的 `critical_source` 必填，其他 kind 为 NULL。`quota_charged` 必须引用该 Interrupt 的实际 `charged_budget_entry_id`。`critical_admitted|critical_fused` 在初发有 charge 时引用该 charge，升级 admission 复用它；若初发为 `quota_batched`，两种 critical admission 的 `attention_charge_entry_id` 均为 NULL，且不得补造 charge。`quota_batched` 的两列均为 NULL。唯一 admission key 为 `<interrupt_id>:initial` 或 `<interrupt_id>:critical`，因此重复 tick、窗口边界重放只返回既有事实。两条合法 admission 共享 `metric_identity=<interrupt_id>`：已送达 `quota_batched` member 再升级为 `critical_admitted|critical_fused` 时，前者和成功 critical delivery 都保留各自 admission/delivery 审计，但指标只按该 stable lineage 计一次。两个 partial unique index `UNIQUE(interrupt_id) WHERE kind IN (quota_charged,quota_batched)` 与 `UNIQUE(interrupt_id) WHERE kind IN (critical_admitted,critical_fused)` 保证每 Interrupt 最多一次 initial decision 与最多一次 critical transition；INSERT 后禁止 UPDATE/DELETE。
 
 `attention_batches` 是 versioned、可恢复的摘要对象，不把摘要伪造成 Interrupt/reason。它是 Channel identity 的唯一 batch authority；interrupt.md 不得定义 parallel batch tables, states, keys or prepare ports。`id` 是由其稳定 identity 生成的 batch ID，`operation_key` 由该 ID 固定导出；均不得使用当前时间、worker 或可变文本。
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `id` | TEXT | PK；`daily:<zone>:<due_at_ms>` 或 `critical:<scope>:<scope_id>:<episode_admission_id>` 的稳定 identity |
+| `id` | TEXT | PK；daily 为 `daily:<zone>:<due_at_ms>:<channel_id>`，critical 为 `critical:<scope>:<scope_id>:<episode_admission_id>:<channel_id>` 的稳定 identity |
 | `kind` | TEXT | `daily_summary \| critical_fuse` |
+| `channel_id` / `channel_snapshot_json` | TEXT | NOT NULL；入批时冻结的 Channel ID / `{type,target_ref,capabilities,renderer}`，不得含凭据 |
+| `delivery_id` | TEXT | NOT NULL UNIQUE；`<batch_id>:publish:1`，sealed payload、operation 与 delivery projection 使用同一值 |
 | `scope` / `scope_id` | TEXT | daily 为 `day` / `<zone>:<due_at_ms>`；critical 为 `global` / `global` 或 `run` / `<run_id>` |
 | `quota_day` / `day_timezone` | TEXT | daily 成员可各自携带 quota day，batch 级 quota day 为 NULL；daily 的 day_timezone 必填；critical 为 NULL |
 | `episode_admission_id` | TEXT | critical 必填，daily 为 NULL；首个 fused admission 标识本 episode |
@@ -465,9 +469,9 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 | `payload_json` / `payload_digest` | TEXT | NULL；sealed 时写入，不可改 |
 | `created_at_ms` / `sealed_at_ms` / `delivered_at_ms` | INTEGER | 创建必填；其余 NULL 或一次性写入 |
 
-daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时刻；同一规范化 zone 与同一 scheduled occurrence 只能有一个 batch，成员各自保留自己的 quota day。critical episode 在首个 `critical_fused` 时打开；窗口采用半开区间 `[created_at_ms, created_at_ms + window)`，因此 evidence 在 `due_at_ms` 恰好 expiry 时已不计数。episode 的 `due_at_ms` 是使当前 scope 的 admitted evidence 首次少于 limit 的最早 expiry。到期时必须在事务内重裁决：若仍饱和，则 sealing/保持旧 batch 后，以当前最早计数 evidence 的 admission ID 打开 successor episode，并为其计算新的 due_at；不得原地修改已创建 batch 的 due_at 或永久停在 collecting。只有重新裁决后低于 limit 才允许新 candidate 开新 episode。候选同时命中 global 和 per-Run 时只归 global batch；因此一个 Interrupt 绝不进入两批。
+daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时刻；同一规范化 zone、scheduled occurrence 和冻结 Channel 只能有一个 batch，成员各自保留自己的 quota day。不同 Channel 必须建立不同 batch，绝不混合为一个 delivery。critical episode 在首个 `critical_fused` 时打开；窗口采用半开区间 `[created_at_ms, created_at_ms + window)`，因此 evidence 在 `due_at_ms` 恰好 expiry 时已不计数。episode 的 `due_at_ms` 是使当前 scope 的 admitted evidence 首次少于 limit 的最早 expiry。到期时必须在事务内重裁决：若仍饱和，则 sealing/保持旧 batch 后，以当前最早计数 evidence 的 admission ID 打开 successor episode，并为其计算新的 due_at；不得原地修改已创建 batch 的 due_at 或永久停在 collecting。只有重新裁决后低于 limit 才允许新 candidate 开新 episode。候选同时命中 global 和 per-Run 时只归 global batch；因此一个 Interrupt 绝不进入两批。
 
-`attention_batch_members` 保存 batch 的不可重复成员与发送时需要的冻结展示绑定：主键 `(batch_id, interrupt_id)`，另有唯一 `member_key=<batch_id>:<interrupt_id>`；列为 `admission_id`（FK attention_admissions）、`interrupt_version`、`nonce`、`headline`、`reason`、`severity`、`links_json`、`options_json`、`joined_at_ms`、`excluded_at_ms`。入批时冻结这些值；同一 Interrupt 不能在同一 batch 有第二成员。关闭或由事实 supersede 的事务在 batch 仍为 `collecting` 时必须把成员标为 excluded。到期的 `PrepareAttentionBatch` 在同一事务重读其余成员的 open/version/nonce，排除不再匹配者；有成员时冻结 sorted payload、写唯一 `channel_publish` operation 并把 batch 置 `sealed`，无成员则 `cancelled`。sealed payload、member 快照、operation 和成功 delivery evidence 均不可改；这一定义以 sealing 为发送前的最后关闭排除边界，之后的关闭不会改写已经冻结的外部请求。
+`attention_batch_members` 保存 batch 的不可重复成员与发送时需要的冻结展示绑定：主键 `(batch_id, interrupt_id)`，另有唯一 `member_key=<batch_id>:<interrupt_id>`；列为 `admission_id`（FK attention_admissions）、`channel_id`、`channel_snapshot_json`（两者逐字节等于 batch）、`delivery_id=<batch_id>:<interrupt_id>`（UNIQUE）、`interrupt_version`、`nonce`、`headline`、`reason`、`severity`、`links_json`、`options_json`、`joined_at_ms`、`excluded_at_ms`。入批时冻结这些值；同一 Interrupt 不能在同一 batch 有第二成员。关闭或由事实 supersede 的事务在 batch 仍为 `collecting` 时必须把成员标为 excluded。到期的 `PrepareAttentionBatch` 在同一事务重读其余成员的 open/version/nonce，排除不再匹配者；有成员时冻结 sorted payload、写唯一 `channel_publish` operation 并把 batch 置 `sealed`，无成员则 `cancelled`。sealed payload、member 快照、operation 和成功 delivery evidence 均不可改；这一定义以 sealing 为发送前的最后关闭排除边界，之后的关闭不会改写已经冻结的外部请求。
 
 ### 6.4 Command target、effect 与 outcome
 
@@ -481,7 +485,7 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 
 ### 6.5 Batch delivery 投影
 
-每个 sealed batch 有一条 `batch_deliveries` 投影：`batch_id` PK/FK、`operation_key` UNIQUE、`state=pending|delivered|failed`、`attempt_count`、`remote_ref`、`last_error`、`created_at_ms`、`delivered_at_ms`。它与 `interrupt_deliveries` 同样只提供查询面。`CompleteOutboxAttempt` 成功时原子标记该投影、batch 和逐成员的 Ledger delivery；响应丢失的重放沿用同一 operation key 和 frozen payload，Channel 仍如实为 at-least-once。
+每个 sealed batch 有一条 `batch_deliveries` 投影：`batch_id` PK/FK、`delivery_id` UNIQUE（逐字节等于 `<batch_id>:publish:1`）、`operation_key` UNIQUE、`state=pending|delivered|failed`、`attempt_count`、`remote_ref`、`last_error`、`created_at_ms`、`delivered_at_ms`。它与 `interrupt_deliveries` 同样只提供查询面。`CompleteOutboxAttempt` 成功时原子标记该投影、batch 和逐成员的 Ledger delivery；响应丢失的重放沿用同一 operation key 和 frozen payload，Channel 仍如实为 at-least-once。
 
 ## 7. Append-only 事件与幂等收据
 
@@ -766,7 +770,7 @@ Report 的 `events_per_minute + burst` 使用持久化令牌桶，不用固定�
 
 Interrupt 升级重推复用原 charge，不新增 entry；Interrupt 关闭不退款。非 critical 日配额 entry 使用 `kind=attention, scope=severity, scope_id=<severity>`；Report 致扰子配额使用 `kind=report, scope=run, scope_id=<run_id>`。critical 不写日配额 counter，但首次 critical 发射仍写 `kind=attention, scope=severity, scope_id=critical` entry，并令 `bucket_start_ms=created_at_ms`；high→critical 升级复用其原 entry。`budget_entries` 不反向保存 Interrupt FK；Interrupt 通过不可变 `charged_budget_entry_id` 指向实际 charge，避免循环外键。
 
-critical fuse 的权威计数是 `attention_admissions.kind=critical_admitted AND created_at_ms >= now-window`，分别按全局和 `run_id` 查询；`critical_fused` 是拒绝/episode 证据，绝不计入名额。`EmitInterrupt` 对初发 critical、`AdvanceInterrupt` 对升级首次 critical 各自在同一 CAS 事务中：检查两个窗口 → 至多插入一次 admission → 写/复用 charge、Interrupt/升级事件及所需 batch member。任何重放、旧 version 或已有 critical admission 都返回原事实，不重新占名额。
+critical fuse 的唯一权威计数（整数毫秒）是 `attention_admissions.kind=critical_admitted AND created_at_ms > now-window`，分别按全局和 `run_id` 查询；这正是 evidence 生命周期半开区间 `[created_at_ms, created_at_ms + window)`：`now=t+window-1ms` 计入 `t`，`now=t+window` 和 `t+window+1ms` 均不计入。`critical_fused` 是拒绝/episode 证据，绝不计入名额。`EmitInterrupt` 对初发 critical、`AdvanceInterrupt` 对升级首次 critical 各自在同一 CAS 事务中：检查两个窗口 → 至多插入一次 admission → 写/复用 charge、Interrupt/升级事件及所需 batch member。任何重放、旧 version 或已有 critical admission 都返回原事实，不重新占名额。
 
 ## 10. Brain、Gate、校准与 Ledger
 
@@ -1214,6 +1218,8 @@ COMMIT
 - `outbox_operations(state, next_attempt_at_ms)`
 - `outbox_operations(lease_expires_at_ms)`
 - `attention_admissions(kind, created_at_ms, run_id, interrupt_id)`（critical fuse 滑动窗口与 admission 去重）
+- `interrupts(status, dispatch_state, expires_at_ms)`（expiry，含 timed manual hold）
+- `interrupts(status, dispatch_state, next_dispatch_at_ms)`（到期 dispatch 扫描）
 - `attention_batches(state, due_at_ms)`（摘要 sealing 扫描）
 - `forge_cursors(next_poll_at_ms)`
 - `brain_calls(scope, subject_key, touchpoint, call_seq)`（唯一）
