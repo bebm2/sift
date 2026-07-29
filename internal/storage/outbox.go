@@ -161,7 +161,7 @@ func insertOperation(ctx context.Context, tx *sql.Tx, op Operation, runID, _ str
 func (d *DB) ClaimOutboxOperation(ctx context.Context, workerID string, nowMS, leaseMS int64) (*ClaimedOperation, error) {
 	// launch_agent has a stricter boot recovery barrier and must use
 	// ClaimLaunchOperation instead.
-	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, "", "", "")
+	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, "", "", "", "")
 }
 
 // ClaimLaunchOperation leases a launch only after recovery for bootID has
@@ -171,7 +171,7 @@ func (d *DB) ClaimLaunchOperation(ctx context.Context, bootID, workerID string, 
 	if bootID == "" {
 		return nil, errors.New("storage: boot id is required for launch claim")
 	}
-	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, OperationLaunchAgent, "", bootID)
+	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, OperationLaunchAgent, "", "", bootID)
 }
 
 // ClaimOutboxOperationKind leases only operations consumed by one worker kind.
@@ -179,6 +179,15 @@ func (d *DB) ClaimLaunchOperation(ctx context.Context, bootID, workerID string, 
 // contract failure.
 func (d *DB) ClaimOutboxOperationKind(ctx context.Context, workerID string, kind OperationKind, nowMS, leaseMS int64) (*ClaimedOperation, error) {
 	return d.ClaimOutboxOperationKindProject(ctx, workerID, kind, "", nowMS, leaseMS)
+}
+
+// ClaimOutboxOperationKindPurpose prevents a specialized consumer from
+// claiming another producer's payload within the same outbox kind.
+func (d *DB) ClaimOutboxOperationKindPurpose(ctx context.Context, workerID string, kind OperationKind, purpose string, nowMS, leaseMS int64) (*ClaimedOperation, error) {
+	if purpose == "" {
+		return nil, errors.New("storage: alert purpose is required")
+	}
+	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, kind, "", purpose, "")
 }
 
 // ClaimOutboxOperationKindProject limits a worker to the project encoded in
@@ -190,10 +199,10 @@ func (d *DB) ClaimOutboxOperationKindProject(ctx context.Context, workerID strin
 	if kind == OperationLaunchAgent {
 		return nil, errors.New("storage: use ClaimLaunchOperation for launch_agent")
 	}
-	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, kind, projectID, "")
+	return d.claimOutboxOperation(ctx, workerID, nowMS, leaseMS, kind, projectID, "", "")
 }
 
-func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, leaseMS int64, filterKind OperationKind, projectID, bootID string) (*ClaimedOperation, error) {
+func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, leaseMS int64, filterKind OperationKind, projectID, purpose, bootID string) (*ClaimedOperation, error) {
 	if workerID == "" || leaseMS <= 0 {
 		return nil, errors.New("storage: worker id and positive lease required")
 	}
@@ -229,6 +238,10 @@ func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 		query += ` AND json_extract(payload_json, '$.project_id')=?`
 		args = append(args, projectID)
 	}
+	if purpose != "" {
+		query += ` AND json_extract(payload_json, '$.purpose')=?`
+		args = append(args, purpose)
+	}
 	query += ` ORDER BY next_attempt_at_ms, id LIMIT 1`
 	row := tx.QueryRowContext(ctx, query, args...)
 	var c ClaimedOperation
@@ -247,6 +260,7 @@ func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 		c.AttemptNo = &n
 	}
 	terminalReclaim := false
+	reclaimed := state == string(OperationExecuting)
 	if state == string(OperationExecuting) {
 		var oldAttempt string
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM outbox_attempts WHERE operation_id=? AND attempt_no=?`, c.ID, oldCount).Scan(&oldAttempt); err != nil {
@@ -295,6 +309,12 @@ func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	// Reclaim can cross the Channel failure threshold and create a
+	// forge_alert while also leasing the next retryable attempt. Wake after
+	// commit so the alert consumer observes the durable row.
+	if reclaimed && c.Kind == OperationChannelPublish {
+		d.wakeOutbox()
 	}
 	return &c, nil
 }
