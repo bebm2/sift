@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type resolverFunc func(context.Context, string) (string, error)
@@ -59,5 +62,20 @@ func TestWebhookAdapterRejectsUnknownAndDoesNotLeakSenderError(t *testing.T) {
 	payload = []byte(strings.Replace(string(payload), `,"unexpected":true`, ``, 1))
 	if _, err := adapter.Publish(context.Background(), payload, "k"); !errors.Is(err, ErrTransient) || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("sender error = %v", err)
+	}
+}
+
+func TestHTTPWebhookSenderHTTPDateRetryAfterUsesInjectedClock(t *testing.T) {
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", base.Add(2*time.Second).Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	sender := HTTPWebhookSender{Client: srv.Client(), Now: func() time.Time { return base }}
+	_, err := sender.Send(context.Background(), srv.URL, "x")
+	var limited RateLimitedError
+	if !errors.As(err, &limited) || limited.RetryAfterMS != 2000 {
+		t.Fatalf("retry-after = %v, want 2000ms", err)
 	}
 }
