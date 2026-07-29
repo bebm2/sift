@@ -1,9 +1,6 @@
 package storage
 
-import (
-	"context"
-	"sync"
-)
+import "context"
 
 // Scheduler is a wakeup-driven skeleton shared by the only three daemon
 // schedulers. It intentionally owns no ticker: callers wake it after a commit
@@ -45,25 +42,32 @@ func NewIntakeScheduler(run func(context.Context) error) *IntakeScheduler {
 	return &IntakeScheduler{newScheduler(run)}
 }
 
-// ReconcilerScheduler owns convergence of Runs and external facts.
-type ReconcilerScheduler struct{ Scheduler }
+// OutboxScheduler owns committed side effects and their durable retries.
+type OutboxScheduler struct{ Scheduler }
 
-func NewReconcilerScheduler(run func(context.Context) error) *ReconcilerScheduler {
-	return &ReconcilerScheduler{newScheduler(run)}
+func NewOutboxScheduler(run func(context.Context) error) *OutboxScheduler {
+	return &OutboxScheduler{newScheduler(run)}
 }
 
-// SupervisorScheduler owns attempts, interrupt expiry and outbox retry wakeups.
+// SupervisorScheduler owns attempts, interrupt expiry and timeout scans.
 type SupervisorScheduler struct{ Scheduler }
 
 func NewSupervisorScheduler(run func(context.Context) error) *SupervisorScheduler {
 	return &SupervisorScheduler{newScheduler(run)}
 }
 
+// ReconcilerScheduler is retained as a source-compatible name for the old
+// skeleton. Production uses OutboxScheduler, which matches DESIGN §6.1.
+type ReconcilerScheduler = OutboxScheduler
+
+func NewReconcilerScheduler(run func(context.Context) error) *ReconcilerScheduler {
+	return NewOutboxScheduler(run)
+}
+
 // Wakeups groups the three named scheduler entry points; write ports may call
 // the appropriate one after commit, never while a transaction is open.
 type Wakeups struct {
 	Intake     *IntakeScheduler
-	Reconciler *ReconcilerScheduler
 	Supervisor *SupervisorScheduler
-	once       sync.Once
+	Outbox     *OutboxScheduler
 }
