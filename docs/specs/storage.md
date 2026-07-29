@@ -427,16 +427,16 @@ PRAGMA wal_autocheckpoint = 1000;
 | `critical_source` | TEXT | NULL 或 `initial \| escalation` |
 | `created_at_ms` | INTEGER | NOT NULL |
 
-每个 Interrupt 最多一行初发 `quota_charged|quota_batched`，或一行初发 `critical_admitted|critical_fused`；首次由 high/normal 等升级至 critical 时，至多额外一行 `critical_admitted|critical_fused`，且 `critical_source=escalation`。`critical_admitted|critical_fused` 的 `critical_source` 必填，其他 kind 为 NULL。`quota_charged` 和任一 `critical_*` 必须引用该 Interrupt 的实际 `charged_budget_entry_id`（升级 admission 因而复用原 charge）；`quota_batched` 的两列均为 NULL。两个 partial unique index `UNIQUE(interrupt_id) WHERE kind IN (quota_charged,quota_batched)` 与 `UNIQUE(interrupt_id) WHERE kind IN (critical_admitted,critical_fused)` 保证每 Interrupt 最多一次 initial decision 与最多一次 critical transition；INSERT 后禁止 UPDATE/DELETE。
+每个 Interrupt 最多一行初发 `quota_charged|quota_batched`，或一行初发 `critical_admitted|critical_fused`；首次由 high/normal 等升级至 critical 时，至多额外一行 `critical_admitted|critical_fused`，且 `critical_source=escalation`。`critical_admitted|critical_fused` 的 `critical_source` 必填，其他 kind 为 NULL。`quota_charged` 必须引用该 Interrupt 的实际 `charged_budget_entry_id`。`critical_admitted|critical_fused` 在初发有 charge 时引用该 charge，升级 admission 复用它；若初发为 `quota_batched`，两种 critical admission 的 `attention_charge_entry_id` 均为 NULL，且不得补造 charge。`quota_batched` 的两列均为 NULL。两个 partial unique index `UNIQUE(interrupt_id) WHERE kind IN (quota_charged,quota_batched)` 与 `UNIQUE(interrupt_id) WHERE kind IN (critical_admitted,critical_fused)` 保证每 Interrupt 最多一次 initial decision 与最多一次 critical transition；INSERT 后禁止 UPDATE/DELETE。
 
 `attention_batches` 是 versioned、可恢复的摘要对象，不把摘要伪造成 Interrupt/reason。`id` 是由其稳定 identity 生成的 batch ID，`operation_key` 由该 ID 固定导出；均不得使用当前时间、worker 或可变文本。
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `id` | TEXT | PK；`daily:<zone>:<quota_day>:<due_at_ms>` 或 `critical:<scope>:<scope_id>:<episode_admission_id>` 的稳定 identity |
+| `id` | TEXT | PK；`daily:<zone>:<due_at_ms>` 或 `critical:<scope>:<scope_id>:<episode_admission_id>` 的稳定 identity |
 | `kind` | TEXT | `daily_summary \| critical_fuse` |
-| `scope` / `scope_id` | TEXT | daily 为 `day` / `<zone>:<quota_day>`；critical 为 `global` / `global` 或 `run` / `<run_id>` |
-| `quota_day` / `day_timezone` | TEXT | daily 必填；critical 为 NULL |
+| `scope` / `scope_id` | TEXT | daily 为 `day` / `<zone>:<due_at_ms>`；critical 为 `global` / `global` 或 `run` / `<run_id>` |
+| `quota_day` / `day_timezone` | TEXT | daily 成员可各自携带 quota day，batch 级 quota day 为 NULL；daily 的 day_timezone 必填；critical 为 NULL |
 | `episode_admission_id` | TEXT | critical 必填，daily 为 NULL；首个 fused admission 标识本 episode |
 | `due_at_ms` | INTEGER | NOT NULL；创建后不可改 |
 | `state` | TEXT | `collecting \| sealed \| delivered \| cancelled` |
@@ -444,7 +444,7 @@ PRAGMA wal_autocheckpoint = 1000;
 | `payload_json` / `payload_digest` | TEXT | NULL；sealed 时写入，不可改 |
 | `created_at_ms` / `sealed_at_ms` / `delivered_at_ms` | INTEGER | 创建必填；其余 NULL 或一次性写入 |
 
-daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时刻。critical episode 在首个 `critical_fused` 时打开；其 `due_at_ms` 是使该 scope 的当前 admitted evidence 首次少于 limit 的最早 expiry（最早计数 evidence 的 `created_at_ms + window`）。同 scope 的后续 fused candidate 在 batch 仍 `collecting` 时复用该 episode；到时重新裁决，恢复后才可创建新 episode。候选同时命中 global 和 per-Run 时只归 global batch；因此一个 Interrupt 绝不进入两批。
+daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时刻；同一规范化 zone 与同一 scheduled occurrence 只能有一个 batch，成员各自保留自己的 quota day。critical episode 在首个 `critical_fused` 时打开；窗口采用半开区间 `[created_at_ms, created_at_ms + window)`，因此 evidence 在 `due_at_ms` 恰好 expiry 时已不计数。episode 的 `due_at_ms` 是使当前 scope 的 admitted evidence 首次少于 limit 的最早 expiry。到期时必须在事务内重裁决：若仍饱和，则 sealing/保持旧 batch 后，以当前最早计数 evidence 的 admission ID 打开 successor episode，并为其计算新的 due_at；不得原地修改已创建 batch 的 due_at 或永久停在 collecting。只有重新裁决后低于 limit 才允许新 candidate 开新 episode。候选同时命中 global 和 per-Run 时只归 global batch；因此一个 Interrupt 绝不进入两批。
 
 `attention_batch_members` 保存 batch 的不可重复成员与发送时需要的冻结展示绑定：主键 `(batch_id, interrupt_id)`，另有唯一 `member_key=<batch_id>:<interrupt_id>`；列为 `admission_id`（FK attention_admissions）、`interrupt_version`、`nonce`、`headline`、`reason`、`severity`、`links_json`、`options_json`、`joined_at_ms`、`excluded_at_ms`。入批时冻结这些值；同一 Interrupt 不能在同一 batch 有第二成员。关闭或由事实 supersede 的事务在 batch 仍为 `collecting` 时必须把成员标为 excluded。到期的 `PrepareAttentionBatch` 在同一事务重读其余成员的 open/version/nonce，排除不再匹配者；有成员时冻结 sorted payload、写唯一 `channel_publish` operation 并把 batch 置 `sealed`，无成员则 `cancelled`。sealed payload、member 快照、operation 和成功 delivery evidence 均不可改；这一定义以 sealing 为发送前的最后关闭排除边界，之后的关闭不会改写已经冻结的外部请求。
 

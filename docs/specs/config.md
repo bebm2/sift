@@ -321,15 +321,24 @@ attention:
 | `hold_max_duration` | `720h`（30 天） | `1m..8760h` |
 | `channel_failure_alert_after` | `3` | `1..100`；连续失败后改走 forge 告警评论 |
 
-`daily_quota` 是 closed map，只允许 `low`、`normal`、`high` 三个键；省略的键采用表中默认值，不得声明 `critical` 或其他 severity。每个非 critical Interrupt 在首次发射时以其确定性 severity 尝试原子扣一格对应日配额；同 generation 重放、Channel 重试、升级重推和关闭均不得再扣或退款。日桶和 `daily_summary_at` 都按发射时冻结的规范化 `day_timezone` 计算。扣费比较-and-set 的零行结果**不是**额度耗尽：必须以同一稳定 generation/admission key 重读权威 counter；若 `consumed + 1 <= limit`，在有界重试内重新 CAS，只有重读证明 `consumed + 1 > limit` 才可把原 Interrupt 入批。不可恢复的 SQLite/事务/存储错误整笔回滚，不得伪装成额度耗尽或合批。成功扣费与配额拒绝入批分别写不可变 admission；后者不产生借支或伪造 charge，见 [`storage.md` §6.3、§9.1](storage.md)。
+`daily_quota` 是 closed map，只允许 `low`、`normal`、`high` 三个键；省略的键采用表中默认值，不得声明 `critical` 或其他 severity。每个非 critical Interrupt 在首次发射时以其确定性 severity 尝试原子扣一格对应日配额；同 generation 重放、Channel 重试、升级重推和关闭均不得再扣或退款。日桶和 `daily_summary_at` 都按发射时冻结的规范化 `day_timezone` 计算。扣费比较-and-set 的零行结果**不是**额度耗尽：必须以同一稳定 generation/admission key 重读权威 counter；若 `consumed + 1 <= limit`，在有界重试内重新 CAS，只有重读证明 `consumed + 1 > limit` 才可把原 Interrupt 入批。不可恢复的 SQLite/事务/存储错误整笔回滚，不得伪装成额度耗尽或合批。成功扣费与配额拒绝入批分别写不可变 admission；后者不产生借支或伪造 charge，见 [`storage.md` §6.3、§9.1](storage.md)。故障与并发的派生验收固定如下：在同一冻结 quota counter、`limit=2` 下两个并发候选均以 `quota_charged` 成功且最终 `consumed=2`；在 `limit=1` 下恰有一条 `quota_charged`/charge、另一条 `quota_batched`/NULL charge。CAS 重试耗尽、无法重读、SQLite/事务故障时，Interrupt、admission、counter、budget entry、batch member 和 outbox operation 全部回滚，结果为错误而不是 `quota_batched`；重试只能从未提交状态重新开始。
 
-`critical_fuse` 使用真实滑动窗口，不得以自然日或固定桶近似。首次发射为 critical 由 `EmitInterrupt`、升级后首次成为 critical 由 `AdvanceInterrupt` 在各自的 Interrupt CAS 事务中执行同一全局和 per-Run 检查；二者都以每个 Interrupt 至多一条的 append-only critical admission evidence 计数，而不是以 attention charge 计数。任一候选会使计数超过对应 limit 时，熔断该候选的单独 critical 递送，归入该窗口的唯一汇总 HITL；同刻同时命中时全局 scope 优先于 per-Run scope，因此一个 Interrupt 只属于一个汇总。重放、重推和旧 tick 不重复写 admission，升级也不新增 attention charge。汇总不是对原 critical 的借支、升级重推或第二条逐项 critical 递送；源事实和熔断决定必须可审计。证据、窗口边界、episode 和 batch 身份以 [`storage.md` §6.3、§9.3](storage.md) 为准。
+`critical_fuse` 使用真实滑动窗口，不得以自然日或固定桶近似。首次发射为 critical 由 `EmitInterrupt`、升级后首次成为 critical 由 `AdvanceInterrupt` 在各自的 Interrupt CAS 事务中执行同一全局和 per-Run 检查；二者都以每个 Interrupt 至多一条的 append-only critical admission evidence 计数，而不是以 attention charge 计数。任一候选会使计数超过对应 limit 时，熔断该候选的单独 critical 递送，归入该窗口的唯一汇总 HITL；同刻同时命中时全局 scope 优先于 per-Run scope，因此一个 Interrupt 只属于一个汇总。重放、重推和旧 tick 不重复写 admission，升级也不新增 attention charge。`quota_batched → critical` 的固定 vectors 为：fuse 有余量时写一行 `critical_admitted` 且 charge 仍为 NULL；fuse 饱和时写一行 `critical_fused` 并加入唯一 critical batch；两条路径重放 `AdvanceInterrupt` 都返回原 admission/batch，不新增 admission、charge、member 或 operation。汇总不是对原 critical 的借支、升级重推或第二条逐项 critical 递送；源事实和熔断决定必须可审计。证据、窗口边界、episode 和 batch 身份以 [`storage.md` §6.3、§9.3](storage.md) 为准。固定验收 vectors 为：窗口 `10m` 时，`now=t+window-1ms` 仍计入，`now=t+window` 不计入，`now=t+window+1ms` 也不计入；同一毫秒的并发 admission 以唯一 admission key 串行化，恰有一条 admission 占用名额。若 `due_at` 重裁决时新 evidence 仍使 scope 饱和，旧 episode 不改 due、不丢成员：事务先 seal/cancel 旧 `attention_batches`，再以当前最早仍计数 admission 打开 successor episode；只有 evidence 少于 limit 才允许后续 candidate 创建新 episode。恢复扫描重复执行该动作只返回已存在的 batch/operation，不创建第三批。
 
 #### 日历与摘要 batch
 
 启动规范化时，`day_timezone=local` 必须解析为当次启动环境可识别的具体 IANA zone；该解析后的 IANA 名称替换 `local` 进入有效 canonical JSON、`config_hash` 和持久化 config snapshot。不能取得稳定 IANA 名称时拒绝启动并要求显式 IANA zone；运行期不得再次读取机器 local zone。显式 IANA zone 同样在启动期加载并校验。
 
-对在 `t` 入批的对象，`due_at` 是其冻结 zone 中**严格晚于** `t` 的下一次 `daily_summary_at`；恰在该时刻入批也取次日，不立即补发。该 local wall-clock 时刻落入 DST gap 时取 gap 后第一个有效 instant；落入 DST fold 时取第一次出现（较早的 UTC instant）。batch 同时冻结 quota day、zone、`due_at` 和成员快照；因此午夜两侧、时刻之后入批及 DST 转换均可重放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3](storage.md) 与 [`outbox.md` §10](outbox.md)。
+对在 `t` 入批的对象，`due_at` 是其冻结 zone 中**严格晚于** `t` 的下一次 `daily_summary_at`；恰在该时刻入批也取次日，不立即补发。该 local wall-clock 时刻落入 DST gap 时取 gap 后第一个有效 instant；落入 DST fold 时取第一次出现（较早的 UTC instant）。batch 同时冻结成员各自的 quota day、zone、`due_at` 和成员快照；同一 zone 与 scheduled occurrence 至多一个 daily batch，因此不得把 batch 级 quota day 编进 identity。固定 epoch vectors（时间均为 UTC 毫秒）如下：
+
+| zone / 入批 instant | 期望结果 |
+|---|---|
+| `Asia/Shanghai`, `2026-07-28T08:59:59Z` (`1785229199000`) | `quota_day=2026-07-28`, `due_at_ms=1785286800000`（`2026-07-29 09:00`） |
+| `Asia/Shanghai`, `2026-07-29T00:59:59Z` (`1785286799000`) | `quota_day=2026-07-29`, `due_at_ms=1785286800000`（`2026-07-29 09:00`） |
+| `America/New_York`, `2026-03-08T06:59:00Z` (`1772953140000`) | `due_at_ms=1772953200000`（gap 后 `03:00`） |
+| `America/New_York`, `2026-11-01T05:29:00Z` (`1793510940000`) | `due_at_ms=1793511000000`（fold 第一次 `01:30`） |
+
+入批恰在 `daily_summary_at` 的 instant（`1785286800000`）与其后一毫秒都取下一次 occurrence，不能立即补发。前一日摘要时刻后至次日摘要时刻前的两个 quota day 成员，必须加入同一个 `daily:<zone>:<due_at_ms>` batch；运行期机器时区变化不影响已冻结 snapshot/hash 或历史回放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3](storage.md) 与 [`outbox.md` §10](outbox.md)。
 
 #### `attention.reason_defaults`
 
