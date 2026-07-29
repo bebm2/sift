@@ -36,8 +36,25 @@ func TestMemberedBatchCannotBeRetargeted(t *testing.T) {
 	if err := db.db.QueryRow(`SELECT batch_id FROM attention_batch_members`).Scan(&batch); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.db.Exec(`UPDATE attention_batches SET forge_host='retarget.invalid' WHERE id=?`, batch); err == nil || !strings.Contains(err.Error(), "immutable") {
-		t.Fatalf("retarget error = %v", err)
+	for column, value := range map[string]any{
+		"project_id":            "other-project",
+		"channel_id":            "other-channel",
+		"channel_snapshot_json": `{"id":"other"}`,
+		"forge_kind":            "gitlab",
+		"forge_host":            "retarget.invalid",
+		"forge_project_key":     "other/project",
+		"target_kind":           "change",
+		"target_id":             "99",
+		"kind":                  "critical_fuse",
+		"delivery_id":           "other:publish:1",
+		"scope":                 "global",
+		"scope_id":              "global",
+		"episode_admission_id":  "other-admission",
+		"due_at_ms":             testNow + 99,
+	} {
+		if _, err := db.db.Exec(`UPDATE attention_batches SET `+column+`=? WHERE id=?`, value, batch); err == nil || !strings.Contains(err.Error(), "immutable") {
+			t.Fatalf("retarget %s error = %v", column, err)
+		}
 	}
 }
 
