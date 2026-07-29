@@ -20,12 +20,12 @@ import (
 type InterruptReason string
 
 func (InterruptReason) EnumValues() []string {
-	return []string{
-		string(storage.InterruptDesignApproval), string(storage.InterruptGuardrailViolation),
-		string(storage.InterruptCodeReview), string(storage.InterruptAgentBlocked),
-		string(storage.InterruptMergeConflict), string(storage.InterruptFailureReview),
-		string(storage.InterruptStartupStall),
+	reasons := storage.ActiveInterruptReasons()
+	values := make([]string, len(reasons))
+	for i, reason := range reasons {
+		values[i] = string(reason)
 	}
+	return values
 }
 
 type InterruptSeverity string
@@ -263,8 +263,10 @@ type T7Input struct {
 	Categories       []T7CategoryEvidence `json:"categories"`
 	ReplaySummary    T7ReplaySummary      `json:"replay_summary"`
 	SemanticMaterial []T7SemanticMaterial `json:"semantic_material"`
-	// TraceProjectID is builder context and is deliberately not sent to the model.
-	TraceProjectID string `json:"-"`
+	// TraceProjectID and AllCategoryKinds are deterministic builder context and
+	// are deliberately not sent to the model.
+	TraceProjectID   string     `json:"-"`
+	AllCategoryKinds []TaskKind `json:"-"`
 }
 
 func validDigest(s string) bool { return regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(s) }
@@ -304,6 +306,9 @@ func BuildT7Input(in T7Input) ([]byte, error) {
 	if parts.kind != "all" && (len(cats) != 1 || string(cats[0].TaskKind) != parts.kind) {
 		return nil, errors.New("brain: T7 category does not match aggregate")
 	}
+	if parts.kind == "all" && in.AllCategoryKinds != nil && !sameTaskKinds(cats, in.AllCategoryKinds) {
+		return nil, errors.New("brain: T7 all categories do not match deterministic aggregate")
+	}
 	seen := map[string]bool{}
 	for _, c := range cats {
 		if !validTaskKind(c.TaskKind) || len(c.EvidenceID) == 0 || len(c.EvidenceID) > 256 || seen[c.EvidenceID] || len(c.CertificationVersion) != 64 || !validDigest(c.CertificationVersion) || !validDigest(c.EvidenceSummary.CertificationRulesVersion) || !validDigest(c.EvidenceSummary.EvidenceDigest) || !validCounts(c.EvidenceSummary.TotalSamples, c.EvidenceSummary.NegativeSamples, c.EvidenceSummary.LeakCount, c.EvidenceSummary.FalseBlockCount) || c.EvidenceSummary.WindowStartMS < 0 || c.EvidenceSummary.WindowEndMS <= c.EvidenceSummary.WindowStartMS {
@@ -330,7 +335,22 @@ func BuildT7Input(in T7Input) ([]byte, error) {
 	}
 	in.Categories = cats
 	in.SemanticMaterial = materials
+	if in.SemanticMaterial == nil {
+		in.SemanticMaterial = []T7SemanticMaterial{}
+	}
 	return decode.Canonical(in)
+}
+
+func sameTaskKinds(categories []T7CategoryEvidence, expected []TaskKind) bool {
+	if len(categories) != len(expected) || len(expected) == 0 {
+		return false
+	}
+	for i, kind := range expected {
+		if !validTaskKind(kind) || (i > 0 && expected[i-1] >= kind) || categories[i].TaskKind != kind {
+			return false
+		}
+	}
+	return true
 }
 
 func aggregateParts(key string) (struct {
@@ -378,12 +398,17 @@ type T7Output struct {
 // T7Contract validates an inert proposal against the aggregate scope and its
 // deterministically selected evidence IDs. It deliberately has no action,
 // Gate, Interrupt, or policy-write capability.
-func T7Contract(aggregateKey string, evidenceIDs []string) TouchpointContract {
+func T7Contract(aggregateKey, traceProjectID string, allCategoryKinds []TaskKind, evidenceIDs []string) TouchpointContract {
 	return TouchpointContract{Touchpoint: "T7", Asset: T7Asset(), ValidateInput: func(input []byte) error {
 		var in T7Input
 		if err := decode.Decode(input, &in, decode.Closed); err != nil {
 			return err
 		}
+		if in.AggregateKey != aggregateKey {
+			return errors.New("brain: T7 aggregate key does not match trace subject")
+		}
+		in.TraceProjectID = traceProjectID
+		in.AllCategoryKinds = allCategoryKinds
 		canonical, err := BuildT7Input(in)
 		if err != nil {
 			return err

@@ -6,19 +6,11 @@ import (
 	"github.com/miaoxiaoyong/sift/internal/decode"
 )
 
-// T4FallbackOutput is the complete frozen skeleton rendered as a closed result.
+// T4FallbackOutput preserves the complete frozen input skeleton. A fallback
+// is not a reduced model-shaped brief: the Interrupt consumer needs all facts,
+// verified links, and candidate option fields to call the deterministic emitter.
 func T4FallbackOutput(in T4Input) []byte {
-	points := append([]string(nil), in.Interrupt.BriefFragments...)
-	if len(points) > 3 {
-		points = points[:3]
-	}
-	options := make([]string, len(in.Interrupt.CandidateOptions))
-	for i := range in.Interrupt.CandidateOptions {
-		options[i] = in.Interrupt.CandidateOptions[i].ID
-	}
-	conclusion := in.Interrupt.BriefFragments[0]
-	recommended := options[0]
-	o, err := decode.Canonical(T4Output{Headline: &in.Interrupt.FallbackHeadline, Conclusion: &conclusion, KeyPoints: &points, RecommendedOptionID: &recommended, Options: &options})
+	o, err := decode.Canonical(in)
 	if err != nil {
 		panic(fmt.Sprintf("brain: T4 fallback must be canonical: %v", err))
 	}
@@ -40,21 +32,24 @@ func T6FallbackOutput(in T6Input) []byte {
 	return o
 }
 
-func T4ResultFromCall(result CallResult, in T4Input) (T4Output, BrainSource, error) {
-	var out T4Output
+// T4CallResult is a closed terminal union. Exactly one branch is populated.
+type T4CallResult struct {
+	Normal   *T4Output
+	Fallback *T4Input
+}
+
+func T4ResultFromCall(result CallResult, in T4Input) (T4CallResult, BrainSource, error) {
 	if result.Status == "valid" {
+		var out T4Output
 		if err := decode.Decode(result.Output, &out, decode.Closed); err != nil {
-			return out, BrainSource{}, err
+			return T4CallResult{}, BrainSource{}, err
 		}
-		return out, brainSource(result), nil
+		return T4CallResult{Normal: &out}, brainSource(result), nil
 	}
 	if result.Status != "fallback" {
-		return out, BrainSource{}, fmt.Errorf("brain: T4 call %s is not terminal", result.CallID)
+		return T4CallResult{}, BrainSource{}, fmt.Errorf("brain: T4 call %s is not terminal", result.CallID)
 	}
-	if err := decode.Decode(T4FallbackOutput(in), &out, decode.Closed); err != nil {
-		return out, BrainSource{}, err
-	}
-	return out, fallbackSource(result, "T4"), nil
+	return T4CallResult{Fallback: &in}, fallbackSource(result, "T4"), nil
 }
 
 func T6ResultFromCall(result CallResult, in T6Input) (T6Output, BrainSource, error) {
@@ -74,22 +69,27 @@ func T6ResultFromCall(result CallResult, in T6Input) (T6Output, BrainSource, err
 	return out, fallbackSource(result, "T6"), nil
 }
 
-// T7ResultFromCall returns no proposal on fallback; callers must not create a draft.
-func T7ResultFromCall(result CallResult, aggregateKey string, evidenceIDs []string) (T7Output, BrainSource, error) {
-	var out T7Output
+// T7CallResult makes the fallback no-draft outcome explicit.
+type T7CallResult struct {
+	Proposal *T7Output
+	NoDraft  bool
+}
+
+func T7ResultFromCall(result CallResult, aggregateKey string, evidenceIDs []string) (T7CallResult, BrainSource, error) {
 	if result.Status == "valid" {
+		var out T7Output
 		if err := decode.Decode(result.Output, &out, decode.Closed); err != nil {
-			return out, BrainSource{}, err
+			return T7CallResult{}, BrainSource{}, err
 		}
-		if _, err := T7Contract(aggregateKey, evidenceIDs).ValidateOutput(result.Output); err != nil {
-			return out, BrainSource{}, err
+		if _, err := T7Contract(aggregateKey, "", nil, evidenceIDs).ValidateOutput(result.Output); err != nil {
+			return T7CallResult{}, BrainSource{}, err
 		}
-		return out, brainSource(result), nil
+		return T7CallResult{Proposal: &out}, brainSource(result), nil
 	}
 	if result.Status != "fallback" {
-		return out, BrainSource{}, fmt.Errorf("brain: T7 call %s is not terminal", result.CallID)
+		return T7CallResult{}, BrainSource{}, fmt.Errorf("brain: T7 call %s is not terminal", result.CallID)
 	}
-	return out, fallbackSource(result, "T7"), nil
+	return T7CallResult{NoDraft: true}, fallbackSource(result, "T7"), nil
 }
 
 func brainSource(r CallResult) BrainSource {

@@ -52,6 +52,15 @@ const (
 type InterruptOption struct{ ID, Label, Effect, Risk string }
 type InterruptLink struct{ Label, Target string }
 
+// ActiveInterruptReasons is the canonical active Interrupt reason set.
+func ActiveInterruptReasons() []InterruptReason {
+	return []InterruptReason{
+		InterruptDesignApproval, InterruptGuardrailViolation, InterruptCodeReview,
+		InterruptAgentBlocked, InterruptMergeConflict, InterruptFailureReview,
+		InterruptStartupStall,
+	}
+}
+
 type InterruptGeneration struct {
 	TaskSpecSnapshotID, PolicySnapshotID, ViolationCode, SubjectDigest string
 	ChangeID, HeadSHA, ReportID, ConflictDigest, FailureDigest         string

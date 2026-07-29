@@ -56,10 +56,10 @@ func TestT4T6T7ContractsRejectUnsafeOrExecutableOutput(t *testing.T) {
 
 	key := "aggregate:v1:global:all:1:2"
 	valid := []byte(`{"proposal_kind":"policy","target_scope":"global","title":"Review trend","body":"Human review only.","evidence_entry_ids":["e1"],"requires_human_approval":true}`)
-	if _, err := T7Contract(key, []string{"e1"}).ValidateOutput(valid); err != nil {
+	if _, err := T7Contract(key, "", []TaskKind{TaskBug}, []string{"e1"}).ValidateOutput(valid); err != nil {
 		t.Fatalf("valid T7 output: %v", err)
 	}
-	if _, err := T7Contract(key, []string{"e1"}).ValidateOutput([]byte(`{"proposal_kind":"policy","target_scope":"global","title":"Review trend","body":"Human review only.","evidence_entry_ids":["e1"],"requires_human_approval":true,"policy_patch":{}}`)); err == nil {
+	if _, err := T7Contract(key, "", []TaskKind{TaskBug}, []string{"e1"}).ValidateOutput([]byte(`{"proposal_kind":"policy","target_scope":"global","title":"Review trend","body":"Human review only.","evidence_entry_ids":["e1"],"requires_human_approval":true,"policy_patch":{}}`)); err == nil {
 		t.Fatal("T7 accepted executable policy_patch field")
 	}
 }
@@ -89,7 +89,7 @@ func TestT4T6T7InvalidOutputFallsBack(t *testing.T) {
 	}{
 		{"T4", T4Contract(t4Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-4", RunID: "run-4", Input: t4JSON}},
 		{"T6", T6Contract(t6Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-6", RunID: "run-6", Input: t6JSON}},
-		{"T7", T7Contract("aggregate:v1:global:all:1:2", []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: t7JSON(t)}},
+		{"T7", T7Contract("aggregate:v1:global:all:1:2", "", []TaskKind{TaskBug}, []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: t7JSON(t)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &FakeProvider{Responses: []FakeResponse{{ResultText: `{"bogus":true}`}, {ResultText: `{"bogus":true}`}}}
@@ -122,7 +122,7 @@ func TestT4T6T7ProviderDisabledFallback(t *testing.T) {
 	}{
 		{"T4", T4Contract(t4Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-4", RunID: "run-4", Input: []byte(`{"run_id":"run-4"}`)}},
 		{"T6", T6Contract(t6Input()), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:run-6", RunID: "run-6", Input: []byte(`{"run_id":"run-6"}`)}},
-		{"T7", T7Contract("aggregate:v1:global:all:1:2", []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: t7JSON(t)}},
+		{"T7", T7Contract("aggregate:v1:global:all:1:2", "", []TaskKind{TaskBug}, []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:all:1:2", Input: t7JSON(t)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res, err := shell.Call(ctx, tc.contract, tc.p)
