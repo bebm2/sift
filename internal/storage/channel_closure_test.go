@@ -97,6 +97,43 @@ func TestLegacyDailyBatchWithNullCriticalLimitsCanBeReopened(t *testing.T) {
 	}
 }
 
+func TestDailyBatchCannotInjectCriticalLimitsDuringTerminalTransition(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	at := int64(testNow + 1)
+	cmd := t6Command(testNow)
+	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
+	cmd.Channels = []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"visual"}}}
+	cmd.BatchAtMS = &at
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch string
+	if err := db.db.QueryRowContext(ctx, `SELECT batch_id FROM attention_batch_members WHERE interrupt_id=?`, in.ID).Scan(&batch); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"sealed", "delivered", "cancelled"} {
+		_, err := db.db.ExecContext(ctx, `UPDATE attention_batches SET state=?,critical_window_ms=1,critical_total_limit=1,critical_per_run_limit=1 WHERE id=?`, state, batch)
+		if err == nil || !strings.Contains(err.Error(), "daily attention batch cannot carry critical limits") {
+			t.Fatalf("daily %s transition error = %v", state, err)
+		}
+	}
+	var got string
+	if err := db.db.QueryRowContext(ctx, `SELECT state FROM attention_batches WHERE id=?`, batch).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "collecting" {
+		t.Fatalf("batch state after rejected transitions = %q", got)
+	}
+}
+
 func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
