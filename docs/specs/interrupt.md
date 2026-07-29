@@ -191,7 +191,7 @@ string:domain\x00sift.interrupt.generation\x00uint:version\x001\x00string:run_id
 
 ### 5.1 Report 子配额耗尽的 `failure_review`
 
-这是 `failure_review` 的唯一非 attempt 来源，且只允许 [`storage.md` §12.2.1](storage.md) 的 `RecordReport` 调用。它不使用上表的 attempt preimage，而是使用独立 domain，故不会与任一 `(run_id,attempt_no,generation,failure_digest)` 冲突：
+这是 `failure_review` 的唯一非 attempt 来源，且只允许 [`storage.md` §12.2.1](storage.md) 的 `RecordReport` 调用。它不使用上表的 attempt preimage，而是使用独立 domain，故不会与任一 `(run_id,attempt_no,generation,failure_digest)` 冲突。该对象的 immutable `interrupt_command_effect_bindings` 由本入口同时写入：`attempt_no=null` 时不得绑定 attempt-local retry；其 closed options/binding 必须明确 `retry_kind=gate_recheck` 或 `new_attempt`，二者只能择一；若该 quota 诊断版本不允许 retry，则 canonical options 移除 retry，并同步 command schema/version，不能留下无法执行的选项：
 
 ```text
 string:domain\x00sift.interrupt.report-quota.generation\x00uint:version\x001\x00string:run_id\x00<run_id>\x00enum:reason\x00failure_review\x00uint:day_bucket_start_ms\x00<daily_bucket_start_ms>\x00sha256:failure_digest\x00<failure_digest>\x00
@@ -219,7 +219,7 @@ Golden vector：若 `run_id=run-01`、`start=1754000000000`、`end=1754086400000
 - `reject` 或 `retry_after_absence` 已落定时，迟到事实不推进旧 Run，登记可终止身份并返回 `superseded_by_decision`；
 - `hold`、`escalate` 和升级封顶不写 resolution，事实优先窗口继续开放。
 
-M5 才接通 `startup_stall` 的 retry 探测请求/结果两段式和指令执行；其唯一合法动作、probe 及原子成功事务由 [ADR-013](../decisions/013-startup-stall-retry-convergence.md) 与 [`storage.md` §12.5](storage.md) 定义。M3 只负责让“无法证明消失”可见、唯一且保持隔离，绝不把它静默留在 `queued`。
+M5 才接通 `startup_stall` 的 retry 探测请求/结果两段式和指令执行；其唯一合法动作、probe 及原子成功事务由 [ADR-013](../decisions/013-startup-stall-retry-convergence.md) 与 [`storage.md` §12.5](storage.md) 定义。Report-only `agent_blocked` 与 quota-exhaustion `failure_review` 调用 `EmitInterrupt` 的 no-transition 变体：不更新 `runs.status`，不创建/终结 attempt；running Run 上 Command `hold` 只将 Interrupt 置为人工 held，Run 仍为 `running`。M3 只负责让“无法证明消失”可见、唯一且保持隔离，绝不把它静默留在 `queued`。
 
 ## 7. M5：T4/T6 与渲染边界（草案）
 
