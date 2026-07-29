@@ -74,6 +74,9 @@ type CompleteOutcome struct {
 	// ChannelFailureAlertAfter is used by channel_publish projection updates.
 	// Zero selects the V0 default of three consecutive failures.
 	ChannelFailureAlertAfter int
+	// MaxAttempts is the frozen effective outbox policy for this worker. Zero
+	// retains the configured retry-forever semantics.
+	MaxAttempts int
 }
 
 var ErrOperationConflict = errors.New("storage: operation key payload conflict")
@@ -291,6 +294,12 @@ func (d *DB) CompleteOutboxAttempt(ctx context.Context, claim ClaimedOperation, 
 			return ErrRejectedStaleWorker
 		}
 		return err
+	}
+	// A retryable completion at the frozen attempt limit is terminal. Decide
+	// this before writing its immutable result and Channel projections so they
+	// all describe the same outcome.
+	if outcome.State == OperationRetryable && outcome.MaxAttempts > 0 && claim.ClaimAttemptNo >= outcome.MaxAttempts {
+		outcome.State = OperationFailed
 	}
 	result := map[OperationState]string{OperationSucceeded: "success", OperationRetryable: "retry", OperationFailed: "failed", OperationStale: "stale", OperationConflict: "conflict"}[outcome.State]
 	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_attempt_results (attempt_id, finished_at_ms, outcome, error_class, error_summary, evidence_digest) VALUES (?, ?, ?, ?, ?, ?)`, claim.AttemptID, outcome.NowMS, result, nullable(string(outcome.ErrorClass)), nullable(outcome.ErrorSummary), nullable(digestJSON(outcome.Evidence))); err != nil {
