@@ -24,7 +24,7 @@ func interruptCommand(c storage.GateCandidate, in Input, v Verdict, attention co
 		cmd.Facts = map[string]string{"change_ref": changeRef, "head_sha": in.Change.HeadSHA, "review_requirement": v.ReviewPolicy, "recommended_action": "approve", "diff_ref": changeRef + "/diff"}
 	case "merge_conflict", "mergeability_unknown":
 		cmd.Reason, cmd.GatePhase = storage.InterruptMergeConflict, storage.GateMerge
-		cmd.Generation.ConflictDigest = in.Change.HeadSHA
+		cmd.Generation.ConflictDigest = storage.MergeConflictDigest(in.Identity.ChangeID, in.Change.HeadSHA)
 		cmd.Facts = map[string]string{"change_ref": changeRef, "head_sha": in.Change.HeadSHA, "conflict_summary": v.Code, "recommended_action": "retry", "conflict_evidence_ref": changeRef}
 	default:
 		cmd.Reason = storage.InterruptFailureReview

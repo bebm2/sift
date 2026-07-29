@@ -160,6 +160,17 @@ func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceI
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.expired_auto_reject")
 }
 
+// MergeConflictDigest identifies the exact durable conflicting Change observation.
+func MergeConflictDigest(changeID, headSHA string) string {
+	body, _ := json.Marshal(struct {
+		ChangeID     string `json:"change_id"`
+		HeadSHA      string `json:"head_sha"`
+		Mergeability string `json:"mergeability"`
+	}{changeID, headSHA, "conflicting"})
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
 func validateEffectBinding(ctx context.Context, tx *sql.Tx, interruptID, reason, runID string, schema int64, raw, digest string) (string, error) {
 	var binding map[string]json.RawMessage
 	if schema != 1 || json.Unmarshal([]byte(raw), &binding) != nil {
@@ -300,9 +311,10 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 			WHERE i.id=? AND r.id=? AND r.change_id=? AND r.change_head_sha=?
 				AND s.head_sha=? AND s.effective_policy_hash=?)`, interruptID, runID, textValue("change_id"), textValue("head_sha"), textValue("head_sha"), textValue("review_policy_snapshot_digest")).Scan(&exists)
 	case "merge_conflict":
-		// The gate snapshot is the durable conflict observation.  The current
-		// emitter uses the observed head as its conflict digest; do not accept a
-		// digest from an unrelated Change or an uncalibrated gate.
+		changeID, headSHA := textValue("change_id"), textValue("head_sha")
+		if textValue("conflict_digest") != MergeConflictDigest(changeID, headSHA) {
+			return fmt.Errorf("%w: invalid merge conflict digest", ErrInterruptRejected)
+		}
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM interrupts i JOIN runs r ON r.id=i.run_id
 			JOIN calibration_entries c ON c.id=i.calibration_id
@@ -311,7 +323,7 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 			WHERE i.id=? AND r.id=? AND r.change_id=? AND r.change_head_sha=?
 				AND s.head_sha=?
                 AND json_extract(s.canonical_json,'$.change.mergeability')='conflicting'
-                AND json_extract(e.verdict_json,'$.mergeability')='conflicting')`, interruptID, runID, textValue("change_id"), textValue("head_sha"), textValue("head_sha")).Scan(&exists)
+                AND json_extract(e.verdict_json,'$.mergeability')='conflicting')`, interruptID, runID, changeID, headSHA, headSHA).Scan(&exists)
 	case "guardrail_violation":
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM interrupts i

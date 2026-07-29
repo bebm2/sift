@@ -78,32 +78,16 @@ func run(args []string, out, errOut io.Writer) int {
 			}
 			seen[string(canonical)] = r.interrupt
 		}
-		if *repair {
-			tx, e := db.Begin()
-			if e != nil {
-				fmt.Fprintln(errOut, e)
-				return 1
-			}
-			for _, r := range group {
-				canonical, _ := canonicalJSON(r.body)
-				sum := sha256.Sum256(canonical)
-				next := hex.EncodeToString(sum[:])
-				if _, e = tx.Exec(`UPDATE interrupt_command_effect_bindings SET binding_json=?,binding_digest=? WHERE interrupt_id=? AND binding_digest=?`, string(canonical), next, r.interrupt, digest); e != nil {
-					_ = tx.Rollback()
-					fmt.Fprintln(errOut, e)
-					return 1
-				}
-				fmt.Fprintf(out, "repaired interrupt=%s digest=%s\n", r.interrupt, next)
-			}
-			if e = tx.Commit(); e != nil {
-				fmt.Fprintln(errOut, e)
-				return 1
-			}
-		}
 	}
 	if err := rows.Err(); err != nil {
 		fmt.Fprintln(errOut, err)
 		return 1
+	}
+	if *repair && duplicates > 0 {
+		if err := repairGroups(db, groups, out); err != nil {
+			fmt.Fprintln(errOut, err)
+			return 1
+		}
 	}
 	if duplicates == 0 {
 		fmt.Fprintln(out, "no duplicate binding digests")
@@ -112,6 +96,38 @@ func run(args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out, "check only; rerun with --repair --backup PATH")
 	}
 	return 0
+}
+
+func repairGroups(db *sql.DB, groups map[string][]bindingRow, out io.Writer) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DROP TRIGGER interrupt_command_effect_bindings_append_only_update`); err != nil {
+		return err
+	}
+	for digest, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		for _, r := range group {
+			canonical, err := canonicalJSON(r.body)
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(canonical)
+			next := hex.EncodeToString(sum[:])
+			if _, err := tx.Exec(`UPDATE interrupt_command_effect_bindings SET binding_json=?,binding_digest=? WHERE interrupt_id=? AND binding_digest=?`, string(canonical), next, r.interrupt, digest); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "repaired interrupt=%s digest=%s\n", r.interrupt, next)
+		}
+	}
+	if _, err := tx.Exec(`CREATE TRIGGER interrupt_command_effect_bindings_append_only_update BEFORE UPDATE ON interrupt_command_effect_bindings FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'append-only table'); END`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func canonicalJSON(raw string) ([]byte, error) {

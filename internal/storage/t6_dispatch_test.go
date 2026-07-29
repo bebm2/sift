@@ -70,10 +70,8 @@ func TestEmitInterruptT6InvalidFallsBackAndHighIsImmediate(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := t6Command(testNow)
-	cmd.Reason = InterruptMergeConflict
-	cmd.Facts = map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "conflict_summary": "conflict", "recommended_action": "retry", "conflict_evidence_ref": "/tmp/conflict"}
-	cmd.Generation = InterruptGeneration{ChangeID: "change-01", HeadSHA: "0123456789012345678901234567890123456789", ConflictDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	cmd.Channels = []InterruptChannel{{ID: "voice", Capabilities: []string{"voice"}}}
+	cmd.GatePhase = GateMerge
+	cmd.Channels = []InterruptChannel{{ID: "visual", Capabilities: []string{"visual"}}}
 	cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
 		return InterruptT6Output{ChannelID: "missing", Delivery: "batch"}, nil
 	}
