@@ -291,7 +291,17 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 	switch arm {
 	case "design_approval":
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_spec_snapshots WHERE id=? AND run_id=?)`, textValue("task_spec_snapshot_id"), runID).Scan(&exists)
-	case "startup_stall", "failure_review_attempt":
+	case "code_review", "merge_conflict":
+		var change, head string
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE(change_id,''),COALESCE(change_head_sha,'') FROM runs WHERE id=?`, runID).Scan(&change, &head)
+		if err == nil && (change != textValue("change_id") || head != textValue("head_sha") || change == "" || head == "") {
+			exists = 0
+		}
+	case "guardrail_violation":
+		// These values are immutable policy/source facts.  Their non-empty
+		// shape is checked above; the policy owner supplies the provenance.
+		exists = 1
+	case "agent_blocked", "startup_stall", "failure_review_attempt":
 		query := `SELECT EXISTS(SELECT 1 FROM attempts a JOIN interrupts i ON i.id=? WHERE a.run_id=? AND a.run_id=i.run_id AND a.attempt_no=? AND a.generation=?)`
 		args := []any{interruptID, runID, integerValue("attempt_no"), integerValue("generation")}
 		if arm == "failure_review_attempt" {
@@ -299,6 +309,9 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 			_ = json.Unmarshal(binding["retry_kind"], &retry)
 			if retry == "new_attempt" {
 				query = `SELECT EXISTS(SELECT 1 FROM attempts a JOIN interrupts i ON i.id=? WHERE a.run_id=? AND a.run_id=i.run_id AND a.attempt_no=? AND a.generation=? AND phase='finished' AND ((result_exit_code IS NOT NULL AND result_exit_code<>0) OR result_signal IS NOT NULL))`
+			} else if retry == "gate_recheck" {
+				query = `SELECT EXISTS(SELECT 1 FROM runs r JOIN interrupts i ON i.id=? WHERE r.id=? AND r.id=i.run_id AND r.change_id=? AND r.change_head_sha=?)`
+				args = []any{interruptID, runID, textValue("change_id"), textValue("head_sha")}
 			}
 		}
 		err = tx.QueryRowContext(ctx, query, args...).Scan(&exists)
@@ -490,7 +503,11 @@ func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, v
 		if batch == "" {
 			batch = "critical:global:global:" + admission
 		}
-		batch += fmt.Sprintf(":%s:%s:%s:%s:%s", channel, forgeKind, enc([]byte(host)), enc([]byte(forgeProject)), targetKind+":"+enc([]byte(targetID)))
+		// Existing collecting batches already contain their complete immutable
+		// target identity; append the target suffix only for a new episode.
+		if strings.Count(batch, ":") < 8 {
+			batch += fmt.Sprintf(":%s:%s:%s:%s:%s", channel, forgeKind, enc([]byte(host)), enc([]byte(forgeProject)), targetKind+":"+enc([]byte(targetID)))
+		}
 	}
 	deliveryID := batch + ":publish:1"
 	scope, scopeID := "global", "global"
@@ -526,10 +543,10 @@ func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, v
 	if gotAdmission != admission || gotKey != batch+":"+id || gotChannel != channel || gotSnapshot != snapshot || gotDelivery != batch+":"+id || gotHeadline != headline || gotReason != reason || gotLinks != links || gotOpts != opts || gotJoined > now {
 		return fmt.Errorf("%w: batch member identity collision", ErrInterruptRejected)
 	}
-	// A member snapshot is its join-time delivery authority.  A later fused
-	// escalation rotates the Interrupt nonce, but must not rewrite that immutable
-	// snapshot; PrepareAttentionBatch will exclude the stale member at sealing.
-	return nil
+	// The member row is immutable history.  Its separate authority projection is
+	// refreshed on every replay so a repeated fuse carries the current nonce.
+	_, err = tx.ExecContext(ctx, `INSERT INTO attention_batch_member_authority(batch_id,interrupt_id,interrupt_version,nonce,headline,reason,severity,links_json,options_json,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(batch_id,interrupt_id) DO UPDATE SET interrupt_version=excluded.interrupt_version,nonce=excluded.nonce,headline=excluded.headline,reason=excluded.reason,severity=excluded.severity,links_json=excluded.links_json,options_json=excluded.options_json,updated_at_ms=excluded.updated_at_ms WHERE EXISTS (SELECT 1 FROM attention_batches WHERE id=excluded.batch_id AND state='collecting')`, batch, id, version, nonce, headline, reason, severity, links, opts, now)
+	return err
 }
 
 func finishAdvance(ctx context.Context, tx *sql.Tx, res sql.Result, cmd AdvanceInterruptCmd, event string) (bool, error) {

@@ -48,7 +48,7 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 	} else if err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT m.delivery_id,m.interrupt_id,m.interrupt_version,m.nonce,m.headline,i.brief_markdown,m.reason,m.severity,m.links_json,m.options_json,i.run_id FROM attention_batch_members m JOIN interrupts i ON i.id=m.interrupt_id WHERE m.batch_id=? AND m.excluded_at_ms IS NULL AND i.status='open' AND i.version=m.interrupt_version AND i.nonce=m.nonce ORDER BY m.interrupt_id`, batchID)
+	rows, err := tx.QueryContext(ctx, `SELECT m.delivery_id,m.interrupt_id,a.interrupt_version,a.nonce,a.headline,i.brief_markdown,a.reason,a.severity,a.links_json,a.options_json,i.run_id FROM attention_batch_members m JOIN attention_batch_member_authority a ON a.batch_id=m.batch_id AND a.interrupt_id=m.interrupt_id JOIN interrupts i ON i.id=m.interrupt_id WHERE m.batch_id=? AND m.excluded_at_ms IS NULL AND i.status='open' AND i.version=a.interrupt_version AND i.nonce=a.nonce ORDER BY m.interrupt_id`, batchID)
 	if err != nil {
 		return err
 	}
