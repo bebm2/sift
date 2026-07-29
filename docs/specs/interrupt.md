@@ -1,12 +1,12 @@
 ---
-status: draft
+status: active
 created: 2026-07-29
 summary: Interrupt 的发射、调度、投递与升级契约
 ---
 
 # Interrupt 规格
 
-本文冻结 M3 Attention 泛型发射核心，并在 M5 草案中扩展 T4/T6、Channel、调度、超时升级与 critical 熔断。每个 PRD reason 即使没有 T4/T6 也能生成可见、可发布的 fallback Interrupt；`startup_stall` 仍是在无法证明执行体消失时的唯一安全出口。本文保持 `draft`，直至 M5 字段评审完成。
+本文冻结 M3 Attention 泛型发射核心，并在 M5 草案中扩展 T4/T6、Channel、调度、超时升级与 critical 熔断。每个 PRD reason 即使没有 T4/T6 也能生成可见、可发布的 fallback Interrupt；`startup_stall` 仍是在无法证明执行体消失时的唯一安全出口。字段评审已由[第六次定向复审 PASS](../reviews/2026-07-29-m5-interrupt-field-rereview-6-pi-gpt-5.6-sol.md)确认；本规格 `active` 不表示 M5 已实现或阶段门禁已通过。
 
 来源：[PRD §4.1–§4.4、§5.3、§5.5、§7.1](../PRD.md)、[DESIGN §8.7、§10.1](../DESIGN.md)、[WBS M3 §3.6–§3.7、M5 §5.1–§5.3](../WBS.md)、[ADR-010](../decisions/010-attempt-spawn-handoff.md)、[ADR-013](../decisions/013-startup-stall-retry-convergence.md)。持久化和事务边界见 [`storage.md` §6、§12.2](storage.md)，默认超时见 [`config.md` §3.9](config.md)，发布 operation 见 [`outbox.md`](outbox.md)。
 

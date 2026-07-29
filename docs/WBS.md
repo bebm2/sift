@@ -508,9 +508,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 ### 先写/增补 spec
 
-- [ ] 完成 `specs/interrupt.md`
-- [x] `specs/command.md`（draft；覆盖鉴权、语法、nonce/options、回执、Ledger/transition 与 startup_stall 两段式）
-- [ ] `specs/report.md`
+- [x] `specs/interrupt.md`（[字段评审 PASS](reviews/2026-07-29-m5-interrupt-field-rereview-6-pi-gpt-5.6-sol.md)）
+- [x] `specs/command.md`（[字段评审 PASS](reviews/2026-07-29-m5-command-field-rereview-9-pi-gpt-5.6-sol.md)；覆盖鉴权、语法、nonce/options、回执、Ledger/transition 与 startup_stall 两段式）
+- [x] `specs/report.md`（[字段评审 PASS](reviews/2026-07-29-m5-report-field-rereview-6-pi-gpt-5.6-sol.md)）
 - [ ] 增补 `specs/brain.md`（T4/T6/T7）
 - [x] 增补 `specs/config.md`（配额、熔断、reason 上限去向、指标权重）
 

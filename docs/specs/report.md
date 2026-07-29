@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 created: 2026-07-29
 summary: Agent Layer 1 上报的 run.sock、事件、去重与配额契约
 ---
@@ -10,7 +10,7 @@ summary: Agent Layer 1 上报的 run.sock、事件、去重与配额契约
 
 来源：[PRD §5.8、§9.1 TM5](../PRD.md)、[DESIGN §8.9](../DESIGN.md)、[WBS M5 §5.5](../WBS.md)、[ADR-006](../decisions/006-report-via-cli-not-mcp.md)、[ADR-008](../decisions/008-control-plane-endpoints-and-capabilities.md)。配置数值见 [`config.md` §3.10](config.md)，receipt、令牌桶和写端口见 [`storage.md` §7.4、§9、§11](storage.md)，直接致扰的对象和收费口见 [`interrupt.md`](interrupt.md)。
 
-> 本文是 M5 实现前的 draft；不得把本文件或既有 schema 误述为 Report 已接通。
+> 字段评审已由[第六次定向复审 PASS](../reviews/2026-07-29-m5-report-field-rereview-6-pi-gpt-5.6-sol.md)确认；本规格 `active` 不表示 Report 或 M5 已接通，也不表示阶段门禁已通过。
 
 ## 1. 范围与不变量
 
