@@ -458,6 +458,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.2 Interrupt 全功能与 Channel
 
+- [ ] 先写 [`specs/channel.md`](specs/channel.md) draft：冻结首个 webhook Channel、delivery/operation key、Attention sealed payload 接缝与 Forge 失败兜底；保持未勾实现项
 - [ ] 复用 M3 已支持全部 reason 的唯一发射器，接入 T4/T6、Channel、调度与 critical 熔断；不得新增 reason 专用旁路
 - [ ] LLM 只能建议 severity 降级；`min_modality: visual` renderer 拒绝语音路径
 - [ ] 实现首个 Channel；连续失败 N 次转 forge 告警评论，并在 ps/doctor 显示
@@ -513,6 +514,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 - [x] `specs/report.md`（[字段评审 PASS](reviews/2026-07-29-m5-report-field-rereview-6-pi-gpt-5.6-sol.md)）
 - [x] 增补 `specs/brain.md`（T4/T6/T7；[字段级评审 PASS WITH NOTES](reviews/2026-07-29-m5-brain-t4-t6-t7-field-review-pi-gpt-5.6-sol.md)）
 - [x] 增补 `specs/config.md`（配额、熔断、reason 上限去向、指标权重）
+- [ ] [`specs/channel.md`](specs/channel.md)（draft；首个 webhook Channel 与 Forge 失败兜底）
 
 ### M5 门禁
 
@@ -673,6 +675,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 | `specs/brain.md` | M1（壳/T1/T2、Brain replay） | M2 T1 Intake 接线/回复仲裁；M4 T3/T5；M5 T4/T6/T7 |
 | `specs/forge.md` | M2 | 随适配器契约同步 |
 | `specs/interrupt.md` | M3（全部 reason 最小契约） | M5 T4/T6、Channel、调度/renderer |
+| `specs/channel.md` | M5（draft；首个 webhook Channel 与失败兜底） | 随 Channel/Attention/outbox 实现同步 |
 | `specs/policy.md` | M4 | 随 Gate 策略同步 |
 | `specs/gate.md` | M4 | 随 Gate/回放同步 |
 | `specs/ledger.md` | M4 | M5 Command/指标同步 |
