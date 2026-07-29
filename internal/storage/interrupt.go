@@ -765,12 +765,14 @@ func interruptEffectBinding(cmd EmitInterruptCmd) ([]byte, string) {
 	case InterruptDesignApproval:
 		fields["task_spec_snapshot_id"] = cmd.Generation.TaskSpecSnapshotID
 	case InterruptGuardrailViolation:
-		fields["rule_id"], fields["matched_paths_digest"] = cmd.Generation.ViolationCode, cmd.Generation.SubjectDigest
+		fields["head_sha"], fields["rule_id"], fields["matched_paths_digest"] = cmd.Generation.HeadSHA, cmd.Generation.ViolationCode, cmd.Generation.SubjectDigest
 	case InterruptCodeReview:
-		fields["change_id"], fields["head_sha"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA
+		delete(fields, "run_id")
+		fields["change_id"], fields["head_sha"], fields["review_policy_snapshot_digest"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.Generation.PolicySnapshotID
 	case InterruptAgentBlocked:
-		fields["attempt_no"], fields["generation"], fields["report_id"] = cmd.Generation.AttemptNo, cmd.Generation.Generation, cmd.Generation.ReportID
+		fields["attempt_no"], fields["generation"] = cmd.Generation.AttemptNo, cmd.Generation.Generation
 	case InterruptMergeConflict:
+		delete(fields, "run_id")
 		fields["change_id"], fields["head_sha"], fields["conflict_digest"] = cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.Generation.ConflictDigest
 	case InterruptStartupStall:
 		fields["attempt_no"], fields["generation"] = cmd.Generation.AttemptNo, cmd.Generation.Generation
