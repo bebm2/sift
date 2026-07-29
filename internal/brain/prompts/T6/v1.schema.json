@@ -1,0 +1,39 @@
+{
+  "$id": "https://sift.dev/decode/t6_output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "channel_id": {
+      "type": "string",
+      "x-sift:maxBytes": 128
+    },
+    "delivery": {
+      "enum": [
+        "immediate",
+        "batch",
+        "next_window"
+      ],
+      "type": "string"
+    },
+    "rationale": {
+      "type": "string",
+      "x-sift:maxBytes": 2000,
+      "x-sift:minBytes": 1
+    },
+    "suggested_downgrade": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "channel_id",
+    "delivery",
+    "rationale",
+    "suggested_downgrade"
+  ],
+  "title": "T6Output",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "closed",
+    "sourceType": "brain.T6Output"
+  }
+}

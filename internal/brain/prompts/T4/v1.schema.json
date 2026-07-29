@@ -1,0 +1,52 @@
+{
+  "$id": "https://sift.dev/decode/t4_output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "conclusion": {
+      "type": "string",
+      "x-sift:maxBytes": 1000
+    },
+    "headline": {
+      "type": "string",
+      "x-sift:maxBytes": 160
+    },
+    "key_points": {
+      "items": {
+        "type": "string",
+        "x-sift:maxBytes": 1000,
+        "x-sift:minBytes": 1
+      },
+      "maxItems": 3,
+      "minItems": 1,
+      "type": "array"
+    },
+    "options": {
+      "items": {
+        "type": "string",
+        "x-sift:maxBytes": 64,
+        "x-sift:minBytes": 1
+      },
+      "maxItems": 4,
+      "minItems": 1,
+      "type": "array"
+    },
+    "recommended_option_id": {
+      "type": "string",
+      "x-sift:maxBytes": 64
+    }
+  },
+  "required": [
+    "conclusion",
+    "headline",
+    "key_points",
+    "options",
+    "recommended_option_id"
+  ],
+  "title": "T4Output",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "closed",
+    "sourceType": "brain.T4Output"
+  }
+}
