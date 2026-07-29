@@ -48,15 +48,18 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 		if state != "ready" || expiresAt <= cmd.NowMS {
 			return false, ErrRejectedStale
 		}
-		if delivery == "immediate" {
-			if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce, escalation, "normal", cmd.NowMS); err != nil {
-				return false, err
-			}
-		} else if err := addDailyBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce, cmd.NowMS, channel, snapshot, zone, summary); err != nil {
-			return false, err
-		}
 		res, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='batched',next_dispatch_at_ms=NULL,version=version+1,updated_at_ms=? WHERE id=? AND status='open' AND dispatch_state='ready' AND version=? AND nonce=?`, cmd.NowMS, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce)
 		if err != nil {
+			return false, err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return false, ErrRejectedStale
+		}
+		if delivery == "immediate" {
+			if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, escalation, "normal", cmd.NowMS); err != nil {
+				return false, err
+			}
+		} else if err := addDailyBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, cmd.NowMS, channel, snapshot, zone, summary); err != nil {
 			return false, err
 		}
 		return finishAdvance(ctx, tx, res, cmd, "interrupt.dispatched")
@@ -94,21 +97,28 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 	} else {
 		nextState, delivery, heldReason = "held", "held", "batch_after_expiry"
 	}
+	var fusedAdmission string
 	if next == SeverityCritical {
 		admitted, admissionID, err := admitCriticalTx(ctx, tx, cmd.InterruptID, cmd.NowMS, "escalation", window, total, perRun)
 		if err != nil {
 			return false, err
 		}
 		if !admitted {
-			if err := addCriticalBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, newNonce, admissionID, channel, snapshot, cmd.NowMS); err != nil {
-				return false, err
-			}
+			fusedAdmission = admissionID
 			nextState, delivery, heldReason, due = "batched", "batch", "", nil
 		}
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE interrupts SET severity=?,nonce=?,nonce_issued_at_ms=?,version=version+1,escalation_count=escalation_count+1,expires_at_ms=?,dispatch_state=?,delivery=?,held_reason=?,next_dispatch_at_ms=?,updated_at_ms=? WHERE id=? AND status='open' AND version=? AND nonce=?`, next, newNonce, cmd.NowMS, cmd.NowMS+expiresAfter, nextState, delivery, nullable(heldReason), due, cmd.NowMS, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce)
 	if err != nil {
 		return false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, ErrRejectedStale
+	}
+	if next == SeverityCritical && fusedAdmission != "" {
+		if err := addCriticalBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, newNonce, fusedAdmission, channel, snapshot, cmd.NowMS); err != nil {
+			return false, err
+		}
 	}
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.escalated")
 }
@@ -174,8 +184,8 @@ func enqueueInterruptChannelTx(ctx context.Context, tx *sql.Tx, id string, versi
 }
 
 func admitCriticalTx(ctx context.Context, tx *sql.Tx, id string, now int64, source string, window int64, total, perRun int) (bool, string, error) {
-	var run string
-	if err := tx.QueryRowContext(ctx, `SELECT run_id FROM interrupts WHERE id=?`, id).Scan(&run); err != nil {
+	var run, severity, charge, zone string
+	if err := tx.QueryRowContext(ctx, `SELECT run_id,severity,COALESCE(charged_budget_entry_id,''),COALESCE(day_timezone,'UTC') FROM interrupts WHERE id=?`, id).Scan(&run, &severity, &charge, &zone); err != nil {
 		return false, "", err
 	}
 	key := id + ":critical"
@@ -197,7 +207,7 @@ func admitCriticalTx(ctx context.Context, tx *sql.Tx, id string, now int64, sour
 		kind = "critical_fused"
 	}
 	admission := newID()
-	_, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,?,?)`, admission, id, key, kind, id, run, source, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,attention_charge_entry_id,severity,day_timezone,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, admission, id, key, kind, id, nullable(charge), severity, zone, run, source, now)
 	return kind == "critical_admitted", admission, err
 }
 
@@ -211,7 +221,23 @@ func nextSummary(now int64, zone, clock string) (int64, bool) {
 		return 0, false
 	}
 	t := time.UnixMilli(now).In(loc)
-	candidate := time.Date(t.Year(), t.Month(), t.Day(), h, m, 0, 0, loc)
+	sameDay := time.Date(t.Year(), t.Month(), t.Day(), h, m, 0, 0, loc)
+	// time.Date normalizes a nonexistent wall time to one side of a DST gap.
+	// Locate the offset transition and return its first valid instant.
+	if sameDay.In(loc).Year() == t.Year() && sameDay.In(loc).YearDay() == t.YearDay() && (sameDay.In(loc).Hour() != h || sameDay.In(loc).Minute() != m) {
+		for probe := sameDay.Add(4 * time.Hour); probe.After(sameDay); probe = probe.Add(-time.Minute) {
+			before := probe.Add(-time.Minute)
+			_, beforeOffset := before.In(loc).Zone()
+			_, probeOffset := probe.In(loc).Zone()
+			if beforeOffset != probeOffset {
+				if probe.After(t) {
+					return probe.UnixMilli(), true
+				}
+				break
+			}
+		}
+	}
+	candidate := sameDay
 	if !candidate.After(t) {
 		candidate = time.Date(t.Year(), t.Month(), t.Day()+1, h, m, 0, 0, loc)
 	}

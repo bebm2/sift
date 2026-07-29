@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 )
@@ -35,7 +37,27 @@ CREATE TABLE IF NOT EXISTS channel_failure_episodes (
  state TEXT NOT NULL CHECK(state IN ('open','alerted','ended_delivered','ended_failed')),
  last_error_class TEXT, alert_operation_key TEXT UNIQUE, created_at_ms INTEGER NOT NULL,
  updated_at_ms INTEGER NOT NULL, ended_at_ms INTEGER, PRIMARY KEY(subject_id,generation));`)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT i.id,i.reason,i.run_id,i.created_at_ms FROM interrupts i LEFT JOIN interrupt_command_effect_bindings b ON b.interrupt_id=i.id WHERE b.interrupt_id IS NULL`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, reason, runID string
+		var created int64
+		if err := rows.Scan(&id, &reason, &runID, &created); err != nil {
+			return err
+		}
+		binding, _ := json.Marshal(map[string]any{"arm": "run_transition", "run_id": runID})
+		sum := sha256.Sum256(binding)
+		if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) VALUES(?,?,1,?,?,?)`, id, reason, string(binding), hex.EncodeToString(sum[:]), created); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 type channelPayload struct {

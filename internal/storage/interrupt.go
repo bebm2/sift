@@ -623,7 +623,7 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 		return Interrupt{}, err
 	}
 	if in.Severity != SeverityCritical {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,NULL,?)`, newID(), in.ID, in.ID+":initial", "quota_charged", in.ID, in.RunID, cmd.NowMS); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,attention_charge_entry_id,severity,quota_day,day_timezone,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)`, newID(), in.ID, in.ID+":initial", "quota_charged", in.ID, nullable(in.ChargedBudgetEntryID), in.Severity, quotaDay(cmd.NowMS, timezoneOrUTC(cmd.DayTimezone)), timezoneOrUTC(cmd.DayTimezone), in.RunID, cmd.NowMS); err != nil {
 			return Interrupt{}, err
 		}
 	} else {
@@ -876,6 +876,14 @@ func fuseRunOrDefault(v int) int {
 		return 2
 	}
 	return v
+}
+
+func quotaDay(now int64, zone string) string {
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		loc = time.UTC
+	}
+	return time.UnixMilli(now).In(loc).Format("2006-01-02")
 }
 
 func nullableInt64(v *int64) any {
