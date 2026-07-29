@@ -1,9 +1,11 @@
 package brain
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/miaoxiaoyong/sift/internal/decode"
+	"github.com/miaoxiaoyong/sift/internal/storage"
 )
 
 // T4FallbackOutput preserves the complete frozen input skeleton. A fallback
@@ -36,6 +38,35 @@ func T6FallbackOutput(in T6Input) []byte {
 type T4CallResult struct {
 	Normal   *T4Output
 	Fallback *T4Input
+}
+
+// CallT4 adapts the unified Brain shell to the Interrupt emitter's advisory
+// callback. The shell persists the logical call and its trace; the emitter
+// remains responsible for deterministic admission and the write transaction.
+func (s *Shell) CallT4(ctx context.Context, in storage.InterruptT4Input) (storage.InterruptT4Output, error) {
+	options := make([]T4Option, len(in.Options))
+	for i, option := range in.Options {
+		options[i] = T4Option{ID: option.ID, Label: option.Label, Effect: option.Effect, Risk: option.Risk}
+	}
+	links := make([]T4Link, len(in.Links))
+	for i, link := range in.Links {
+		links[i] = T4Link{Label: link.Label, Target: link.Target}
+	}
+	input := T4Input{RunID: in.RunID, AttemptNo: in.AttemptNo, Interrupt: T4Interrupt{Reason: InterruptReason(in.Reason), BaseSeverity: InterruptSeverity(in.Severity), MinModality: InterruptModality(in.Modality), FallbackHeadline: in.Headline, FallbackBrief: in.Brief, BriefFragments: append([]string(nil), in.Fragments...), Links: links, CandidateOptions: options}}
+	canonical, err := BuildT4Input(input)
+	if err != nil {
+		return storage.InterruptT4Output{}, err
+	}
+	result, err := s.Call(ctx, T4Contract(input), CallParams{Scope: storage.BrainScopeRun, SubjectKey: "run:" + in.RunID, RunID: in.RunID, AttemptNo: in.AttemptNo, Input: canonical})
+	if err != nil {
+		return storage.InterruptT4Output{}, err
+	}
+	admitted, _, err := T4ResultFromCall(result, input)
+	if err != nil || admitted.Normal == nil {
+		return storage.InterruptT4Output{}, err
+	}
+	out := admitted.Normal
+	return storage.InterruptT4Output{Headline: *out.Headline, Conclusion: *out.Conclusion, KeyPoints: append([]string(nil), (*out.KeyPoints)...), RecommendedOptionID: *out.RecommendedOptionID}, nil
 }
 
 func T4ResultFromCall(result CallResult, in T4Input) (T4CallResult, BrainSource, error) {
