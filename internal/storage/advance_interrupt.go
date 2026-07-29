@@ -291,12 +291,25 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 	switch arm {
 	case "design_approval":
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_spec_snapshots WHERE id=? AND run_id=?)`, textValue("task_spec_snapshot_id"), runID).Scan(&exists)
-	case "code_review", "merge_conflict":
-		var change, head string
-		err = tx.QueryRowContext(ctx, `SELECT COALESCE(change_id,''),COALESCE(change_head_sha,'') FROM runs WHERE id=?`, runID).Scan(&change, &head)
-		if err == nil && (change != textValue("change_id") || head != textValue("head_sha") || change == "" || head == "") {
-			exists = 0
-		}
+	case "code_review":
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM interrupts i JOIN runs r ON r.id=i.run_id
+			JOIN calibration_entries c ON c.id=i.calibration_id
+			JOIN gate_evaluations e ON e.id=c.gate_evaluation_id
+			JOIN gate_input_snapshots s ON s.id=e.snapshot_id
+			WHERE i.id=? AND r.id=? AND r.change_id=? AND r.change_head_sha=?
+				AND s.head_sha=? AND s.effective_policy_hash=?)`, interruptID, runID, textValue("change_id"), textValue("head_sha"), textValue("head_sha"), textValue("review_policy_snapshot_digest")).Scan(&exists)
+	case "merge_conflict":
+		// The gate snapshot is the durable conflict observation.  The current
+		// emitter uses the observed head as its conflict digest; do not accept a
+		// digest from an unrelated Change or an uncalibrated gate.
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM interrupts i JOIN runs r ON r.id=i.run_id
+			JOIN calibration_entries c ON c.id=i.calibration_id
+			JOIN gate_evaluations e ON e.id=c.gate_evaluation_id
+			JOIN gate_input_snapshots s ON s.id=e.snapshot_id
+			WHERE i.id=? AND r.id=? AND r.change_id=? AND r.change_head_sha=?
+				AND s.head_sha=? AND s.head_sha=?)`, interruptID, runID, textValue("change_id"), textValue("head_sha"), textValue("head_sha"), textValue("conflict_digest")).Scan(&exists)
 	case "guardrail_violation":
 		// These values are immutable policy/source facts.  Their non-empty
 		// shape is checked above; the policy owner supplies the provenance.
@@ -315,6 +328,13 @@ func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, inter
 			}
 		}
 		err = tx.QueryRowContext(ctx, query, args...).Scan(&exists)
+		if err == nil && exists == 1 && arm == "agent_blocked" {
+			var report string
+			_ = json.Unmarshal(binding["report_id"], &report)
+			if report != "" {
+				err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM report_receipts WHERE id=? AND run_id=? AND attempt_no=? AND report_kind='blocker')`, report, runID, integerValue("attempt_no")).Scan(&exists)
+			}
+		}
 	case "report_quota_failure_review":
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM report_quota_exhaustions q JOIN events e ON e.id=q.security_event_id WHERE q.run_id=? AND q.daily_bucket_start_ms=? AND q.daily_bucket_end_ms=? AND q.security_event_id=? AND e.source='system')`, runID, integerValue("daily_bucket_start_ms"), integerValue("daily_bucket_end_ms"), textValue("security_event_id")).Scan(&exists)
 	default:
