@@ -245,6 +245,19 @@ func TestReconcilerExternalMergeFactsFirstWithoutExactBinding(t *testing.T) {
 					t.Fatal(err)
 				}
 				if tc.ambiguous {
+					fc.AddChange(project.Ref, "c2", "head1")
+					if _, err := fc.InjectMerged(project.Ref, "c2", time.UnixMilli(reconcilerNow)); err != nil {
+						t.Fatal(err)
+					}
+					q, err := sql.Open("sqlite", db.Path())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := q.Exec(`UPDATE runs SET change_id='c2' WHERE id='run'`); err != nil {
+						q.Close()
+						t.Fatal(err)
+					}
+					q.Close()
 					second := intakeGateInterrupt("run")
 					second.ExpectedRunVersion = 3
 					second.Generation.ChangeID = "c2"

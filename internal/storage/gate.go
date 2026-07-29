@@ -87,6 +87,12 @@ func (d *DB) RecordGateEvaluationAndEmitInterrupt(ctx context.Context, r GateEva
 	if cmd.RunID != r.RunID || cmd.CalibrationID != "" {
 		return RecordedGateEvaluation{}, Interrupt{}, errors.New("storage: invalid gate interrupt binding")
 	}
+	if cmd.Reason == InterruptCodeReview {
+		if cmd.Generation.PolicySnapshotID != "" && cmd.Generation.PolicySnapshotID != r.EffectivePolicyHash {
+			return RecordedGateEvaluation{}, Interrupt{}, errors.New("storage: code review policy snapshot does not match gate record")
+		}
+		cmd.Generation.PolicySnapshotID = r.EffectivePolicyHash
+	}
 	var out RecordedGateEvaluation
 	cmd.CalibrationID = newID()
 	in, err := d.emitInterrupt(ctx, cmd, func(tx *sql.Tx) error {

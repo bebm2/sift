@@ -77,6 +77,14 @@ func (r *Reconciler) reconcile(ctx context.Context, c storage.GateCandidate, now
 	if before.ID != after.ID || before.URL != after.URL || before.HeadSHA != after.HeadSHA {
 		return nil
 	}
+	version, err := r.DB.FreezeGateChangeHead(ctx, c.RunID, c.ChangeID, after.HeadSHA, c.Version, now.UnixMilli())
+	if err == storage.ErrRejectedStale {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	c.Version = version
 	paths := changedPaths(diff)
 	if len(paths) == 0 {
 		return fmt.Errorf("gate reconciler: Change %s has no complete changed-path facts", c.ChangeID)

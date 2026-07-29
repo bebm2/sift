@@ -22,6 +22,10 @@ func TestRecordHumanDecisionSettlesBoundCalibrationAndProjectsCertification(t *t
 	}
 	r := gateRecord(testNow)
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, Reason: InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/1", "head_sha": "abc", "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/1/diff"}, Generation: InterruptGeneration{ChangeID: "change-01", HeadSHA: strings.Repeat("a", 40)}, GatePhase: GateNone, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", Source: SourceSystem, NowMS: testNow}
+	if _, err := db.db.ExecContext(ctx, `UPDATE runs SET change_id=?, change_head_sha=? WHERE id=?`, cmd.Generation.ChangeID, cmd.Generation.HeadSHA, cmd.RunID); err != nil {
+		t.Fatal(err)
+	}
+	r.HeadSHA = cmd.Generation.HeadSHA
 	recorded, interrupt, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd)
 	if err != nil {
 		t.Fatal(err)

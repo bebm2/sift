@@ -33,7 +33,7 @@ func TestEmitInterruptAdmitsT6AndPersistsDispatch(t *testing.T) {
 		}
 		return InterruptT6Output{ChannelID: "ops", Delivery: "batch", SuggestedDowngrade: true}, nil
 	}
-	got, err := db.EmitInterrupt(ctx, cmd)
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestEmitInterruptAdmitsT6AndPersistsDispatch(t *testing.T) {
 		t.Fatal("T6 called for an existing Interrupt")
 		return InterruptT6Output{}, nil
 	}
-	again, err := db.EmitInterrupt(ctx, cmd)
+	again, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil || again.ID != got.ID || !again.SuggestedDowngrade {
 		t.Fatalf("replay = %#v, %v", again, err)
 	}
@@ -77,7 +77,7 @@ func TestEmitInterruptT6InvalidFallsBackAndHighIsImmediate(t *testing.T) {
 	cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
 		return InterruptT6Output{ChannelID: "missing", Delivery: "batch"}, nil
 	}
-	got, err := db.EmitInterrupt(ctx, cmd)
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestEmitInterruptHoldsWithoutCompatibleChannelWithoutCallingT6(t *testing.T
 		called = true
 		return InterruptT6Output{}, nil
 	}
-	got, err := db.EmitInterrupt(ctx, cmd)
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}

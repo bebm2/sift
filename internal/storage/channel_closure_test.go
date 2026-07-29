@@ -29,7 +29,7 @@ func TestMemberedBatchCannotBeRetargeted(t *testing.T) {
 	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
 	cmd.Channels = []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"visual"}}}
 	cmd.BatchAtMS = &at
-	if _, err := db.EmitInterrupt(ctx, cmd); err != nil {
+	if _, err := emitTestInterrupt(t, ctx, db, cmd); err != nil {
 		t.Fatal(err)
 	}
 	var batch string
@@ -72,7 +72,7 @@ func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
 	cmd.Channels = []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"visual"}}}
 	cmd.BatchAtMS = &at
-	in, err := db.EmitInterrupt(ctx, cmd)
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}

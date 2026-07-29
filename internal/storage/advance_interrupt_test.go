@@ -15,9 +15,12 @@ func TestAdvanceInterruptEscalatesOnceAndRotatesNonce(t *testing.T) {
 	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
 		t.Fatal(err)
 	}
+	insertTaskSpec(t, db, "spec", "run", 1)
+	insertAttempt(t, db, "run", 1, "spec")
 	batch := int64(testNow + 2)
+	attempt := 1
 	in, err := db.EmitInterrupt(ctx, EmitInterruptCmd{
-		RunID: "run", ExpectedRunVersion: 1, Reason: InterruptAgentBlocked,
+		RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptAgentBlocked,
 		Facts:      map[string]string{"blocker_summary": "blocked", "attempted_summary": "tried", "recommended_action": "ask", "agent_log_ref": "/log"},
 		Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, ReportID: "report-1"}, GatePhase: GateNone, GuardrailLevel: GuardrailNone,
 		ExpiresAfterMS: 10, OnExpire: ExpireEscalate, OnMaxEscalations: ExpireHold, MaxEscalations: 1,
@@ -69,7 +72,7 @@ func TestAdvanceInterruptRepeatedCriticalFuseSealsCurrentAuthority(t *testing.T)
 		batchAt := now + 1
 		cmd.BatchAtMS = &batchAt
 		cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}, Default: true}}
-		in, err := db.EmitInterrupt(ctx, cmd)
+		in, err := emitTestInterrupt(t, ctx, db, cmd)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,11 +145,9 @@ func TestSupervisorInterruptTickDispatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := int64(testNow + 1)
-	in, err := db.EmitInterrupt(ctx, func() EmitInterruptCmd {
-		cmd := t6Command(testNow)
-		cmd.BatchAtMS, cmd.Channels = &at, []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
-		return cmd
-	}())
+	cmd := t6Command(testNow)
+	cmd.BatchAtMS, cmd.Channels = &at, []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +177,7 @@ func TestQuotaExhaustionCreatesBatchedInterruptWithoutCharge(t *testing.T) {
 	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 1}
 	cmd.DailySummaryAt = "09:00"
 	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
-	got, err := db.EmitInterrupt(ctx, cmd)
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}

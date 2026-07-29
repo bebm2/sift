@@ -129,6 +129,9 @@ func TestEvaluateRecordAndEmitInterruptCommitsGateShadowAndHITLTogether(t *testi
 	in.EffectivePolicyHash = digest(policyJSON)
 	t4 := brain.NewShell(db, config.Brain{DailyTokenLimit: 100, MaxInputBytes: 1 << 20}, nil, func() time.Time { return time.UnixMilli(now) })
 	db.SetInterruptT4(t4.CallT4)
+	if err := db.SetRunChangeHeadForTest(ctx, "r", in.Identity.ChangeID, in.Change.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
 	cmd := storage.EmitInterruptCmd{RunID: "r", ExpectedRunVersion: 1, Reason: storage.InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/42", "head_sha": in.Change.HeadSHA, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/42/diff"}, Generation: storage.InterruptGeneration{ChangeID: "42", HeadSHA: in.Change.HeadSHA}, GatePhase: storage.GateReview, GuardrailLevel: storage.GuardrailNone, AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 5, storage.SeverityHigh: 5}, DayTimezone: "UTC", Source: storage.SourceSystem, NowMS: now}
 	v, record, interrupt, err := EvaluateRecordAndEmitInterrupt(ctx, db, in, false, []byte(`{"schema_version":1}`), cmd)
 	if err != nil {
@@ -175,6 +178,9 @@ func TestGateT4NormalAndInvalidFallbackPreserveEmissionIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			in.EffectivePolicyHash = digest(policyJSON)
+			if err := db.SetRunChangeHeadForTest(ctx, "r", in.Identity.ChangeID, in.Change.HeadSHA); err != nil {
+				t.Fatal(err)
+			}
 			cmd := storage.EmitInterruptCmd{RunID: "r", ExpectedRunVersion: 1, Reason: storage.InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/42", "head_sha": in.Change.HeadSHA, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/42/diff"}, Generation: storage.InterruptGeneration{ChangeID: "42", HeadSHA: in.Change.HeadSHA}, GatePhase: storage.GateReview, GuardrailLevel: storage.GuardrailNone, AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 5, storage.SeverityHigh: 5}, DayTimezone: "UTC", Source: storage.SourceSystem, NowMS: now}
 			_, record, got, err := EvaluateRecordAndEmitInterrupt(ctx, db, in, false, []byte(`{"schema_version":1}`), cmd)
 			if err != nil {
