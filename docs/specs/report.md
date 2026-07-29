@@ -164,7 +164,7 @@ created_at_ms=<server received_at_ms>
 
 `bucket_start_ms <= created_at_ms < bucket_end_ms`；`bucket_end_ms` 只从权威 `budget_counters` 由 `(run_id,bucket_start_ms)` 取得，不复制到 `budget_entries`；`attention.day_timezone=local` 在 config snapshot 创建时规范化为具体 IANA 名称。日桶按该冻结时区的日历日计算，使用下一本地日的 00:00 作为 exclusive end，故 DST 日可为 23 或 25 小时。新 receipt 的 `report_interrupt_charge_entry_id` 与 `direct_interrupt_id` 均为 nullable、各自 UNIQUE FK，且仅在相应写入成功时设置；它们把 Report receipt、Report charge 与直接 Interrupt 固定为一对一。attention charge 不由 Report receipt 伪造：只有 `attention_admissions.kind=quota_charged`（或实际 critical admission）时，`interrupts.charged_budget_entry_id` 与 admission 的 `attention_charge_entry_id` 才非空；`quota_batched` / `critical_fused` 时两者均为 NULL。重放和语义 duplicate 不重复收费。critical 若由未来扩展的 Report 直接产生，仍计入本子配额，并同时遵守 attention critical fuse。
 
-当子配额已满，后续会直接致扰的 blocker 不创建 receipt/event/普通 Interrupt，但在同一受限写入口插入唯一 `(run_id, daily_bucket_start_ms)` 的 quota-exhaustion 安全事件记录。该记录的唯一约束而非先查后写保证并发至多一次；它以 [`interrupt.md` §5](interrupt.md) 的 Report 专用 domain/version 调用 `failure_review`。该异常的 facts 固定为 `failure_class=report_interrupt_quota_exhausted`、受控 `failure_evidence_ref=sift://event/<security_event_id>` 与 `recommended_action=review_report_interrupt_quota`，不接受 Agent 自由文本；`attempt_no` 为 NULL。它仍经过 `EmitInterrupt` 的全局 attention 配额和 critical fuse：合批/熔断保留该异常 Interrupt，结构拒发则保留 quota-exhaustion 安全记录和确定性诊断，绝不借支或另开告警旁路。
+当子配额已满，后续会直接致扰的 blocker 不创建 receipt/event/普通 Interrupt，但 `RecordReport` 先以独立、可重放事务写入唯一 `(run_id, daily_bucket_start_ms)` 的 quota-exhaustion 安全事件记录，同时提交已消费的 rate token。该记录的唯一约束而非先查后写保证并发至多一次；提交后才以 [`interrupt.md` §5.1](interrupt.md) 的 Report 专用 domain/version **best-effort** 调用 `failure_review`。该异常的 facts 固定为 `failure_class=report_interrupt_quota_exhausted`、受控 `failure_evidence_ref=sift://event/<security_event_id>` 与 `recommended_action=hold`，不接受 Agent 自由文本；`attempt_no` 为 NULL。它是 Report quota v1 的独立 option/binding variant，只提供 canonical `reject|hold`，没有 `retry`：`reject` 失败 Run，`hold` 只 hold Interrupt 而保持 running Run。它仍经过 `EmitInterrupt` 的全局 attention 配额和 critical fuse：合批/熔断保留该异常 Interrupt；结构拒发、publish target 缺失或 binding 拒绝都保留已提交 exhaustion/rate token，并以 generation-key 幂等的确定性诊断记录，不借支或另开告警旁路。
 
 ## 7. 原子边界与验收
 
@@ -177,11 +177,12 @@ created_at_ms=<server received_at_ms>
 | blocker 不能形成最小 facts | 消费 | 不写 | 同事务新 receipt + `report.blocker` event | 同事务诊断 | 不变 | 不写 |
 | blocker facts 完整、子配额可用、attention 实际收费 | 消费 | 写一行 Report charge | 同事务新 receipt + event | 不写 | 不变 | 新 `agent_blocked`、一笔 attention charge/admission 和 forge-comment outbox 全部提交 |
 | blocker facts 完整、attention `quota_batched` 或 critical fuse | 消费 | 写一行 Report charge | 同事务新 receipt + event | 不写 | 不变 | 同一 Interrupt/admission/forge-comment 提交；`charged_budget_entry_id=NULL`，delivery 标为 batched/held，不另扣或借支 |
-| 子配额已满 | 消费 | 不写 | 不写，key 不占位 | quota-exhaustion 行及其安全 event 提交 | 不变 | 至多一个专用 `failure_review`；若该异常 attention 合批/熔断，保留 admission 且无 attention charge；结构拒发只保留安全记录 |
+| 子配额已满，exhaustion 线性化事务 | 消费并提交 | 不写 | 不写，key 不占位 | quota-exhaustion 行及其安全 event 提交 | 不变 | 尚未尝试；崩溃后重放该唯一事实 |
+| 子配额已满，专用 `failure_review` 尝试 | 已提交，不再消费 | 不写 | 不写，key 不占位 | 已提交；结构拒发诊断以 generation key 幂等提交 | 不变 | 至多一个；attention 合批/熔断保留 admission 且无 attention charge；结构拒发、缺 publish target 或 binding 拒绝不回滚 exhaustion |
 | `EmitInterrupt` 结构拒绝（完整 blocker 分支） | 回滚 | 回滚 | 回滚，key 不占位 | 领域回滚后提交拒绝诊断 | 不变 | 回滚 |
 | 事务内部错误 | 回滚 | 回滚 | 回滚，key 不占位 | 存储可用时提交 `report_transaction_failed`；否则 RPC 返回 retryable `internal` | 不变 | 回滚 |
 
-因此 token 在子配额满分支已消费；它是通过两层去重、payload/phase 验证及 rate CAS 后的一次上报尝试，而不是可借此绕开的免费探测。Report-only `agent_blocked` 与 quota-exhaustion `failure_review` 都必须写 immutable `interrupt_command_effect_bindings`：前者绑定 `ask|retry|reject|hold` 的当前 effect；后者固定 `attempt_no=NULL`，`retry` 仅允许绑定 `retry_kind=gate_recheck|new_attempt` 的一种合法 effect，或按版本化 options 明确移除 `retry`。running Run 上 `hold` 保持 `running`（仅 Interrupt 进入人工 hold）；Report Interrupt 不执行 Run transition。安全 event 与领域 event 的身份、时钟和 source 以 [`storage.md` §7](storage.md) 为准。
+因此 token 在子配额满分支已消费；它是通过两层去重、payload/phase 验证及 rate CAS 后的一次上报尝试，而不是可借此绕开的免费探测。exhaustion 线性化提交后的 RPC 固定返回不可重试 `conflict`，closed code 为 `report_interrupt_quota_exhausted`；若专用发射因结构拒绝未能创建 Interrupt，仍返回同一 code（诊断只供审计，不能成为调用方分支）。attention 存储错误返回 retryable `internal`，但保留该 exhaustion/rate-token 事实；同一或后续请求重放只重试 generation-key 的发射，不再扣 token。Report-only `agent_blocked` 与 quota-exhaustion `failure_review` 都必须写 immutable `interrupt_command_effect_bindings`：前者绑定 `ask|retry|reject|hold` 的当前 effect；后者固定 `attempt_no=NULL` 并使用 storage 的 `report_quota_failure_review(run_id,daily_bucket_start_ms,daily_bucket_end_ms,security_event_id)` arm，canonical options 只有 `reject|hold`。running Run 上该 variant 的 `hold` 保持 `running`（仅 Interrupt 进入人工 hold）；`reject` 才令 Run failed；Report Interrupt 不执行其他 Run transition。安全 event 与领域 event 的身份、时钟和 source 以 [`storage.md` §7](storage.md) 为准。
 
 M5 至少覆盖：
 
@@ -190,4 +191,4 @@ M5 至少覆盖：
 3. 四类 payload 的 closed schema、canonical digest、大小上限和 token 脱敏；`completed` 与所有其他 report 均不改变 `runs.status`。
 4. 同 key 同 digest、同 key 异 digest、窗口内新 key 同语义、窗口到期和 `dedupe_window=0` 分别有可断言结果；所有 duplicate 零收费、零新 event。
 5. `burst=4` 跨固定分钟边界不瞬时超发，重启后桶连续且不随新配置重置；超限与配额拒绝没有 receipt/event/key 占位。
-6. 覆盖 DST 前后日桶、同 operation key/语义 duplicate、崩溃重放和并发收费；四个并发触顶者最多产生一条当日 quota-exhaustion 记录与 `failure_review`。逐行验证上表，并在每个领域写步骤后注入崩溃，绝不出现部分领域状态。
+6. 覆盖 DST 前后日桶、同 operation key/语义 duplicate、崩溃重放和并发收费；四个并发触顶者最多产生一条当日 quota-exhaustion 记录与 `failure_review`。在 exhaustion 线性化提交前/后、专用发射前/后分别注入崩溃：重放不得二次扣 token或安全事实，且最终至多一个 generation key Interrupt。publish target 缺失或 binding 结构拒绝保留 exhaustion 并返回同一 closed conflict；attention 存储错误也保留 exhaustion/token、返回 retryable internal，重放只再试发射。逐行验证上表，除这条有意拆分的安全事实/专用发射边界外，绝不出现部分领域状态。
