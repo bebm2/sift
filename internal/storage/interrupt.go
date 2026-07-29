@@ -444,6 +444,10 @@ func (d *DB) EmitInterrupt(ctx context.Context, cmd EmitInterruptCmd) (Interrupt
 // allowing the Gate recorder to append its frozen evidence before the
 // Interrupt is inserted. The callback must not perform external IO.
 func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error) (Interrupt, error) {
+	return d.emitInterruptHooks(ctx, cmd, before, nil)
+}
+
+func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, before func(*sql.Tx) error, after func(*sql.Tx, Interrupt) error) (Interrupt, error) {
 	if err := validateFailureReviewVariant(cmd); err != nil {
 		return Interrupt{}, err
 	}
@@ -712,6 +716,11 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 			return Interrupt{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='batched',next_dispatch_at_ms=NULL WHERE id=?`, in.ID); err != nil {
+			return Interrupt{}, err
+		}
+	}
+	if after != nil {
+		if err := after(tx, in); err != nil {
 			return Interrupt{}, err
 		}
 	}
