@@ -120,7 +120,7 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 		assertCount(t, db, "interrupts", 2)
 	})
 	t.Run("each post-exhaustion emission cut rolls back only the emission", func(t *testing.T) {
-		for _, table := range []string{"interrupts", "attention_admissions", "events", "outbox_operations", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
+		for _, table := range []string{"interrupts", "attention_admissions", "budget_entries", "events", "outbox_operations", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
 			t.Run(table, func(t *testing.T) {
 				db, ctx := seedReportQuotaRun(t, 1)
 				if err := submitBlocker(ctx, db, "0123456789abcdef0123456789abcdef"); err != nil {
@@ -138,6 +138,7 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 				assertCount(t, db, "report_quota_exhaustions", 1)
 				assertCount(t, db, "interrupts", 1)
 				assertCount(t, db, "attention_admissions", 1)
+				assertCount(t, db, "budget_entries", 2)
 				assertCount(t, db, "outbox_operations", 1)
 				assertCount(t, db, "interrupt_deliveries", 1)
 				assertCount(t, db, "interrupt_command_effect_bindings", 1)
@@ -145,6 +146,17 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 				if err := db.db.QueryRow(`SELECT COUNT(*) FROM events WHERE type='interrupt.emitted'`).Scan(&domainEvents); err != nil || domainEvents != 1 {
 					t.Fatalf("domain events after %s cut = %d, %v", table, domainEvents, err)
 				}
+				mustExec(t, db, "DROP TRIGGER "+trigger)
+				if err := submitBlocker(ctx, db, "2123456789abcdef0123456789abcdef"); err == nil || !strings.Contains(err.Error(), "report_interrupt_quota_exhausted") {
+					t.Fatalf("%s replay = %v", table, err)
+				}
+				assertCount(t, db, "report_quota_exhaustions", 1)
+				assertCount(t, db, "interrupts", 2)
+				assertCount(t, db, "attention_admissions", 2)
+				assertCount(t, db, "budget_entries", 3)
+				assertCount(t, db, "outbox_operations", 2)
+				assertCount(t, db, "interrupt_deliveries", 2)
+				assertCount(t, db, "interrupt_command_effect_bindings", 2)
 			})
 		}
 	})

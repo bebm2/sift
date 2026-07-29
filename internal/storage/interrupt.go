@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -799,7 +800,7 @@ func interruptBriefFragments(t interruptTemplate, facts map[string]string) []str
 		}
 	}
 	sort.Strings(fragments)
-	return fragments
+	return slices.Compact(fragments)
 }
 
 func safeT4Fragment(value string) bool {
