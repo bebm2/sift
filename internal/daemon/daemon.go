@@ -32,6 +32,7 @@ type Daemon struct {
 	Changes     []*forgeworker.ChangeWorker
 	Merges      []*forgeworker.MergeWorker
 	Channels    []*channelworker.Worker
+	Alerts      *forgeworker.AlertWorker
 	Successes   []*gate.SuccessReconciler
 	Gates       []*gate.Reconciler
 	Replies     []*intake.ReplyConsumer
@@ -68,6 +69,7 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 		now = time.Now
 	}
 	d := &Daemon{DB: db, Now: now}
+	alertClients := make(map[string]forge.Client)
 	db.SetChannelPolicy(cfg.Attention.ChannelFailureAlertAfter, cfg.Outbox.MaxAttempts)
 	// Channel payloads are already sealed by storage. The production consumer
 	// owns the only resolver and HTTP side effect; it is not project-scoped.
@@ -87,6 +89,7 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 			return nil, fmt.Errorf("project %s: %w", p.ID, err)
 		}
 		adapter.WithAutoMergeCapabilityReader(db)
+		alertClients[string(ref.Kind)+"|"+ref.Host+"|"+ref.ProjectKey] = adapter
 		probeCtx := context.Background()
 		if cfg.Forge.CommandTimeout > 0 {
 			var cancel context.CancelFunc
@@ -114,6 +117,9 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 			d.Gates = append(d.Gates, &gate.Reconciler{DB: db, Forge: adapter, Brain: brain.NewShell(db, cfg.Brain, brain.SubprocessProvider{Executable: cfg.Brain.Executable, Args: cfg.Brain.Args}, now), ProjectID: p.ID, Project: ref, Repo: p.Repo, Defaults: cfg.GateDefaults, Certification: cfg.Certification, Attention: cfg.Attention, Channels: interruptChannels(cfg.Attention), Now: now})
 		}
 		d.Replies = append(d.Replies, &intake.ReplyConsumer{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now})
+	}
+	if len(alertClients) > 0 {
+		d.Alerts = &forgeworker.AlertWorker{DB: db, Clients: alertClients, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:forge-alert"}
 	}
 	return d, nil
 }
@@ -207,6 +213,11 @@ func (d *Daemon) OutboxTick(ctx context.Context) error {
 	for i, w := range d.Channels {
 		if err := w.RunOnce(ctx); err != nil {
 			return fmt.Errorf("channel_publish[%d]: %w", i, err)
+		}
+	}
+	if d.Alerts != nil {
+		if err := d.Alerts.RunOnce(ctx); err != nil {
+			return fmt.Errorf("forge_alert: %w", err)
 		}
 	}
 	if d.Launch != nil {
