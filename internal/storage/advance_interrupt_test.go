@@ -49,6 +49,89 @@ func TestAdvanceInterruptEscalatesOnceAndRotatesNonce(t *testing.T) {
 	assertCount(t, db, "budget_entries", 1)
 }
 
+func TestAdvanceInterruptRepeatedCriticalFuseSealsCurrentAuthority(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []string{"run", "run-2"} {
+		if err := db.SeedForgeRunForTest(ctx, run, "project", "cfg", map[string]string{"run": "42", "run-2": "43"}[run], testNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	emit := func(run string, now int64) Interrupt {
+		cmd := t6Command(now)
+		cmd.RunID = run
+		cmd.Generation.ChangeID = "change-" + run
+		cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = 10, ExpireEscalate, ExpireHold, 3
+		cmd.CriticalTotalLimit, cmd.CriticalPerRunLimit = 1, 10
+		batchAt := now + 1
+		cmd.BatchAtMS = &batchAt
+		cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}, Default: true}}
+		in, err := db.EmitInterrupt(ctx, cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return in
+	}
+	advance := func(id string, version int64, nonce string, now int64) (int64, string) {
+		ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: id, ExpectedVersion: version, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: now})
+		if err != nil || !ok {
+			var gotVersion, expires int64
+			var gotNonce, state string
+			_ = db.db.QueryRow(`SELECT version,nonce,expires_at_ms,dispatch_state FROM interrupts WHERE id=?`, id).Scan(&gotVersion, &gotNonce, &expires, &state)
+			t.Fatalf("advance %s = %v, %v (got version=%d nonce=%s expires=%d state=%s)", id, ok, err, gotVersion, gotNonce, expires, state)
+		}
+		var gotVersion int64
+		var gotNonce string
+		if err := db.db.QueryRow(`SELECT version,nonce FROM interrupts WHERE id=?`, id).Scan(&gotVersion, &gotNonce); err != nil {
+			t.Fatal(err)
+		}
+		return gotVersion, gotNonce
+	}
+
+	// The first Interrupt occupies the sole admitted-critical slot.
+	admitted := emit("run", testNow)
+	var nonce string
+	if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, admitted.ID).Scan(&nonce); err != nil {
+		t.Fatal(err)
+	}
+	version, nonce := advance(admitted.ID, 1, nonce, testNow+10)
+	_, _ = advance(admitted.ID, version, nonce, testNow+20) // admitted critical
+
+	// The second one fuses twice. The second fuse must refresh only the
+	// collecting authority, so sealing uses its newest nonce/version.
+	fused := emit("run-2", testNow+100)
+	if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, fused.ID).Scan(&nonce); err != nil {
+		t.Fatal(err)
+	}
+	version, nonce = advance(fused.ID, 1, nonce, testNow+110)       // normal → high
+	version, nonce = advance(fused.ID, version, nonce, testNow+120) // high → fused critical
+	version, nonce = advance(fused.ID, version, nonce, testNow+130) // repeated fused critical
+	var batch, authorityNonce string
+	var authorityVersion int64
+	if err := db.db.QueryRow(`SELECT batch_id FROM attention_batch_members WHERE interrupt_id=?`, fused.ID).Scan(&batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT interrupt_version,nonce FROM attention_batch_member_authority WHERE batch_id=? AND interrupt_id=?`, batch, fused.ID).Scan(&authorityVersion, &authorityNonce); err != nil {
+		t.Fatal(err)
+	}
+	if authorityVersion != version || authorityNonce != nonce {
+		t.Fatalf("authority = %d/%s, want %d/%s", authorityVersion, authorityNonce, version, nonce)
+	}
+	if err := db.PrepareDueAttentionBatches(ctx, testNow+1_000_000); err != nil {
+		t.Fatal(err)
+	}
+	var payload string
+	if err := db.db.QueryRow(`SELECT payload_json FROM attention_batches WHERE id=?`, batch).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(payload, `"interrupt_version":4`) || !strings.Contains(payload, `"nonce":"`+nonce+`"`) {
+		t.Fatalf("sealed payload did not use current authority: %s", payload)
+	}
+}
+
 func TestSupervisorInterruptTickDispatches(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()

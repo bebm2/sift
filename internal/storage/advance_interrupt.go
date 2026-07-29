@@ -189,7 +189,7 @@ func validateEffectBinding(ctx context.Context, tx *sql.Tx, interruptID, reason,
 		"design_approval":             {"arm", "run_id", "task_spec_snapshot_id"},
 		"guardrail_violation":         {"arm", "run_id", "head_sha", "rule_id", "matched_paths_digest"},
 		"code_review":                 {"arm", "change_id", "head_sha", "review_policy_snapshot_digest"},
-		"agent_blocked":               {"arm", "run_id", "attempt_no", "generation"},
+		"agent_blocked":               {"arm", "run_id", "attempt_no", "generation", "report_id"},
 		"merge_conflict":              {"arm", "change_id", "head_sha", "conflict_digest"},
 		"startup_stall":               {"arm", "run_id", "attempt_no", "generation"},
 		"failure_review_attempt":      {"arm", "run_id", "attempt_no", "generation", "retry_kind", "change_id", "head_sha", "terminal_attempt_no", "terminal_generation"},
@@ -229,7 +229,7 @@ func validateEffectBinding(ctx context.Context, tx *sql.Tx, interruptID, reason,
 			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
 		}
 	case "agent_blocked":
-		if !integer("attempt_no") || !integer("generation") {
+		if !integer("attempt_no") || !integer("generation") || !text("report_id") {
 			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
 		}
 	case "merge_conflict":
