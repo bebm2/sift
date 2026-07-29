@@ -1,7 +1,7 @@
 ---
 status: active
 created: 2026-07-30
-summary: AdvanceInterrupt 0036 重复摘要升级处置
+summary: AdvanceInterrupt 重复摘要升级处置
 ---
 
 # AdvanceInterrupt schema upgrade
@@ -13,7 +13,7 @@ path. Run it against a stopped service and a copy of the database first:
 go run ./cmd/sift-advance-interrupt-repair --db /path/sift.db
 # If the report contains only distinct immutable bindings:
 go run ./cmd/sift-advance-interrupt-repair --db /path/sift.db \
-  --repair --backup /path/sift.db.pre-0043
+  --repair --backup /path/sift.db.pre-0047
 ```
 
 `--repair` canonicalizes each JSON binding and recomputes its SHA-256 digest

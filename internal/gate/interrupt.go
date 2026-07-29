@@ -22,10 +22,22 @@ func interruptCommand(c storage.GateCandidate, in Input, v Verdict, attention co
 	case "code_review":
 		cmd.Reason = storage.InterruptCodeReview
 		cmd.Facts = map[string]string{"change_ref": changeRef, "head_sha": in.Change.HeadSHA, "review_requirement": v.ReviewPolicy, "recommended_action": "approve", "diff_ref": changeRef + "/diff"}
-	case "merge_conflict", "mergeability_unknown":
+	case "merge_conflict":
 		cmd.Reason, cmd.GatePhase = storage.InterruptMergeConflict, storage.GateMerge
 		cmd.Generation.ConflictDigest = storage.MergeConflictDigest(in.Identity.ChangeID, in.Change.HeadSHA)
 		cmd.Facts = map[string]string{"change_ref": changeRef, "head_sha": in.Change.HeadSHA, "conflict_summary": v.Code, "recommended_action": "retry", "conflict_evidence_ref": changeRef}
+	case "mergeability_unknown":
+		// Unknown mergeability is a failed gate recheck, not a conflict.  Keep
+		// its durable successor and provenance distinct from merge_conflict.
+		cmd.Reason, cmd.GatePhase = storage.InterruptFailureReview, storage.GateMerge
+		cmd.FailureReviewVariant = storage.FailureReviewAttempt
+		cmd.FailureReviewRetryKind = storage.FailureReviewGateRecheck
+		cmd.AttemptNo = &c.AttemptNo
+		cmd.Generation.AttemptNo, cmd.Generation.Generation = c.AttemptNo, c.Generation
+		cmd.Generation.ChangeID, cmd.Generation.HeadSHA = in.Identity.ChangeID, in.Change.HeadSHA
+		digest := sha256.Sum256([]byte(in.Change.HeadSHA + "\x00" + in.Checks.ExternalURL + "\x00" + v.Code))
+		cmd.Generation.FailureDigest = fmt.Sprintf("%x", digest)
+		cmd.Facts = map[string]string{"failure_class": v.Code, "failure_evidence_ref": changeRef, "recommended_action": "retry"}
 	default:
 		cmd.Reason = storage.InterruptFailureReview
 		cmd.FailureReviewVariant = storage.FailureReviewAttempt
