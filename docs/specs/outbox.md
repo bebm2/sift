@@ -317,7 +317,7 @@ Payload不含任何 capability 明文：
 
 M1 必须完整实现通用 claim/complete、退避、immutable attempts/results 与 `launch_agent`；其他 kind 的 payload decoder、operation key builder 和 fake adapter 契约在 M1 建立，随对应里程碑启用。不得用一个 `map[string]any` payload 占位后绕过 schema。
 
-生产接线由 `cmd/siftd` 的唯一 `startSchedulers` 负责：提交后的 `DB.SetOutboxWakeup` 唤醒独立 Outbox scheduler，启动和 supervisor 时钟只补偿重启后的 durable retry deadline，不能代替提交唤醒。`TestOutboxCommitWakeupClaimsWithoutPeriodicTick` 证明 `EnqueueOperation` 提交后可 claim，毋须等待 supervisor clock。
+生产接线由 `cmd/siftd` 的唯一 `startSchedulers` 负责：提交后的 `DB.SetOutboxWakeup` 唤醒独立 Outbox scheduler，启动和 supervisor 时钟只补偿重启后的 durable retry deadline，不能代替提交唤醒。`cmd/siftd/main_test.go` 通过生产 `startSchedulers` 和真实 `Daemon.OutboxTick` 覆盖 `EnqueueOperation` 与 `EmitInterrupt` 两条写口；`TestOutboxCommitWakeupClaimsWithoutPeriodicTick` 仍是 storage seam 测试，不单独声称 production wiring。
 
 ## 14. 验收
 
@@ -333,7 +333,7 @@ M1 必须完整实现通用 claim/complete、退避、immutable attempts/results
 10. 每次 Forge 证据查询和动作调用均唯一收费；预算不足时不发起调用。
 11. max_attempts、指数退避与 Retry-After 使用注入时间可确定测试。
 12. fake adapter 覆盖 success/transient/rate-limit/auth/contract/conflict/stale 全分类。
-13. `EnqueueOperation` 提交后由 production 注册的 outbox wakeup 推进 claim，不等待 supervisor tick；重启后的 retry deadline 仍由持久化 `next_attempt_at_ms` 收敛。
+13. `EnqueueOperation` 与 `EmitInterrupt` 提交后由 production 注册的 outbox wakeup 推进真实 kind worker，不等待 supervisor tick；三具名 scheduler 的定向测试验证 wakeup 不串联，重启后的 retry deadline 仍由持久化 `next_attempt_at_ms` 收敛。
 
 ## 15. 评审冻结项
 
