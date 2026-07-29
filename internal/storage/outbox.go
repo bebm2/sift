@@ -71,6 +71,9 @@ type CompleteOutcome struct {
 	NowMS        int64
 	RetryAfterMS int64
 	Backoff      BackoffPolicy
+	// ChannelFailureAlertAfter is used by channel_publish projection updates.
+	// Zero selects the V0 default of three consecutive failures.
+	ChannelFailureAlertAfter int
 }
 
 var ErrOperationConflict = errors.New("storage: operation key payload conflict")
@@ -248,6 +251,11 @@ func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 		if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_attempt_results (attempt_id, finished_at_ms, outcome, error_class, error_summary) VALUES (?, ?, 'retry', 'transient', 'lease_expired')`, oldAttempt, nowMS); err != nil {
 			return nil, err
 		}
+		if c.Kind == OperationChannelPublish {
+			if err := applyChannelOutcomeTx(ctx, tx, c, CompleteOutcome{State: OperationRetryable, ErrorClass: ErrorTransient, ErrorSummary: "lease_expired", NowMS: nowMS, ChannelFailureAlertAfter: 3}, true); err != nil {
+				return nil, err
+			}
+		}
 	}
 	c.ClaimAttemptNo, c.AttemptID, c.LeaseOwner, c.LeaseExpiresAtMS = oldCount+1, newID(), workerID, nowMS+leaseMS
 	res, err := tx.ExecContext(ctx, `UPDATE outbox_operations SET state='executing', lease_owner=?, lease_expires_at_ms=?, attempt_count=?, version=version+1, updated_at_ms=?
@@ -298,6 +306,11 @@ func (d *DB) CompleteOutboxAttempt(ctx context.Context, claim ClaimedOperation, 
 	completed := any(nil)
 	if outcome.State != OperationRetryable {
 		completed = outcome.NowMS
+	}
+	if claim.Kind == OperationChannelPublish {
+		if err := applyChannelOutcomeTx(ctx, tx, claim, outcome, false); err != nil {
+			return err
+		}
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE outbox_operations SET state=?, lease_owner=NULL, lease_expires_at_ms=NULL, next_attempt_at_ms=?, remote_evidence_json=?, remote_evidence_digest=?, last_error_class=?, last_error_summary=?, version=version+1, updated_at_ms=?, completed_at_ms=? WHERE id=? AND lease_owner=? AND lease_expires_at_ms=?`, outcome.State, next, nullable(string(outcome.Evidence)), nullable(digestJSON(outcome.Evidence)), nullable(string(outcome.ErrorClass)), nullable(outcome.ErrorSummary), outcome.NowMS, completed, claim.ID, claim.LeaseOwner, claim.LeaseExpiresAtMS)
 	if err != nil {
