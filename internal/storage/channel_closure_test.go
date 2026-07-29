@@ -96,6 +96,15 @@ func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batch_member_authority SET nonce='other' WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("snapshot retarget error = %v", err)
 	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batch_member_authority SET updated_at_ms=updated_at_ms+1 WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("snapshot timestamp update error = %v", err)
+	}
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM attention_batch_member_authority WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("snapshot delete error = %v", err)
+	}
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM attention_batch_members WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("member delete error = %v", err)
+	}
 }
 
 func TestChannelDiagnosticsIncludesBatchFailureProjection(t *testing.T) {
