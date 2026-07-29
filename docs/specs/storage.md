@@ -493,26 +493,62 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 
 ### 6.6 Batch exact vectors（config / interrupt / outbox 共用）
 
-以下是唯一的 batch fixture；所有 JSON 均为 canonical JSON（对象键按出现顺序、无空白、UTF-8 bytes），供 config §3.9、interrupt §8.3 和 outbox §10 逐字节复用。冻结输入为 `zone=Asia/Shanghai`、`due_at_ms=1785286800000`、两个 Run `run-a/run-b`、成员 `i-a/i-b`，且 `version=2`、`nonce=n-a/n-b`。Channel snapshot 分别为：
+以下是唯一的 batch fixture。所有 JSON 均为 [`config.md` §4](config.md) 所定义的 canonical JSON：UTF-8、每一层对象 key 词典序、无多余空白。任何 `payload_digest` 都是紧随其后的 payload UTF-8 bytes 的 SHA-256 小写 hex。冻结输入为 `zone=Asia/Shanghai`、`due_at_ms=1785286800000`、两个 Run `run-a/run-b`、成员 `i-a/i-b`，且 `version=2`、`nonce=n-a/n-b`；所有 `excluded_at_ms` 均冻结为 `1785286800001`。
+
+**同 Channel 并发 insert。** 两个事务分别带 `run-a/i-a` 与 `run-b/i-b` 竞争，唯一最终 batch、member、operation identity 是 `daily:Asia/Shanghai:1785286800000:ops-slack`、两个 member delivery ID 和 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`。sealed `channel_publish.body` 的完整 bytes 为（digest `2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc`）：
 
 ```json
-{"id":"ops-slack","type":"webhook","target_ref":"https://hooks.example/slack","capabilities":["text"],"renderer":"plain-v1"}
-{"id":"ops-teams","type":"webhook","target_ref":"https://hooks.example/teams","capabilities":["text"],"renderer":"plain-v1"}
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"},{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","headline":"变更等待代码审阅","interrupt_id":"i-b","interrupt_version":2,"links":[],"nonce":"n-b","options":[],"reason":"code_review","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清；i-b: 变更等待代码审阅","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
 ```
 
-**同 Channel 并发 insert：** 两个事务分别带 `run-a/i-a` 与 `run-b/i-b` 竞争，唯一结果是一个 `daily:Asia/Shanghai:1785286800000:ops-slack`，成员按 `i-a,i-b` 排序，两个 `delivery_id` 分别为 `daily:Asia/Shanghai:1785286800000:ops-slack:i-a` 与 `daily:Asia/Shanghai:1785286800000:ops-slack:i-b`。唯一 operation 为 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`，batch delivery 为 `daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`。
-
-**不同 Channel 并发 insert：** `i-a` 冻结 `ops-slack`、`i-b` 冻结 `ops-teams` 时，绝不混批，两个 batch ID、operation key 和 payload 的完整值为：
+其完整最终持久化投影 bytes 为：
 
 ```json
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","batch_kind":"daily_summary","channel":{"id":"ops-slack","type":"webhook","target_ref":"https://hooks.example/slack","capabilities":["text"],"renderer":"plain-v1"},"scope":"day","scope_id":"Asia/Shanghai:1785286800000","due_at_ms":1785286800000,"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a","headline":"Agent 需要你澄清","reason":"agent_blocked","severity":"high","links":[],"options":[],"command_lines":[]}],"rendered_text":"i-a: Agent 需要你澄清"}
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-teams","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","batch_kind":"daily_summary","channel":{"id":"ops-teams","type":"webhook","target_ref":"https://hooks.example/teams","capabilities":["text"],"renderer":"plain-v1"},"scope":"day","scope_id":"Asia/Shanghai:1785286800000","due_at_ms":1785286800000,"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:i-b","interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b","headline":"变更等待代码审阅","reason":"code_review","severity":"high","links":[],"options":[],"command_lines":[]}],"rendered_text":"i-b: 变更等待代码审阅"}
+{"batch":{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","state":"sealed"},"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":null,"interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":null,"interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b"}],"operation":{"key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","type":"channel_publish"}}
 ```
 
-对应 operation/payload identity 逐字节为 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1` + 第一份 payload，以及 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-teams:publish:1` + 第二份 payload；`payload_digest` 是该 payload UTF-8 bytes 的 SHA-256 小写 hex。`same Channel` 结果使用同样的第一份 schema，但 `members` 同时含上述 `i-a`、`i-b`，`rendered_text` 为 `i-a: Agent 需要你澄清；i-b: 变更等待代码审阅`，不能由两个不同 Channel 的 fixture 合并推导。
+**不同 Channel 并发 insert。** `i-a` 冻结 `ops-slack`、`i-b` 冻结 `ops-teams` 时绝不混批。两个完整 payload bytes 分别为（digest 依次为 `c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10`、`db6d98f746eb3c6bb5af456841a5a914a91e16ddfe69a9e76fdb4e722557be96`）：
 
-**排除、空批、重放：** sealing 前若 `i-b` 的持久化前态不是 `status=open,version=2,nonce=n-b`（例如 `version=3` 或 `nonce=n-old`），只写 `excluded_at_ms`，不进入 sealed members；此时单成员 batch 的 payload 是上面对应 Channel 的同一 canonical object（不含 `i-b`）。若所有成员均不匹配，持久化结果的 canonical bytes 为 `{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","state":"cancelled","payload_json":null,"operation_key":null,"members":[{"interrupt_id":"i-a","excluded_at_ms":1785286800001},{"interrupt_id":"i-b","excluded_at_ms":1785286800001}]}`，无 `channel_publish` operation，且绝不发送空摘要。已 sealed 的 batch 在响应丢失后只重放原 `operation_key=attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`、原 `delivery_id=daily:Asia/Shanghai:1785286800000:ops-slack:publish:1` 和原 `payload_json`，返回既有 operation，不创建第二 batch/member/operation；成员关闭不会改写 sealed bytes。
+```json
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-teams","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-teams","renderer":"plain-v1","target_ref":"https://hooks.example/teams","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:i-b","headline":"变更等待代码审阅","interrupt_id":"i-b","interrupt_version":2,"links":[],"nonce":"n-b","options":[],"reason":"code_review","severity":"high"}],"rendered_text":"i-b: 变更等待代码审阅","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
+```
 
+对应最终 identity bytes 为：
+
+```json
+{"batches":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-teams","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","payload_digest":"db6d98f746eb3c6bb5af456841a5a914a91e16ddfe69a9e76fdb4e722557be96"}],"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","interrupt_id":"i-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:i-b","interrupt_id":"i-b"}]}
+```
+
+**排除。** 若 `i-b` sealing 前不是 `status=open,version=2,nonce=n-b`，它被排除。`i-a` 的 sealed payload 完整 bytes 为（digest `c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10`）：
+
+```json
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
+```
+
+最终 batch/member/operation bytes 为：
+
+```json
+{"batch":{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10","state":"sealed"},"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":null,"interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":1785286800001,"interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b"}],"operation":{"key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10","type":"channel_publish"}}
+```
+
+**空批。** 两个成员都不匹配时，不创建 `channel_publish` operation，完整最终 bytes 为：
+
+```json
+{"batch":{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":null,"payload_digest":null,"payload_json":null,"state":"cancelled"},"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":1785286800001,"interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":1785286800001,"interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b"}],"operation":null}
+```
+
+**sealed 后响应丢失重放。** 重放只返回原 operation，绝不创建第二 batch/member/operation；成员随后关闭也不改写 sealed bytes。以同 Channel 双成员 fixture 为例，重放的完整 payload bytes 为（digest `2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc`）：
+
+```json
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"},{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","headline":"变更等待代码审阅","interrupt_id":"i-b","interrupt_version":2,"links":[],"nonce":"n-b","options":[],"reason":"code_review","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清；i-b: 变更等待代码审阅","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
+```
+
+完整返回持久化结果 bytes 为：
+
+```json
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":null,"interrupt_id":"i-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":null,"interrupt_id":"i-b"}],"operation":{"key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","type":"channel_publish"},"payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","state":"sealed"}
+```
 ## 7. Append-only 事件与幂等收据
 
 ### 7.1 `events`（不可变）
