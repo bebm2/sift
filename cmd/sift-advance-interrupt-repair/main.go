@@ -35,6 +35,10 @@ func run(args []string, out, errOut io.Writer) int {
 			fmt.Fprintln(errOut, err)
 			return 1
 		}
+		if err := verifyBackup(*backup); err != nil {
+			fmt.Fprintln(errOut, err)
+			return 1
+		}
 		fmt.Fprintf(out, "backup=%s\n", *backup)
 	}
 	db, err := sql.Open("sqlite", "file:"+filepath.Clean(*dbPath)+"?_pragma=foreign_keys(1)")
@@ -104,6 +108,10 @@ func repairGroups(db *sql.DB, groups map[string][]bindingRow, out io.Writer) err
 		return err
 	}
 	defer tx.Rollback()
+	var appendOnlyTrigger string
+	if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='interrupt_command_effect_bindings_append_only_update'`).Scan(&appendOnlyTrigger); err != nil {
+		return fmt.Errorf("load append-only trigger: %w", err)
+	}
 	if _, err := tx.Exec(`DROP TRIGGER interrupt_command_effect_bindings_append_only_update`); err != nil {
 		return err
 	}
@@ -124,8 +132,8 @@ func repairGroups(db *sql.DB, groups map[string][]bindingRow, out io.Writer) err
 			fmt.Fprintf(out, "repaired interrupt=%s digest=%s\n", r.interrupt, next)
 		}
 	}
-	if _, err := tx.Exec(`CREATE TRIGGER interrupt_command_effect_bindings_append_only_update BEFORE UPDATE ON interrupt_command_effect_bindings FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'append-only table'); END`); err != nil {
-		return err
+	if _, err := tx.Exec(appendOnlyTrigger); err != nil {
+		return fmt.Errorf("restore append-only trigger: %w", err)
 	}
 	return tx.Commit()
 }
@@ -136,6 +144,22 @@ func canonicalJSON(raw string) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(v)
+}
+
+func verifyBackup(path string) error {
+	db, err := sql.Open("sqlite", "file:"+filepath.Clean(path)+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		return fmt.Errorf("open backup: %w", err)
+	}
+	defer db.Close()
+	var result string
+	if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
+		return fmt.Errorf("check backup: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("check backup: %s", result)
+	}
+	return nil
 }
 
 func copyFile(src, dst string) error {

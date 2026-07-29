@@ -59,7 +59,11 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 			return false, ErrRejectedStale
 		}
 		if delivery == "immediate" {
-			if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, escalation, "normal", cmd.NowMS); err != nil {
+			priority := "normal"
+			if escalation > 0 {
+				priority = "strong"
+			}
+			if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, escalation, priority, cmd.NowMS); err != nil {
 				return false, err
 			}
 		} else if err := addDailyBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, cmd.NowMS, channel, snapshot, zone, summary); err != nil {
