@@ -361,16 +361,18 @@ attention:
 
 启动规范化时，`day_timezone=local` 必须解析为当次启动环境可识别的具体 IANA zone；该解析后的 IANA 名称替换 `local` 进入有效 canonical JSON、`config_hash` 和持久化 config snapshot。不能取得稳定 IANA 名称时拒绝启动并要求显式 IANA zone；运行期不得再次读取机器 local zone。显式 IANA zone 同样在启动期加载并校验。
 
-对在 `t` 入批的对象，`due_at` 是其冻结 zone 中**严格晚于** `t` 的下一次 `daily_summary_at`；恰在该时刻入批也取次日，不立即补发。该 local wall-clock 时刻落入 DST gap 时取 gap 后第一个有效 instant；落入 DST fold 时取第一次出现（较早的 UTC instant）。batch 同时冻结成员各自的 quota day、zone、`due_at` 和成员快照；同一 zone 与 scheduled occurrence 至多一个 daily batch，因此不得把 batch 级 quota day 编进 identity。固定 epoch vectors（时间均为 UTC 毫秒）如下：
+对在 `t` 入批的对象，`due_at` 是其冻结 zone 中**严格晚于** `t` 的下一次 `daily_summary_at`；恰在该时刻入批也取次日，不立即补发。该 local wall-clock 时刻落入 DST gap 时取 gap 后第一个有效 instant；落入 DST fold 时取第一次出现（较早的 UTC instant）。batch 同时冻结成员各自的 quota day、zone、`due_at`、Channel snapshot 和成员快照；同一 zone、scheduled occurrence 与冻结 Channel 至多一个 daily batch，因此不得把 batch 级 quota day 编进 identity。固定 epoch vectors（时间均为 UTC 毫秒；每行明确完整生效 `day_timezone/daily_summary_at`）如下：
 
-| zone / 入批 instant | 期望结果 |
+| 生效配置 / 入批 instant | 期望结果 |
 |---|---|
-| `Asia/Shanghai`, `2026-07-28T08:59:59Z` (`1785229199000`) | `quota_day=2026-07-28`, `due_at_ms=1785286800000`（`2026-07-29 09:00`） |
-| `Asia/Shanghai`, `2026-07-29T00:59:59Z` (`1785286799000`) | `quota_day=2026-07-29`, `due_at_ms=1785286800000`（`2026-07-29 09:00`） |
-| `America/New_York`, `2026-03-08T06:59:00Z` (`1772953140000`) | `due_at_ms=1772953200000`（gap 后 `03:00`） |
-| `America/New_York`, `2026-11-01T05:29:00Z` (`1793510940000`) | `due_at_ms=1793511000000`（fold 第一次 `01:30`） |
+| `Asia/Shanghai` / `09:00`，`2026-07-28T15:59:59.999Z` (`1785254399999`，本地 `23:59:59.999`) | `quota_day=2026-07-28`, `due_at_ms=1785286800000`（本地 `2026-07-29 09:00`） |
+| `Asia/Shanghai` / `09:00`，`2026-07-28T16:00:00.000Z` (`1785254400000`，本地 `00:00:00.000`) | `quota_day=2026-07-29`, `due_at_ms=1785286800000`（本地 `2026-07-29 09:00`） |
+| `Asia/Shanghai` / `09:00`，`2026-07-28T08:59:59Z` (`1785229199000`) | `quota_day=2026-07-28`, `due_at_ms=1785286800000` |
+| `Asia/Shanghai` / `09:00`，`2026-07-29T00:59:59Z` (`1785286799000`) | `quota_day=2026-07-29`, `due_at_ms=1785286800000` |
+| `America/New_York` / `02:30`，`2026-03-08T06:59:00Z` (`1772953140000`，本地 `01:59 EST`) | `quota_day=2026-03-08`, `due_at_ms=1772953200000`（gap 后本地 `03:00 EDT`） |
+| `America/New_York` / `01:30`，`2026-11-01T05:29:00Z` (`1793510940000`，本地第一次 `01:29 EDT`) | `quota_day=2026-11-01`, `due_at_ms=1793511000000`（fold 第一次本地 `01:30 EDT`） |
 
-入批恰在 `daily_summary_at` 的 instant（`1785286800000`）与其后一毫秒都取下一次 occurrence，不能立即补发。前一日摘要时刻后至次日摘要时刻前的两个 quota day 成员，必须加入同一个 `daily:<zone>:<due_at_ms>` batch；运行期机器时区变化不影响已冻结 snapshot/hash 或历史回放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3](storage.md) 与 [`outbox.md` §10](outbox.md)。
+入批恰在 `daily_summary_at` 的 instant（`1785286800000`）与其后一毫秒都取下一次 occurrence，不能立即补发。前一日摘要时刻后至次日摘要时刻前的两个 quota day 成员，必须按冻结 Channel 加入同一个 `daily:<zone>:<due_at_ms>:<channel_id>` batch；同 occurrence 的不同 Channel 必为不同 batch。运行期机器时区变化不影响已冻结 snapshot/hash 或历史回放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3](storage.md) 与 [`outbox.md` §10](outbox.md)。
 
 #### `attention.reason_defaults`
 
@@ -468,7 +470,7 @@ metrics:
 | `failure_review` | `5` |
 | `startup_stall` | `5` |
 
-加权打扰分子对每个首次成功送达的 attention admission 恰取一次其 reason 的权重；同一 admission 的重试、升级重推和重复送达不得重复加权。非 critical 合批保留源 Interrupt/admission 的 reason；配额拒绝的 batch member 没有伪造 budget charge，仍按其唯一 admission 与真实成功 batch delivery 计入。未成功送达的 admission 不计入该北极星分子。权重取该 admission 所属 Run 创建时冻结的 `config_snapshot_id` 中的值；指标查询必须使用持久化快照，而不得以当前配置重算历史。配置变更后，新 Run 使用新值，既有 Run 与历史序列保持原值。
+加权打扰分子对每个首次成功送达的 attention metric identity 恰取一次其 reason 的权重；该 identity 固定为 [`storage.md` §6.3](storage.md) 的 `metric_identity=<interrupt_id>`，而非会在初发/critical 升级间变化的 admission ID。同一 lineage 的重试、升级重推和重复送达不得重复加权；但每次 delivery 仍保留其真实 admission ID 以供审计。非 critical 合批保留源 Interrupt/admission 的 reason；配额拒绝的 batch member 没有伪造 budget charge，仍按其唯一 metric identity 与真实成功 batch delivery 计入。未成功送达的 admission 不计入该北极星分子。权重取该 admission 所属 Run 创建时冻结的 `config_snapshot_id` 中的值；指标查询必须使用持久化快照，而不得以当前配置重算历史。配置变更后，新 Run 使用新值，既有 Run 与历史序列保持原值。
 
 人的响应间隔只能作为 T6 调度特征；不得替代、校正或隐式乘入本权重。权重表仅定义北极星分子，不能改变注意力配额、critical 熔断、Gate 阈值或单条 HITL 决定。
 

@@ -240,7 +240,7 @@ Payload：
 
 ```json
 {
-  "delivery_kind":"interrupt","interrupt_id":"...","escalation_no":0,"priority":"normal",
+  "delivery_kind":"interrupt","delivery_id":"interrupt:<interrupt_id>:<escalation_no>:<channel_id>","interrupt_id":"...","escalation_no":0,"priority":"normal",
   "interrupt_version":1,"nonce":"...",
   "channel":{"id":"...","type":"webhook","target_ref":"...","capabilities":["text"],"renderer":"plain-v1"},
   "rendered_text":"..."
@@ -251,23 +251,23 @@ attention batch payload 只能由 [`storage.md` §6.3](storage.md) 的 `PrepareA
 
 ```json
 {
-  "delivery_kind":"attention_batch","batch_id":"...","batch_kind":"daily_summary",
-  "channel":{"id":"...","type":"webhook","target_ref":"...","capabilities":["text"],"renderer":"plain-v1"},
-  "scope":"day","scope_id":"Asia/Shanghai:2026-07-29","due_at_ms":0,
+  "delivery_kind":"attention_batch","batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","batch_kind":"daily_summary",
+  "channel":{"id":"ops-slack","type":"webhook","target_ref":"...","capabilities":["text"],"renderer":"plain-v1"},
+  "scope":"day","scope_id":"Asia/Shanghai:1785286800000","due_at_ms":1785286800000,
   "members":[{
-    "interrupt_id":"...","interrupt_version":1,"nonce":"...","headline":"...",
+    "delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:<interrupt_id>","interrupt_id":"...","interrupt_version":1,"nonce":"...","headline":"...",
     "reason":"agent_blocked","severity":"high","links":[],"options":[],"command_lines":[]
   }],"rendered_text":"..."
 }
 ```
 
-`members` 按 `interrupt_id` UTF-8 bytes 排序，至少一项；每项只引用原 Interrupt 的 frozen headline/links/options/nonce/version，且 `command_lines` 是该 nonce 下逐 option 的完整 Command。摘要没有可执行的 batch action，也没有 summary reason：人必须以成员的 `interrupt_id + nonce + option` 回复，任何试图对 `batch_id` 执行 Command 都拒绝。payload 的 batch ID、kind/scope、due_at 和 members 必须与 sealed batch 完全一致；不匹配为 `contract_violation`。它携带由 operation key 生成的可见标识，响应丢失重放相同的 immutable payload。
+`members` 按 `interrupt_id` UTF-8 bytes 排序，至少一项；每项只引用原 Interrupt 的 frozen headline/links/options/nonce/version，且 `command_lines` 是该 nonce 下逐 option 的完整 Command。摘要没有可执行的 batch action，也没有 summary reason：人必须以成员的 `interrupt_id + nonce + option` 回复，任何试图对 `batch_id` 执行 Command 都拒绝。payload 的 batch ID、delivery ID、channel snapshot、kind/scope、due_at 和 members 必须与 sealed batch 完全一致；member delivery ID 必须逐字节等于持久化 member；不匹配为 `contract_violation`。它携带由 operation key 生成的可见标识，响应丢失重放相同的 immutable payload。
 
 worker 由 operation key 生成并追加可见标识；payload 不接受调用方 marker。Channel 无查询证据，每个 executing attempt 都可能真实推送；语义明确为 at-least-once。成功响应只证明本次调用返回成功，不证明未重复。
 
 连续失败次数来自同 operation 的 attempt results。达到 config `channel_failure_alert_after` 时，complete 事务以稳定键创建一个 `forge_alert`，并更新单 Interrupt 或 batch delivery/doctor 投影；继续重试原 Channel operation。alert 自身失败不递归创建 alert。
 
-escalation 使用新 operation key但复用原 attention charge；同 escalation 重试不新扣费。batch member 的 `quota_batched` admission 没有虚构 charge；其 delivery/metric 身份使用 admission ID。
+escalation 使用新 operation key但复用原 attention charge；同 escalation 重试不新扣费。batch member 的 `quota_batched` admission 没有虚构 charge；其 delivery 审计使用 admission ID，指标去重使用 storage 的 stable `metric_identity`，而不是可能新增的 critical admission ID。
 
 ## 11. Launch Agent
 
