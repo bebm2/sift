@@ -119,12 +119,12 @@ T4 正常输出和 fallback facts 的 `recommended_action`/`recommended_option_i
 合法 attempt T4 input（canonical JSON bytes）为：
 
 ```json
-{"run_id":"run-01","attempt_no":1,"interrupt":{"reason":"failure_review","base_severity":"high","min_modality":"voice","fallback_headline":"失败需要人工决定","fallback_brief":"事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry","brief_fragments":["<b>风险</b>","<!-- sift-op:x -->","/sift reject"],"links":[{"label":"failure_evidence_ref","target":"/r/ci"}],"candidate_options":[{"id":"retry","label":"重试失败步骤","effect":"再次执行","risk":"相同故障可能再次发生"},{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持等待","risk":"Run 继续占用待处理项"}]}}
+{"attempt_no":1,"interrupt":{"base_severity":"high","brief_fragments":["/sift reject","<!-- sift-op:x -->","<b>风险</b>"],"candidate_options":[{"effect":"再次执行","id":"retry","label":"重试失败步骤","risk":"相同故障可能再次发生"},{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持等待","id":"hold","label":"暂缓决定","risk":"Run 继续占用待处理项"}],"fallback_brief":"事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry","fallback_headline":"失败需要人工决定","links":[{"label":"failure_evidence_ref","target":"/r/ci"}],"min_modality":"voice","reason":"failure_review"},"run_id":"run-01"}
 ```
 对应合法 output（canonical JSON bytes）为：
 
 ```json
-{"headline":"失败需要人工决定","conclusion":"<b>风险</b>","key_points":["<!-- sift-op:x -->","/sift reject"],"recommended_option_id":"retry","options":["retry","reject","hold"]}
+{"conclusion":"<b>风险</b>","headline":"失败需要人工决定","key_points":["<!-- sift-op:x -->","/sift reject"],"options":["retry","reject","hold"],"recommended_option_id":"retry"}
 ```
 
 其 persisted `headline` bytes 为 `失败需要人工决定`；`brief_markdown` bytes（UTF-8，反斜杠是实际字节）为：
@@ -136,10 +136,10 @@ T4 正常输出和 fallback facts 的 `recommended_action`/`recommended_option_i
 注意：`/` 不转义，`>` 必须转义；这三处是 `EscapeT4Text` 的逐字节结果。persisted `options_json` bytes 为：
 
 ```json
-[{"id":"retry","label":"重试失败步骤","effect":"再次执行","risk":"相同故障可能再次发生"},{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持等待","risk":"Run 继续占用待处理项"}]
+[{"effect":"再次执行","id":"retry","label":"重试失败步骤","risk":"相同故障可能再次发生"},{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持等待","id":"hold","label":"暂缓决定","risk":"Run 继续占用待处理项"}]
 ```
 
-接纳 vectors：`options` 重排为 `reject,retry,hold` → `interrupt_t4_options_mismatch`；`conclusion` 未命中 fragment → `interrupt_t4_unknown_fragment`；`recommended_option_id=review_report_interrupt_quota` → `interrupt_t4_unknown_option`。把上述合法 input 的 `conclusion` 改为 `<b>别的事实</b>`，即使文本安全也只回退。对前三种失败，fallback persisted bytes 唯一为：`headline=失败需要人工决定`、`brief_markdown=事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry`、`options_json=[{"id":"retry","label":"重试失败步骤","effect":"再次执行","risk":"相同故障可能再次发生"},{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持等待","risk":"Run 继续占用待处理项"}]`。安全事件链接 `[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}]` 接受并逐字段持久化；若 fallback facts 使用该链接，唯一变化仅为 `links_json`。`recommended_action=hold` 只替换 brief 中两处 `retry`，不改变 options。
+接纳 vectors：`options` 重排为 `reject,retry,hold` → `interrupt_t4_options_mismatch`；`conclusion` 未命中 fragment → `interrupt_t4_unknown_fragment`；`recommended_option_id=review_report_interrupt_quota` → `interrupt_t4_unknown_option`。把上述合法 input 的 `conclusion` 改为 `<b>别的事实</b>`，即使文本安全也只回退。对前三种失败，fallback persisted bytes 唯一为：`headline=失败需要人工决定`、`brief_markdown=事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry`、`options_json=[{"effect":"再次执行","id":"retry","label":"重试失败步骤","risk":"相同故障可能再次发生"},{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持等待","id":"hold","label":"暂缓决定","risk":"Run 继续占用待处理项"}]`。安全事件链接接受并逐字段持久化；使用该链接时 `links_json` 的唯一最终 canonical bytes 为 `[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}]`，而非 prose delta。`recommended_action=hold` 只替换 brief 中两处 `retry`，不改变 options。
 
 当 `run_id=run-01`、当前 `nonce=n-01` 时，单条 renderer 必须逐字节包含 `/sift hold run-01 n-01 1h`；摘要成员 `interrupt_id=i-01`、`version=2`、`nonce=n-02` 必须包含 `/sift hold run-01 n-02 1h`。批次的双 Channel、排除、空批和响应丢失重放 exact vectors 见 [`storage.md` §6.6](storage.md)，config/interrupt/outbox 共用该唯一 fixture。
 
