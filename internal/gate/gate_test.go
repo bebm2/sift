@@ -1,11 +1,14 @@
 package gate
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/miaoxiaoyong/sift/internal/brain"
 	"github.com/miaoxiaoyong/sift/internal/config"
 	"github.com/miaoxiaoyong/sift/internal/policy"
 	"github.com/miaoxiaoyong/sift/internal/storage"
@@ -124,13 +127,19 @@ func TestEvaluateRecordAndEmitInterruptCommitsGateShadowAndHITLTogether(t *testi
 		t.Fatal(err)
 	}
 	in.EffectivePolicyHash = digest(policyJSON)
+	t4 := brain.NewShell(db, config.Brain{DailyTokenLimit: 100, MaxInputBytes: 1 << 20}, nil, func() time.Time { return time.UnixMilli(now) })
+	db.SetInterruptT4(t4.CallT4)
 	cmd := storage.EmitInterruptCmd{RunID: "r", ExpectedRunVersion: 1, Reason: storage.InterruptCodeReview, Facts: map[string]string{"change_ref": "https://forge.example/change/42", "head_sha": in.Change.HeadSHA, "review_requirement": "required", "recommended_action": "approve", "diff_ref": "https://forge.example/change/42/diff"}, Generation: storage.InterruptGeneration{ChangeID: "42", HeadSHA: in.Change.HeadSHA}, GatePhase: storage.GateReview, GuardrailLevel: storage.GuardrailNone, AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 5, storage.SeverityHigh: 5}, DayTimezone: "UTC", Source: storage.SourceSystem, NowMS: now}
 	v, record, interrupt, err := EvaluateRecordAndEmitInterrupt(ctx, db, in, false, []byte(`{"schema_version":1}`), cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.Code != "code_review" || record.CalibrationID == "" || interrupt.ID == "" {
+	if v.Code != "code_review" || record.CalibrationID == "" || interrupt.ID == "" || interrupt.Brief != "事实：change_ref=https://forge.example/change/42；head_sha=0123456789012345678901234567890123456789；review_requirement=required；recommended_action=approve；diff_ref=https://forge.example/change/42/diff。建议：approve" {
 		t.Fatalf("verdict=%#v record=%#v interrupt=%#v", v, record, interrupt)
+	}
+	var trace bytes.Buffer
+	if err := db.ExportBrainCallsJSONL(ctx, &trace); err != nil || !strings.Contains(trace.String(), `"touchpoint":"T4"`) || !strings.Contains(trace.String(), `"status":"fallback"`) || !strings.Contains(trace.String(), `"fallback_reason":"provider_disabled"`) {
+		t.Fatalf("T4 fallback trace=%s err=%v", trace.String(), err)
 	}
 }
 
