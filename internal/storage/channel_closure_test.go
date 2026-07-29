@@ -58,6 +58,46 @@ func TestMemberedBatchCannotBeRetargeted(t *testing.T) {
 	}
 }
 
+func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	at := int64(testNow + 1)
+	cmd := t6Command(testNow)
+	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
+	cmd.Channels = []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"visual"}}}
+	cmd.BatchAtMS = &at
+	in, err := db.EmitInterrupt(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PrepareDueAttentionBatches(ctx, testNow+48*60*60*1000); err != nil {
+		t.Fatal(err)
+	}
+	var batch string
+	if err := db.db.QueryRowContext(ctx, `SELECT batch_id FROM attention_batch_members WHERE interrupt_id=?`, in.ID).Scan(&batch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batch_members SET channel_id='other' WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("member retarget error = %v", err)
+	}
+	var authorityCount int
+	if err := db.db.QueryRowContext(ctx, `SELECT count(*) FROM attention_batch_member_authority WHERE batch_id=? AND interrupt_id=?`, batch, in.ID).Scan(&authorityCount); err != nil {
+		t.Fatal(err)
+	}
+	if authorityCount != 1 {
+		t.Fatalf("authority rows = %d, want 1", authorityCount)
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batch_member_authority SET nonce='other' WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("snapshot retarget error = %v", err)
+	}
+}
+
 func TestChannelDiagnosticsIncludesBatchFailureProjection(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
