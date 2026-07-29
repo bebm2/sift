@@ -134,6 +134,37 @@ func TestDailyBatchCannotInjectCriticalLimitsDuringTerminalTransition(t *testing
 	}
 }
 
+func TestDailyBatchRejectsEachCriticalLimitAcrossTerminalStates(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	at := int64(testNow + 1)
+	cmd := t6Command(testNow)
+	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
+	cmd.Channels = []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"visual"}}}
+	cmd.BatchAtMS = &at
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch string
+	if err := db.db.QueryRowContext(ctx, `SELECT batch_id FROM attention_batch_members WHERE interrupt_id=?`, in.ID).Scan(&batch); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"sealed", "delivered", "cancelled"} {
+		for _, column := range []string{"critical_window_ms", "critical_total_limit", "critical_per_run_limit"} {
+			if _, err := db.db.ExecContext(ctx, `UPDATE attention_batches SET state=?, `+column+`=1 WHERE id=?`, state, batch); err == nil || !strings.Contains(err.Error(), "daily attention batch cannot carry critical limits") {
+				t.Fatalf("daily %s %s transition error = %v", state, column, err)
+			}
+		}
+	}
+}
+
 func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
@@ -160,7 +191,7 @@ func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 		t.Fatal(err)
 	}
 	for column, value := range map[string]any{"episode_admission_id": "other-admission", "critical_window_ms": int64(99), "critical_total_limit": 99, "critical_per_run_limit": 99} {
-		if _, err := db.db.ExecContext(ctx, `UPDATE attention_batches SET `+column+`=? WHERE id=?`, value, batch); err == nil || !strings.Contains(err.Error(), "immutable") {
+		if _, err := db.db.ExecContext(ctx, `UPDATE attention_batches SET `+column+`=? WHERE id=?`, value, batch); err == nil || (!strings.Contains(err.Error(), "immutable") && !strings.Contains(err.Error(), "daily attention batch cannot carry critical limits")) {
 			t.Fatalf("sealed %s update error = %v", column, err)
 		}
 	}
@@ -202,6 +233,8 @@ func TestChannelDiagnosticsIncludesBatchFailureProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.SetChannelPolicy(3, 3)
+	wakes := 0
+	db.SetOutboxWakeup(func() { wakes++ })
 	claim, err := db.ClaimOutboxOperationKind(ctx, "worker", OperationChannelPublish, testNow, 100)
 	if err != nil || claim == nil {
 		t.Fatalf("claim = %#v, %v", claim, err)
@@ -226,6 +259,9 @@ func TestChannelDiagnosticsIncludesBatchFailureProjection(t *testing.T) {
 	}
 	if claimed, err := db.ClaimOutboxOperationKind(ctx, "reclaimer", OperationChannelPublish, testNow+105, 100); err != nil || claimed != nil {
 		t.Fatalf("terminal reclaim = %#v, %v", claimed, err)
+	}
+	if wakes != 3 {
+		t.Fatalf("channel completion/reclaim wakeups = %d, want 3", wakes)
 	}
 	if err := db.CompleteOutboxAttempt(ctx, *third, CompleteOutcome{State: OperationSucceeded, NowMS: testNow + 106}); err != ErrRejectedStaleWorker {
 		t.Fatalf("stale terminal completion = %v", err)
