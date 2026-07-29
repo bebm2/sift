@@ -486,6 +486,28 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 
 每个 sealed batch 有一条 `batch_deliveries` 投影：`batch_id` PK/FK、`delivery_id` UNIQUE（逐字节等于 `<batch_id>:publish:1`）、`operation_key` UNIQUE、`state=pending|delivered|failed`、`attempt_count`、`remote_ref`、`last_error`、`created_at_ms`、`delivered_at_ms`。它与 `interrupt_deliveries` 同样只提供查询面。`CompleteOutboxAttempt` 成功时原子标记该投影、batch 和逐成员的 Ledger delivery；响应丢失的重放沿用同一 operation key 和 frozen payload，Channel 仍如实为 at-least-once。
 
+### 6.6 Batch exact vectors（config / interrupt / outbox 共用）
+
+以下是唯一的 batch fixture；所有 JSON 均为 canonical JSON（对象键按出现顺序、无空白、UTF-8 bytes），供 config §3.9、interrupt §8.3 和 outbox §10 逐字节复用。冻结输入为 `zone=Asia/Shanghai`、`due_at_ms=1785286800000`、两个 Run `run-a/run-b`、成员 `i-a/i-b`，且 `version=2`、`nonce=n-a/n-b`。Channel snapshot 分别为：
+
+```json
+{"id":"ops-slack","type":"webhook","target_ref":"https://hooks.example/slack","capabilities":["text"],"renderer":"plain-v1"}
+{"id":"ops-teams","type":"webhook","target_ref":"https://hooks.example/teams","capabilities":["text"],"renderer":"plain-v1"}
+```
+
+**同 Channel 并发 insert：** 两个事务分别带 `run-a/i-a` 与 `run-b/i-b` 竞争，唯一结果是一个 `daily:Asia/Shanghai:1785286800000:ops-slack`，成员按 `i-a,i-b` 排序，两个 `delivery_id` 分别为 `daily:Asia/Shanghai:1785286800000:ops-slack:i-a` 与 `daily:Asia/Shanghai:1785286800000:ops-slack:i-b`。唯一 operation 为 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`，batch delivery 为 `daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`。
+
+**不同 Channel 并发 insert：** `i-a` 冻结 `ops-slack`、`i-b` 冻结 `ops-teams` 时，绝不混批，两个 batch ID、operation key 和 payload 的完整值为：
+
+```json
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","batch_kind":"daily_summary","channel":{"id":"ops-slack","type":"webhook","target_ref":"https://hooks.example/slack","capabilities":["text"],"renderer":"plain-v1"},"scope":"day","scope_id":"Asia/Shanghai:1785286800000","due_at_ms":1785286800000,"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a","headline":"Agent 需要你澄清","reason":"agent_blocked","severity":"high","links":[],"options":[],"command_lines":[]}],"rendered_text":"i-a: Agent 需要你澄清"}
+{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-teams","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","batch_kind":"daily_summary","channel":{"id":"ops-teams","type":"webhook","target_ref":"https://hooks.example/teams","capabilities":["text"],"renderer":"plain-v1"},"scope":"day","scope_id":"Asia/Shanghai:1785286800000","due_at_ms":1785286800000,"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:i-b","interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b","headline":"变更等待代码审阅","reason":"code_review","severity":"high","links":[],"options":[],"command_lines":[]}],"rendered_text":"i-b: 变更等待代码审阅"}
+```
+
+对应 operation/payload identity 逐字节为 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1` + 第一份 payload，以及 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-teams:publish:1` + 第二份 payload；`payload_digest` 是该 payload UTF-8 bytes 的 SHA-256 小写 hex。`same Channel` 结果使用同样的第一份 schema，但 `members` 同时含上述 `i-a`、`i-b`，`rendered_text` 为 `i-a: Agent 需要你澄清；i-b: 变更等待代码审阅`，不能由两个不同 Channel 的 fixture 合并推导。
+
+**排除、空批、重放：** sealing 前若 `i-b` 的持久化前态不是 `status=open,version=2,nonce=n-b`（例如 `version=3` 或 `nonce=n-old`），只写 `excluded_at_ms`，不进入 sealed members；此时单成员 batch 的 payload 是上面对应 Channel 的同一 canonical object（不含 `i-b`）。若所有成员均不匹配，持久化结果的 canonical bytes 为 `{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","state":"cancelled","payload_json":null,"operation_key":null,"members":[{"interrupt_id":"i-a","excluded_at_ms":1785286800001},{"interrupt_id":"i-b","excluded_at_ms":1785286800001}]}`，无 `channel_publish` operation，且绝不发送空摘要。已 sealed 的 batch 在响应丢失后只重放原 `operation_key=attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`、原 `delivery_id=daily:Asia/Shanghai:1785286800000:ops-slack:publish:1` 和原 `payload_json`，返回既有 operation，不创建第二 batch/member/operation；成员关闭不会改写 sealed bytes。
+
 ## 7. Append-only 事件与幂等收据
 
 ### 7.1 `events`（不可变）

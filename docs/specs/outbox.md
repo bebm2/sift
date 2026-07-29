@@ -247,7 +247,7 @@ Payload：
 }
 ```
 
-attention batch payload 只能由 [`storage.md` §6.3](storage.md) 的 `PrepareAttentionBatch` 从 sealed member 快照生成；其 `channel` snapshot 必须与 batch 所属成员的冻结 Channel identity 一致，不能由 Channel worker 拼接或改写：
+attention batch payload 只能由 [`storage.md` §6.3、§6.6`](storage.md) 的 `PrepareAttentionBatch` 从 sealed member 快照生成；§6.6 的双 Channel、排除、空批与响应丢失 replay payload 是本节唯一 exact fixture；其 `channel` snapshot 必须与 batch 所属成员的冻结 Channel identity 一致，不能由 Channel worker 拼接或改写：
 
 ```json
 {
