@@ -85,6 +85,12 @@ func DefaultConfig() *Config {
 			DailySummaryAt:           "09:00",
 			HoldMaxDuration:          720 * time.Hour,
 			ChannelFailureAlertAfter: 3,
+			ReasonDefaults: map[string]AttentionReasonDefault{
+				"design_approval": {86400000, "hold", "hold"}, "guardrail_violation": {86400000, "hold", "hold"},
+				"code_review": {259200000, "hold", "hold"}, "agent_blocked": {28800000, "escalate", "auto_reject"},
+				"merge_conflict": {28800000, "escalate", "auto_reject"}, "failure_review": {86400000, "auto_reject", "auto_reject"},
+				"startup_stall": {3600000, "escalate", "hold"},
+			},
 		},
 		Report: Report{
 			EventsPerMinute:            12,

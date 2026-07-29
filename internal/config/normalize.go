@@ -627,6 +627,43 @@ func normalizeAttention(raw *RawAttention, cfg *Config) error {
 	if err := overlayInt("attention.channel_failure_alert_after", raw.ChannelFailureAlertAfter, &cfg.Attention.ChannelFailureAlertAfter, 1, 100); err != nil {
 		return err
 	}
+	if raw.ReasonDefaults != nil {
+		allowed := map[string]bool{"design_approval": true, "guardrail_violation": true, "code_review": true, "agent_blocked": true, "merge_conflict": true, "failure_review": true, "startup_stall": true}
+		for reason, value := range raw.ReasonDefaults {
+			if !allowed[reason] {
+				return configError("attention.reason_defaults", "unknown reason %q", reason)
+			}
+			d := cfg.Attention.ReasonDefaults[reason]
+			if value.ExpiresAfter != nil {
+				var err error
+				var duration time.Duration
+				duration, err = parseDuration("attention.reason_defaults."+reason+".expires_after", value.ExpiresAfter, time.Minute)
+				if err != nil {
+					return err
+				}
+				if duration < time.Minute || duration > 8760*time.Hour {
+					return configError("attention.reason_defaults."+reason+".expires_after", "duration must be 1m..8760h")
+				}
+				d.ExpiresAfterMS = duration.Milliseconds()
+			}
+			if value.OnExpire != nil {
+				d.OnExpire = *value.OnExpire
+			}
+			if value.OnMaxEscalations != nil {
+				d.OnMaxEscalations = *value.OnMaxEscalations
+			}
+			if d.OnExpire != "hold" && d.OnExpire != "escalate" && d.OnExpire != "auto_reject" {
+				return configError("attention.reason_defaults."+reason+".on_expire", "invalid action")
+			}
+			if d.OnMaxEscalations != "hold" && d.OnMaxEscalations != "auto_reject" {
+				return configError("attention.reason_defaults."+reason+".on_max_escalations", "invalid action")
+			}
+			if reason == "startup_stall" && (d.OnExpire == "auto_reject" || d.OnMaxEscalations == "auto_reject") {
+				return configError("attention.reason_defaults.startup_stall", "auto_reject is forbidden")
+			}
+			cfg.Attention.ReasonDefaults[reason] = d
+		}
+	}
 	return nil
 }
 

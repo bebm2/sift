@@ -18,6 +18,12 @@ CREATE TABLE IF NOT EXISTS batch_deliveries (
  operation_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
  attempt_count INTEGER NOT NULL DEFAULT 0, remote_ref TEXT, last_error TEXT,
  created_at_ms INTEGER NOT NULL, delivered_at_ms INTEGER);
+CREATE TABLE IF NOT EXISTS attention_admissions (
+ id TEXT NOT NULL PRIMARY KEY, interrupt_id TEXT NOT NULL REFERENCES interrupts(id),
+ admission_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL CHECK(kind IN ('critical_admitted','critical_fused')),
+ metric_identity TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id),
+ critical_source TEXT NOT NULL CHECK(critical_source IN ('initial','escalation')), created_at_ms INTEGER NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS attention_admissions_interrupt_critical ON attention_admissions(interrupt_id);
 CREATE TABLE IF NOT EXISTS channel_failure_episodes (
  subject_id TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation=1),
  consecutive_failures INTEGER NOT NULL CHECK(consecutive_failures>=0),

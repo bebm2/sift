@@ -151,14 +151,21 @@ type RawDailyQuota struct {
 }
 
 // RawAttention holds the attention/interrupt knobs (config.md §3.9).
+type RawAttentionReasonDefault struct {
+	ExpiresAfter     *string `json:"expires_after,omitempty"`
+	OnExpire         *string `json:"on_expire,omitempty"`
+	OnMaxEscalations *string `json:"on_max_escalations,omitempty"`
+}
+
 type RawAttention struct {
-	DayTimezone              *string          `json:"day_timezone,omitempty"`
-	DailyQuota               *RawDailyQuota   `json:"daily_quota,omitempty"`
-	MaxEscalations           *int             `json:"max_escalations,omitempty"`
-	CriticalFuse             *RawCriticalFuse `json:"critical_fuse,omitempty"`
-	DailySummaryAt           *string          `json:"daily_summary_at,omitempty"`
-	HoldMaxDuration          *string          `json:"hold_max_duration,omitempty"`
-	ChannelFailureAlertAfter *int             `json:"channel_failure_alert_after,omitempty"`
+	DayTimezone              *string                              `json:"day_timezone,omitempty"`
+	DailyQuota               *RawDailyQuota                       `json:"daily_quota,omitempty"`
+	MaxEscalations           *int                                 `json:"max_escalations,omitempty"`
+	CriticalFuse             *RawCriticalFuse                     `json:"critical_fuse,omitempty"`
+	DailySummaryAt           *string                              `json:"daily_summary_at,omitempty"`
+	HoldMaxDuration          *string                              `json:"hold_max_duration,omitempty"`
+	ChannelFailureAlertAfter *int                                 `json:"channel_failure_alert_after,omitempty"`
+	ReasonDefaults           map[string]RawAttentionReasonDefault `json:"reason_defaults,omitempty"`
 }
 
 // RawReport holds the run.sock report knobs (config.md §3.10).

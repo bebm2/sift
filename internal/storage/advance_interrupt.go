@@ -23,6 +23,11 @@ type AdvanceInterruptCmd struct {
 	ExpectedNonce   string
 	Kind            AdvanceKind
 	NowMS           int64
+	// Frozen fuse values are supplied by production callers; defaults preserve
+	// compatibility with older supervisor callers and tests.
+	CriticalWindowMS    int64
+	CriticalTotalLimit  int
+	CriticalPerRunLimit int
 }
 
 // AdvanceInterrupt is the sole write port for expiry and dispatch scans.
@@ -57,12 +62,14 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 		if state != "ready" || expiresAt <= cmd.NowMS {
 			return false, ErrRejectedStale
 		}
-		// Channel publication is deliberately owned by the channel worker. This
-		// transition consumes the durable due marker exactly once; a later worker
-		// cannot turn an old supervisor snapshot into a second delivery.
 		res, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='batched',next_dispatch_at_ms=NULL,version=version+1,updated_at_ms=? WHERE id=? AND status='open' AND dispatch_state='ready' AND version=? AND nonce=? AND next_dispatch_at_ms<=?`, cmd.NowMS, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce, cmd.NowMS)
 		if err != nil {
 			return false, err
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce, escalation, "normal", cmd.NowMS); err != nil {
+				return false, err
+			}
 		}
 		return finishAdvance(ctx, tx, res, cmd, "interrupt.dispatched")
 	}
@@ -91,9 +98,27 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 		return finishAdvance(ctx, tx, res, cmd, "interrupt.max_escalations")
 	}
 
-	nextSeverity := promoteSeverity(InterruptSeverity(base))
+	// base_severity is the domain severity before escalation. Recompute from
+	// it, rather than repeatedly promoting the already-promoted snapshot.
+	nextSeverity := InterruptSeverity(base)
+	for i := 0; i <= escalation; i++ {
+		nextSeverity = promoteSeverity(nextSeverity)
+	}
 	if downgraded {
 		nextSeverity = downgradeInterruptSeverity(nextSeverity)
+	}
+	if nextSeverity == SeverityCritical {
+		admitted, err := admitCriticalTx(ctx, tx, cmd.InterruptID, cmd.NowMS, "escalation", cmd)
+		if err != nil {
+			return false, err
+		}
+		if !admitted {
+			res, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='held',delivery='held',held_reason='critical_fuse',next_dispatch_at_ms=NULL,version=version+1,updated_at_ms=? WHERE id=? AND status='open' AND version=? AND nonce=?`, cmd.NowMS, cmd.InterruptID, cmd.NowMS, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce)
+			if err != nil {
+				return false, err
+			}
+			return finishAdvance(ctx, tx, res, cmd, "interrupt.critical_fused")
+		}
 	}
 	nextState, delivery, heldReason := "ready", "batch", ""
 	var nextDispatch any
@@ -101,8 +126,7 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 		delivery = "immediate"
 		nextDispatch = cmd.NowMS
 	} else {
-		// The initial batch window is deliberately not reused after expiry. The
-		// scheduler has no authority to invent a new availability window.
+		// Reuse only the frozen summary instant; never invent a new window.
 		nextState, delivery, heldReason, nextDispatch = "held", "held", "batch_after_expiry", nil
 	}
 	newNonce := newID()
@@ -110,21 +134,84 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 	if err != nil {
 		return false, err
 	}
-	_ = severity // retained in the read set as audit of the CAS snapshot.
+	_ = severity
+	if n, _ := res.RowsAffected(); n == 1 && delivery == "immediate" {
+		if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, newNonce, escalation+1, "strong", cmd.NowMS); err != nil {
+			return false, err
+		}
+	}
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.escalated")
 }
 
 func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceInterruptCmd) (bool, error) {
+	var runID, status string
+	var runVersion int64
+	if err := tx.QueryRowContext(ctx, `SELECT r.id,r.status,r.version FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, cmd.InterruptID).Scan(&runID, &status, &runVersion); err != nil {
+		return false, err
+	}
+	if RunStatus(status) != RunWaitingHuman {
+		return false, ErrRejectedStale
+	}
+	if err := d.transition(ctx, tx, runID, runVersion, DomainCommand{To: RunFailed, Source: SourceSystem, Actor: "advance_interrupt", FailureReason: "hitl_expired", OccurredAtMS: cmd.NowMS}); err != nil {
+		return false, err
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE interrupts SET status='closed',close_reason='expired_auto_reject',closed_at_ms=?,version=version+1,updated_at_ms=? WHERE id=? AND status='open' AND version=? AND nonce=?`, cmd.NowMS, cmd.NowMS, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce)
 	if err != nil {
 		return false, err
 	}
-	if n, _ := res.RowsAffected(); n == 1 {
-		if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='failed',failure_reason='hitl_expired',completed_at_ms=?,version=version+1,updated_at_ms=? WHERE id=(SELECT run_id FROM interrupts WHERE id=?) AND status='waiting_human'`, cmd.NowMS, cmd.NowMS, cmd.InterruptID); err != nil {
-			return false, err
-		}
-	}
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.expired_auto_reject")
+}
+
+func enqueueInterruptChannelTx(ctx context.Context, tx *sql.Tx, interruptID string, version int64, nonce string, escalation int, priority string, nowMS int64) error {
+	var channel, modality, headline, brief string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(channel_id,''),min_modality,headline,brief_markdown FROM interrupts WHERE id=?`, interruptID).Scan(&channel, &modality, &headline, &brief); err != nil {
+		return err
+	}
+	if channel == "" {
+		return nil
+	}
+	deliveryID := fmt.Sprintf("interrupt:%s:%d:%s", interruptID, escalation, channel)
+	key := ChannelPublishOperationKey(interruptID, escalation)
+	payload, _ := json.Marshal(map[string]any{"delivery_kind": "interrupt", "delivery_id": deliveryID, "interrupt_id": interruptID, "escalation_no": escalation, "priority": priority, "interrupt_version": version, "nonce": nonce, "channel": map[string]any{"id": channel, "type": "webhook", "target_ref": "secret_ref:" + channel, "renderer": "plain-v1", "capabilities": []string{modality}}, "rendered_text": headline + "\n\n" + brief})
+	if err := insertOperation(ctx, tx, Operation{Key: key, Kind: OperationChannelPublish, Payload: payload, InterruptID: interruptID}, "", "", nowMS); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries(id,delivery_id,interrupt_id,surface,channel_id,channel_snapshot_json,interrupt_version,nonce,escalation_no,priority,operation_key,state,attempt_count,created_at_ms) VALUES(?,?,?,'channel',?,?,?,?,?,?,?,'pending',0,?)`, newID(), deliveryID, interruptID, channel, string(mustJSON(map[string]any{"id": channel})), version, nonce, escalation, priority, key, nowMS)
+	return err
+}
+
+func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
+
+func admitCriticalTx(ctx context.Context, tx *sql.Tx, interruptID string, nowMS int64, source string, cmd AdvanceInterruptCmd) (bool, error) {
+	var runID string
+	if err := tx.QueryRowContext(ctx, `SELECT run_id FROM interrupts WHERE id=?`, interruptID).Scan(&runID); err != nil {
+		return false, err
+	}
+	key := interruptID + ":critical"
+	var existing string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM attention_admissions WHERE admission_key=?`, key).Scan(&existing); err == nil {
+		return existing == "critical_admitted", nil
+	} else if err != sql.ErrNoRows {
+		return false, err
+	}
+	// A zero limit is used by old callers that have no frozen fuse snapshot;
+	// production callers pass the limits in the command extension.
+	if cmd.CriticalTotalLimit <= 0 {
+		cmd.CriticalTotalLimit = 5
+	}
+	if cmd.CriticalWindowMS <= 0 {
+		cmd.CriticalWindowMS = 15 * 60 * 1000
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM attention_admissions WHERE created_at_ms>? AND kind='critical_admitted'`, nowMS-cmd.CriticalWindowMS).Scan(&count); err != nil {
+		return false, err
+	}
+	kind := "critical_admitted"
+	if count >= cmd.CriticalTotalLimit {
+		kind = "critical_fused"
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,?,?)`, newID(), interruptID, key, kind, interruptID, runID, source, nowMS)
+	return err == nil && kind == "critical_admitted", err
 }
 
 func finishAdvance(ctx context.Context, tx *sql.Tx, res sql.Result, cmd AdvanceInterruptCmd, eventType string) (bool, error) {
