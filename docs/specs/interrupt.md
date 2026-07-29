@@ -70,7 +70,7 @@ fallback（无 T4/T6）不得采用自然语言自由模板。其 `brief_markdow
 | `a\rb` | 拒绝：`interrupt_brief_cr_rejected` |
 | `a\nb` | 拒绝：`interrupt_brief_lf_rejected` |
 
-`links` 总是存在。每项是 `Link {label,target}`；`target` 必须是已验证可访问的 HTTPS forge URL、绝对本地路径，或 daemon 写入的 `sift://event/<32 lowercase hex>` 安全事件引用；后者只允许 `failure_evidence_ref`，由服务端而非 Agent 生成。`label` 是表中对应事实键。先按 `(target UTF-8 bytes, label UTF-8 bytes)` 升序排序，再对完全相同的 `(label,target)` 去重；renderer 依此顺序输出。链接不是从 `brief` 或 LLM 文本抽取的。
+`links` 总是存在。每项是 `Link {label,target}`；`target` 必须是已验证可访问的 HTTPS forge URL、绝对本地路径，或 daemon 写入的 `sift://event/<32 lowercase hex>` 安全事件引用；后者只允许 `failure_evidence_ref`，由服务端而非 Agent 生成；T4 的 closed link union 也必须接受该安全事件引用。`label` 是表中对应事实键。先按 `(target UTF-8 bytes, label UTF-8 bytes)` 升序排序，再对完全相同的 `(label,target)` 去重；renderer 依此顺序输出。链接不是从 `brief` 或 LLM 文本抽取的。
 
 ### 3.3 链接与 manual Run
 
@@ -109,6 +109,20 @@ manual Run 的 discussion target 以 [`storage.md` §5.2](storage.md) 的三列�
 {"reason":"failure_review","headline":"失败需要人工决定","brief":"事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry","min_modality":"voice","links":[{"label":"failure_evidence_ref","target":"/r/ci"}],"options":[{"id":"retry","label":"重试失败步骤","effect":"再次执行","risk":"相同故障可能再次发生"},{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持等待","risk":"Run 继续占用待处理项"}]}
 {"reason":"startup_stall","headline":"无法确认旧执行体已停止","brief":"事实：attempt_no=1；generation=2；diagnostic_cause=termination_unconfirmed；isolation_consequence=worktree 保持隔离；recommended_action=retry；attempt_diagnostic_ref=/r/attempt；worktree_ref=/r/wt。建议：retry","min_modality":"text","links":[{"label":"attempt_diagnostic_ref","target":"/r/attempt"},{"label":"worktree_ref","target":"/r/wt"}],"options":[{"id":"retry","label":"重新探测旧执行体","effect":"请求受控终止再探测","risk":"未确认消失时仍保持隔离"},{"id":"reject","label":"放弃此 Run","effect":"停止处理并保持隔离","risk":"不代表旧执行体已停止"},{"id":"hold","label":"继续等待","effect":"保持等待和隔离","risk":"旧执行体可能仍在运行"}]}
 ```
+
+### 3.6 T4 接纳与命令 golden vectors
+
+以下是领域接纳器的拒绝基准；每个输出均直接回退 §3.1/§3.2，不产生新的 Interrupt、预算或 operation：
+
+| 输入差异 | 结果 |
+|---|---|
+| `options` 将 `retry,reject,hold` 重排为 `reject,retry,hold` | 拒绝：`interrupt_t4_options_mismatch` |
+| `conclusion` 为未出现在 `brief_fragments` 的文本 | 拒绝：`interrupt_t4_unknown_fragment` |
+| `key_points` 含 `<b>...</b>`、`<!-- sift-op:... -->` 或 `/sift reject` | 拒绝：`interrupt_t4_unsafe_fragment` |
+| `recommended_option_id=review_report_interrupt_quota`（`failure_review`） | 拒绝：`interrupt_t4_unknown_option` |
+| `links=[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}]` | 接受；该 target 是唯一合法的服务端安全事件引用 |
+
+当 `run_id=run-01`、当前 `nonce=n-01` 时，单条 renderer 必须逐字节包含 `/sift hold run-01 n-01 1h`；摘要成员 `interrupt_id=i-01`、`version=2`、`nonce=n-02` 必须包含 `/sift hold run-01 n-02 1h`，不得使用 batch ID、旧 nonce 或仅有动词的缩写。该命令文本只供该成员人工回复，摘要没有批量动作。
 
 ## 4. 超时与 severity
 
@@ -186,12 +200,12 @@ string:domain\x00sift.interrupt.report-quota.generation\x00uint:version\x001\x00
 `failure_digest` 是下列 canonical JSON 的 SHA-256 小写 hex，字段不可增删：
 
 ```json
-{"daily_bucket_end_ms":<end>,"daily_bucket_start_ms":<start>,"failure_class":"report_interrupt_quota_exhausted","recommended_action":"review_report_interrupt_quota","run_id":"<run_id>"}
+{"daily_bucket_end_ms":<end>,"daily_bucket_start_ms":<start>,"failure_class":"report_interrupt_quota_exhausted","recommended_action":"hold","run_id":"<run_id>"}
 ```
 
-调用固定 `attempt_no=null`，并仅提供 `failure_class=report_interrupt_quota_exhausted`、`failure_evidence_ref=sift://event/<report_quota_exhaustions.security_event_id>`、`recommended_action=review_report_interrupt_quota`。因此它满足 §3 的 `failure_review` fallback 和最低 link，既不吸收 Agent 文本也不伪造 attempt。`report_quota_exhaustions` 的主键 `(run_id,daily_bucket_start_ms)` 是额外的直接数据库唯一约束；generation key 是第二道收敛，不得以预查询替代。
+调用固定 `attempt_no=null`，并仅提供 `failure_class=report_interrupt_quota_exhausted`、`failure_evidence_ref=sift://event/<report_quota_exhaustions.security_event_id>`、`recommended_action=hold`。因此它命中 `failure_review` 的 canonical option，既不吸收 Agent 文本也不伪造 attempt。`report_quota_exhaustions` 的主键 `(run_id,daily_bucket_start_ms)` 是额外的直接数据库唯一约束；generation key 是第二道收敛，不得以预查询替代。
 
-Golden vector：若 `run_id=run-01`、`start=1754000000000`、`end=1754086400000`，上述 JSON 的 `failure_digest` 为 `bce8d4ba7b34a16327dbcc343676a86e31bf85deac133b77be3466baa0ea7d90`，完整 preimage 的 SHA-256 generation key 为 `8489d36f40fbd9c284a0de882915d975ef6c4bd6a039f6c6ae36504375cb9197`。
+Golden vector：若 `run_id=run-01`、`start=1754000000000`、`end=1754086400000`，上述 JSON 的 `failure_digest` 为 `59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509`，完整 preimage 的 SHA-256 generation key 为 `cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083`。
 
 `startup_stall` 的 generation key 始终语义为 **`(run_id, attempt_no, generation, cause=startup_stall)`**。`process_identity_unknown`、`termination_unconfirmed`、`process_group_unverified` 是 `diagnostic_cause` 事实/隔离诊断，不参与键。超时扫描、恢复扫描、`kill`、`retry` 的同一 attempt/generation 必须命中一条 open Interrupt，即使其诊断分类不同。
 

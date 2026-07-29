@@ -236,20 +236,23 @@ Payload：
 
 ## 10. Channel publish
 
-`channel_publish` 的 `body.delivery_kind` 是 closed `interrupt | attention_batch` tagged union。单 Interrupt payload 为：
+`channel_publish` 的 `body.delivery_kind` 是 closed `interrupt | attention_batch` tagged union。单 Interrupt payload 为（Channel 选择和渲染上下文来自 Interrupt 冻结 snapshot，不从当前 config 重建）：
 
 ```json
 {
   "delivery_kind":"interrupt","interrupt_id":"...","escalation_no":0,"priority":"normal",
+  "interrupt_version":1,"nonce":"...",
+  "channel":{"id":"...","type":"webhook","target_ref":"...","capabilities":["text"],"renderer":"plain-v1"},
   "rendered_text":"..."
 }
 ```
 
-attention batch payload 只能由 [`storage.md` §6.3](storage.md) 的 `PrepareAttentionBatch` 从 sealed member 快照生成，不能由 Channel worker 拼接或改写：
+attention batch payload 只能由 [`storage.md` §6.3](storage.md) 的 `PrepareAttentionBatch` 从 sealed member 快照生成；其 `channel` snapshot 必须与 batch 所属成员的冻结 Channel identity 一致，不能由 Channel worker 拼接或改写：
 
 ```json
 {
   "delivery_kind":"attention_batch","batch_id":"...","batch_kind":"daily_summary",
+  "channel":{"id":"...","type":"webhook","target_ref":"...","capabilities":["text"],"renderer":"plain-v1"},
   "scope":"day","scope_id":"Asia/Shanghai:2026-07-29","due_at_ms":0,
   "members":[{
     "interrupt_id":"...","interrupt_version":1,"nonce":"...","headline":"...",
