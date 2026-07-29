@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestAdvanceInterruptEscalationCountsReuseDowngrade(t *testing.T) {
@@ -53,5 +54,110 @@ func TestAdvanceInterruptEscalationCountsReuseDowngrade(t *testing.T) {
 	var state, held string
 	if err := db.db.QueryRow(`SELECT dispatch_state,held_reason FROM interrupts WHERE id=?`, in.ID).Scan(&state, &held); err != nil || state != "held" || held != "max_escalations" {
 		t.Fatalf("max result = %s/%s, %v", state, held, err)
+	}
+}
+
+func TestAdvanceInterruptExpiryAndMaxOutcomeMatrix(t *testing.T) {
+	cases := []struct {
+		name                 string
+		onExpire, onMax      ExpireAction
+		max                  int
+		wantStatus, wantHeld string
+	}{
+		{"expire hold", ExpireHold, ExpireHold, 1, "open", "expiry"},
+		{"expire auto reject", ExpireAutoReject, ExpireHold, 1, "closed", ""},
+		{"max hold", ExpireEscalate, ExpireHold, 0, "open", "max_escalations"},
+		{"max auto reject", ExpireEscalate, ExpireAutoReject, 0, "closed", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _ := openTestDB(t)
+			ctx := context.Background()
+			if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+				t.Fatal(err)
+			}
+			cmd := t6Command(testNow)
+			cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = 10, tc.onExpire, tc.onMax, tc.max
+			cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+			cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+				return InterruptT6Output{Delivery: "immediate", ChannelID: "ops"}, nil
+			}
+			in, err := emitTestInterrupt(t, ctx, db, cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var nonce string
+			if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&nonce); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: 1, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: testNow + 10}); err != nil || !ok {
+				t.Fatalf("advance = %v, %v", ok, err)
+			}
+			var status, held, closeReason string
+			if err := db.db.QueryRow(`SELECT status,COALESCE(held_reason,''),COALESCE(close_reason,'') FROM interrupts WHERE id=?`, in.ID).Scan(&status, &held, &closeReason); err != nil {
+				t.Fatal(err)
+			}
+			if status != tc.wantStatus || held != tc.wantHeld {
+				t.Fatalf("interrupt = %s/%s, want %s/%s", status, held, tc.wantStatus, tc.wantHeld)
+			}
+			if status == "closed" && closeReason != "expired_auto_reject" {
+				t.Fatalf("close reason = %q", closeReason)
+			}
+		})
+	}
+}
+
+func TestAdvanceInterruptRestartRejectsOldTickAndCreatesStrongEscalationDelivery(t *testing.T) {
+	db, path := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	cmd := t6Command(testNow)
+	cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = 10, ExpireEscalate, ExpireHold, 1
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{Delivery: "immediate", ChannelID: "ops"}, nil
+	}
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldNonce string
+	if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&oldNonce); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.SupervisorInterruptTick(ctx, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SupervisorInterruptTick(ctx, testNow+10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: 1, ExpectedNonce: oldNonce, Kind: AdvanceExpiry, NowMS: testNow + 10}); err != ErrRejectedStale {
+		t.Fatalf("old tick = %v, want stale", err)
+	}
+	if err := db.SupervisorInterruptTick(ctx, testNow+10); err != nil {
+		t.Fatal(err)
+	}
+	var priority string
+	if err := db.db.QueryRow(`SELECT priority FROM interrupt_deliveries WHERE interrupt_id=? ORDER BY escalation_no DESC`, in.ID).Scan(&priority); err != nil {
+		t.Fatal(err)
+	}
+	if priority != "strong" {
+		t.Fatalf("escalation delivery priority = %q, want strong", priority)
 	}
 }
