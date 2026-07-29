@@ -34,5 +34,10 @@ func interruptCommand(c storage.GateCandidate, in Input, v Verdict, attention co
 	if cmd.Reason == "" {
 		return storage.EmitInterruptCmd{}, fmt.Errorf("gate reconciler: no interrupt for %s", v.Code)
 	}
+	if d, ok := attention.ReasonDefaults[string(cmd.Reason)]; ok {
+		cmd.ExpiresAfterMS = d.ExpiresAfterMS
+		cmd.OnExpire = storage.ExpireAction(d.OnExpire)
+		cmd.OnMaxEscalations = storage.ExpireAction(d.OnMaxEscalations)
+	}
 	return cmd, nil
 }

@@ -406,7 +406,12 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 			}
 		}
 	}
-	baseSeverity := severity
+	// Persist the domain base, not the already escalated initial severity. Future
+	// expiry advances must derive severity from this immutable origin.
+	baseSeverity, err := BaseSeverity(cmd.Reason, cmd.GatePhase, cmd.GuardrailLevel, 0, cmd.MaxEscalations)
+	if err != nil {
+		return Interrupt{}, err
+	}
 	dispatch, err := admitInterruptT6(ctx, cmd, t.modality, severity, cmd.NowMS+cmd.ExpiresAfterMS)
 	if err != nil {
 		return Interrupt{}, err

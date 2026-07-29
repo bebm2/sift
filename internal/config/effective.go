@@ -150,14 +150,21 @@ type DailyQuota struct {
 }
 
 // Attention holds the resolved attention/interrupt values (config.md §3.9).
+type AttentionReasonDefault struct {
+	ExpiresAfterMS   int64  `json:"expires_after_ms"`
+	OnExpire         string `json:"on_expire"`
+	OnMaxEscalations string `json:"on_max_escalations"`
+}
+
 type Attention struct {
-	DayTimezone              string        `json:"day_timezone"`
-	DailyQuota               DailyQuota    `json:"daily_quota"`
-	MaxEscalations           int           `json:"max_escalations"`
-	CriticalFuse             CriticalFuse  `json:"critical_fuse"`
-	DailySummaryAt           string        `json:"daily_summary_at"`
-	HoldMaxDuration          time.Duration `json:"hold_max_duration"`
-	ChannelFailureAlertAfter int           `json:"channel_failure_alert_after"`
+	DayTimezone              string                            `json:"day_timezone"`
+	DailyQuota               DailyQuota                        `json:"daily_quota"`
+	MaxEscalations           int                               `json:"max_escalations"`
+	CriticalFuse             CriticalFuse                      `json:"critical_fuse"`
+	DailySummaryAt           string                            `json:"daily_summary_at"`
+	HoldMaxDuration          time.Duration                     `json:"hold_max_duration"`
+	ChannelFailureAlertAfter int                               `json:"channel_failure_alert_after"`
+	ReasonDefaults           map[string]AttentionReasonDefault `json:"reason_defaults"`
 }
 
 // Report holds the resolved run.sock report values (config.md §3.10).
