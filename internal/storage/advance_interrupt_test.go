@@ -17,6 +17,8 @@ func TestAdvanceInterruptEscalatesOnceAndRotatesNonce(t *testing.T) {
 	}
 	insertTaskSpec(t, db, "spec", "run", 1)
 	insertAttempt(t, db, "run", 1, "spec")
+	mustExec(t, db, `INSERT INTO events(id,run_id,attempt_no,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES ('report-event','run',1,'project','report','agent',1,'{}',?,?)`, testNow, testNow)
+	mustExec(t, db, `INSERT INTO report_receipts(id,run_id,attempt_no,report_key,report_kind,payload_digest,event_id,received_at_ms) VALUES ('report-1','run',1,'report-1','blocker','digest','report-event',?)`, testNow)
 	batch := int64(testNow + 2)
 	attempt := 1
 	in, err := db.EmitInterrupt(ctx, EmitInterruptCmd{
