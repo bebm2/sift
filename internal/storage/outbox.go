@@ -276,6 +276,7 @@ func (d *DB) claimOutboxOperation(ctx context.Context, workerID string, nowMS, l
 			if err := tx.Commit(); err != nil {
 				return nil, err
 			}
+			d.wakeOutbox()
 			return nil, nil
 		}
 	}
@@ -344,7 +345,15 @@ func (d *DB) CompleteOutboxAttempt(ctx context.Context, claim ClaimedOperation, 
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// A Channel completion may have atomically created its threshold alert.
+	// Wake the dedicated consumer only after that transaction is durable.
+	if claim.Kind == OperationChannelPublish {
+		d.wakeOutbox()
+	}
+	return nil
 }
 
 type BackoffPolicy struct {
