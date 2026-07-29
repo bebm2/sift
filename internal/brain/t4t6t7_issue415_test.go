@@ -49,10 +49,10 @@ func TestIssue415T7TraceProjectAndPreReserveValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := T7Contract(key, project, nil, []string{"cat"}).ValidateInput(input); err != nil {
+	if err := T7Contract(key, project, nil, []string{"cat"}).ValidateInput(CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: key, ProjectID: project, Input: input}); err != nil {
 		t.Fatalf("project round trip: %v", err)
 	}
-	if err := T7Contract(key, "wrong", nil, []string{"cat"}).ValidateInput(input); err == nil {
+	if err := T7Contract(key, "wrong", nil, []string{"cat"}).ValidateInput(CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: key, ProjectID: "wrong", Input: input}); err == nil {
 		t.Fatal("project trace drift accepted")
 	}
 
@@ -80,6 +80,22 @@ func TestIssue415T7TraceProjectAndPreReserveValidation(t *testing.T) {
 	result, err := shell.Call(context.Background(), contract, CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: global, Input: good})
 	if err != nil || result.CallSeq != 1 {
 		t.Fatalf("invalid input reserved a trace: %+v %v", result, err)
+	}
+}
+
+func TestIssue415ValidAdaptersPreserveBrainIdentity(t *testing.T) {
+	result := CallResult{CallID: "call-valid", Status: "valid", PromptVersion: "T/v1/test", OutputSchemaVersion: 1}
+	t4, source, err := T4ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: []byte(`{"headline":"Review required","conclusion":"check failed","key_points":["review needed"],"recommended_option_id":"review","options":["review"]}`)}, t4Input())
+	if err != nil || t4.Normal == nil || t4.Fallback != nil || source.Kind != "brain" || source.LogicalCallID != result.CallID || source.PromptVersion != result.PromptVersion || source.OutputSchemaVersion != 1 {
+		t.Fatalf("T4 valid adapter = %#v %#v %v", t4, source, err)
+	}
+	t6, source, err := T6ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: []byte(`{"delivery":"batch","channel_id":"chat","suggested_downgrade":false,"rationale":"wait"}`)}, t6Input())
+	if err != nil || t6.Delivery == nil || source.Kind != "brain" || source.LogicalCallID != result.CallID || source.PromptVersion != result.PromptVersion {
+		t.Fatalf("T6 valid adapter = %#v %#v %v", t6, source, err)
+	}
+	t7, source, err := T7ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: []byte(`{"proposal_kind":"policy","target_scope":"global","title":"Review trend","body":"Human review only.","evidence_entry_ids":["cat"],"requires_human_approval":true}`)}, "aggregate:v1:global:all:1:2", []string{"cat"})
+	if err != nil || t7.Proposal == nil || t7.NoDraft || source.Kind != "brain" || source.LogicalCallID != result.CallID || source.PromptVersion != result.PromptVersion {
+		t.Fatalf("T7 valid adapter = %#v %#v %v", t7, source, err)
 	}
 }
 
