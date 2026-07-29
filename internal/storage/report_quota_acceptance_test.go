@@ -119,6 +119,36 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 		assertCount(t, db, "report_quota_exhaustions", 1)
 		assertCount(t, db, "interrupts", 2)
 	})
+	t.Run("each post-exhaustion emission cut rolls back only the emission", func(t *testing.T) {
+		for _, table := range []string{"interrupts", "attention_admissions", "events", "outbox_operations", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
+			t.Run(table, func(t *testing.T) {
+				db, ctx := seedReportQuotaRun(t, 1)
+				if err := submitBlocker(ctx, db, "0123456789abcdef0123456789abcdef"); err != nil {
+					t.Fatal(err)
+				}
+				trigger := "fail_quota_" + strings.ReplaceAll(table, "_", "")
+				when := ""
+				if table == "events" {
+					when = " WHEN NEW.type='interrupt.emitted'"
+				}
+				mustExec(t, db, "CREATE TRIGGER "+trigger+" BEFORE INSERT ON "+table+when+" BEGIN SELECT RAISE(ABORT, 'injected quota emission cut'); END")
+				if err := submitBlocker(ctx, db, "1123456789abcdef0123456789abcdef"); err == nil || !strings.Contains(err.Error(), "injected quota emission cut") {
+					t.Fatalf("%s cut = %v", table, err)
+				}
+				assertCount(t, db, "report_quota_exhaustions", 1)
+				assertCount(t, db, "interrupts", 1)
+				assertCount(t, db, "attention_admissions", 1)
+				assertCount(t, db, "outbox_operations", 1)
+				assertCount(t, db, "interrupt_deliveries", 1)
+				assertCount(t, db, "interrupt_command_effect_bindings", 1)
+				var domainEvents int
+				if err := db.db.QueryRow(`SELECT COUNT(*) FROM events WHERE type='interrupt.emitted'`).Scan(&domainEvents); err != nil || domainEvents != 1 {
+					t.Fatalf("domain events after %s cut = %d, %v", table, domainEvents, err)
+				}
+			})
+		}
+	})
+
 	t.Run("four writers create one exhaustion and one generation interrupt", func(t *testing.T) {
 		db, ctx := seedReportQuotaRun(t, 1)
 		keys := []string{"0123456789abcdef0123456789abcdef", "1123456789abcdef0123456789abcdef", "2123456789abcdef0123456789abcdef", "3123456789abcdef0123456789abcdef"}
@@ -136,9 +166,20 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 			}
 		}
 		assertCount(t, db, "report_quota_exhaustions", 1)
+		assertCount(t, db, "interrupts", 2)
+		assertCount(t, db, "attention_admissions", 2)
+		assertCount(t, db, "interrupt_command_effect_bindings", 2)
+		assertCount(t, db, "outbox_operations", 2)
+		assertCount(t, db, "interrupt_deliveries", 2)
 		var n int
-		if err := db.db.QueryRow(`SELECT COUNT(*) FROM interrupts WHERE reason='failure_review'`).Scan(&n); err != nil || n != 1 {
+		if err := db.db.QueryRow(`SELECT COUNT(*) FROM interrupts WHERE reason='failure_review' AND generation_key IS NOT NULL`).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("quota interrupts = %d, %v", n, err)
+		}
+		if err := db.db.QueryRow(`SELECT COUNT(*) FROM events WHERE type='security.report_quota_exhausted'`).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("security events = %d, %v", n, err)
+		}
+		if err := db.db.QueryRow(`SELECT available_units FROM rate_limit_buckets WHERE kind='report' AND scope_id='run:run:attempt:1'`).Scan(&n); err != nil || n != 6 {
+			t.Fatalf("rate tokens = %d, %v", n, err)
 		}
 	})
 }

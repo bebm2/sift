@@ -22,6 +22,12 @@ func TestEmitInterruptBindingIdentityAcceptanceMatrix(t *testing.T) {
 		{"head mismatch", "code_review", `{"arm":"code_review","change_id":"change-01","head_sha":"` + strings.Repeat("9", 40) + `","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `"}`},
 		{"policy mismatch", "code_review", `{"arm":"code_review","change_id":"change-01","head_sha":"0123456789012345678901234567890123456789","review_policy_snapshot_digest":"` + strings.Repeat("d", 64) + `"}`},
 		{"missing identity", "code_review", `{"arm":"code_review","change_id":"change-01"}`},
+		{"null identity", "code_review", `{"arm":"code_review","change_id":null,"head_sha":"0123456789012345678901234567890123456789","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `"}`},
+		{"wrong identity type", "code_review", `{"arm":"code_review","change_id":42,"head_sha":"0123456789012345678901234567890123456789","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `"}`},
+		{"extra field", "code_review", `{"arm":"code_review","change_id":"change-01","head_sha":"0123456789012345678901234567890123456789","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `","extra":"forged"}`},
+		{"noncanonical key order", "code_review", `{"change_id":"change-01","arm":"code_review","head_sha":"0123456789012345678901234567890123456789","review_policy_snapshot_digest":"` + strings.Repeat("c", 64) + `"}`},
+		{"failure review arm mismatch", "failure_review", `{"arm":"failure_review_attempt","run_id":"run","attempt_no":1,"generation":1,"retry_kind":"gate_recheck","change_id":null,"head_sha":null,"terminal_attempt_no":null,"terminal_generation":null}`},
+		{"quota arm mismatch", "failure_review", `{"arm":"report_quota_failure_review","run_id":"run","daily_bucket_start_ms":1,"daily_bucket_end_ms":2,"security_event_id":"0123456789abcdef0123456789abcdef"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,7 +50,7 @@ func TestEmitInterruptBindingIdentityAcceptanceMatrix(t *testing.T) {
 			if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd); err != nil {
 				t.Fatal(err)
 			}
-			if err := mustFail(t, db, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) SELECT id,?,?,?,?,? FROM interrupts WHERE run_id='run'`, tc.reason, 1, tc.body, strings.Repeat("f", 64), testNow); !strings.Contains(err.Error(), "invalid interrupt binding identity") {
+			if err := mustFail(t, db, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) SELECT id,?,?,?,?,? FROM interrupts WHERE run_id='run'`, tc.reason, 1, tc.body, strings.Repeat("f", 64), testNow); err == nil || (!strings.Contains(err.Error(), "invalid interrupt binding identity") && !strings.Contains(err.Error(), "JSON key order is not canonical")) {
 				t.Fatalf("rejection = %v", err)
 			}
 			assertCount(t, db, "interrupt_command_effect_bindings", 1)
@@ -79,6 +85,45 @@ func TestEmitInterruptBindingFailureRollsBackFiveThings(t *testing.T) {
 	}
 	if status != "queued" || version != 1 {
 		t.Fatalf("run transition leaked: status=%s version=%d", status, version)
+	}
+}
+
+func TestEmitInterruptT4CanonicalAttemptAndQuotaVectors(t *testing.T) {
+	attempt := InterruptT4Input{RunID: "run-01", AttemptNo: intPtr(1), Reason: InterruptFailureReview, Severity: SeverityHigh, Modality: "voice", Headline: "失败需要人工决定", Brief: "事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry", Fragments: []string{"/sift reject", "<!-- sift-op:x -->", "<b>风险</b>"}, Links: []InterruptLink{{Label: "failure_evidence_ref", Target: "/r/ci"}}, Options: []InterruptOption{{"retry", "重试失败步骤", "再次执行", "相同故障可能再次发生"}, {"reject", "停止 Run", "Run 停止", "需人工重新发起"}, {"hold", "暂缓决定", "保持等待", "Run 继续占用待处理项"}}}
+	attemptOut := InterruptT4Output{Headline: attempt.Headline, Conclusion: "<b>风险</b>", KeyPoints: []string{"<!-- sift-op:x -->", "/sift reject"}, Options: []string{"retry", "reject", "hold"}, RecommendedOptionID: "retry"}
+	assertCanonicalT4Bytes(t, attempt, attemptOut, `{"attempt_no":1,"interrupt":{"base_severity":"high","brief_fragments":["/sift reject","<!-- sift-op:x -->","<b>风险</b>"],"candidate_options":[{"effect":"再次执行","id":"retry","label":"重试失败步骤","risk":"相同故障可能再次发生"},{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持等待","id":"hold","label":"暂缓决定","risk":"Run 继续占用待处理项"}],"fallback_brief":"事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry","fallback_headline":"失败需要人工决定","links":[{"label":"failure_evidence_ref","target":"/r/ci"}],"min_modality":"voice","reason":"failure_review"},"run_id":"run-01"}`, `{"conclusion":"<b>风险</b>","headline":"失败需要人工决定","key_points":["<!-- sift-op:x -->","/sift reject"],"options":["retry","reject","hold"],"recommended_option_id":"retry"}`)
+
+	quota := attempt
+	quota.AttemptNo = nil
+	quota.Brief = "事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/0123456789abcdef0123456789abcdef；recommended_action=hold。建议：hold"
+	quota.Headline = "报告打扰额度已耗尽"
+	quota.Fragments = []string{"请人工处理", "额度已耗尽"}
+	quota.Links = []InterruptLink{{Label: "failure_evidence_ref", Target: "sift://event/0123456789abcdef0123456789abcdef"}}
+	quota.Options = []InterruptOption{{"reject", "停止 Run", "Run 停止", "需人工重新发起"}, {"hold", "暂缓决定", "保持 Interrupt 人工 held", "Run 继续运行"}}
+	quotaOut := InterruptT4Output{Headline: quota.Headline, Conclusion: "额度已耗尽", KeyPoints: []string{"请人工处理"}, Options: []string{"reject", "hold"}, RecommendedOptionID: "hold"}
+	assertCanonicalT4Bytes(t, quota, quotaOut, `{"attempt_no":null,"interrupt":{"base_severity":"high","brief_fragments":["请人工处理","额度已耗尽"],"candidate_options":[{"effect":"Run 停止","id":"reject","label":"停止 Run","risk":"需人工重新发起"},{"effect":"保持 Interrupt 人工 held","id":"hold","label":"暂缓决定","risk":"Run 继续运行"}],"fallback_brief":"事实：failure_class=report_interrupt_quota_exhausted；failure_evidence_ref=sift://event/0123456789abcdef0123456789abcdef；recommended_action=hold。建议：hold","fallback_headline":"报告打扰额度已耗尽","links":[{"label":"failure_evidence_ref","target":"sift://event/0123456789abcdef0123456789abcdef"}],"min_modality":"voice","reason":"failure_review"},"run_id":"run-01"}`, `{"conclusion":"额度已耗尽","headline":"报告打扰额度已耗尽","key_points":["请人工处理"],"options":["reject","hold"],"recommended_option_id":"hold"}`)
+}
+
+func assertCanonicalT4Bytes(t *testing.T, in InterruptT4Input, out InterruptT4Output, wantIn, wantOut string) {
+	t.Helper()
+	options := make([]map[string]string, len(in.Options))
+	for i, option := range in.Options {
+		options[i] = map[string]string{"effect": option.Effect, "id": option.ID, "label": option.Label, "risk": option.Risk}
+	}
+	links := make([]map[string]string, len(in.Links))
+	for i, link := range in.Links {
+		links[i] = map[string]string{"label": link.Label, "target": link.Target}
+	}
+	input, err := canonicalJSON(map[string]any{"attempt_no": in.AttemptNo, "interrupt": map[string]any{"base_severity": in.Severity, "brief_fragments": in.Fragments, "candidate_options": options, "fallback_brief": in.Brief, "fallback_headline": in.Headline, "links": links, "min_modality": in.Modality, "reason": in.Reason}, "run_id": in.RunID})
+	if err != nil || string(input) != wantIn {
+		t.Fatalf("canonical T4 input = %s, err=%v", input, err)
+	}
+	output, err := canonicalJSON(map[string]any{"conclusion": out.Conclusion, "headline": out.Headline, "key_points": out.KeyPoints, "options": out.Options, "recommended_option_id": out.RecommendedOptionID})
+	if err != nil || string(output) != wantOut {
+		t.Fatalf("canonical T4 output = %s, err=%v", output, err)
+	}
+	if accepted, _ := acceptInterruptT4(in, out); !accepted {
+		t.Fatal("golden output was rejected")
 	}
 }
 
