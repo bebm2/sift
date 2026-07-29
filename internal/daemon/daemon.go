@@ -111,7 +111,7 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 				return nil, fmt.Errorf("project %s: gate success worktree manager: %w", p.ID, err)
 			}
 			d.Successes = append(d.Successes, &gate.SuccessReconciler{DB: db, ProjectID: p.ID, Worktrees: worktrees, Now: now})
-			d.Gates = append(d.Gates, &gate.Reconciler{DB: db, Forge: adapter, Brain: brain.NewShell(db, cfg.Brain, brain.SubprocessProvider{Executable: cfg.Brain.Executable, Args: cfg.Brain.Args}, now), ProjectID: p.ID, Project: ref, Repo: p.Repo, Defaults: cfg.GateDefaults, Certification: cfg.Certification, Attention: cfg.Attention, Now: now})
+			d.Gates = append(d.Gates, &gate.Reconciler{DB: db, Forge: adapter, Brain: brain.NewShell(db, cfg.Brain, brain.SubprocessProvider{Executable: cfg.Brain.Executable, Args: cfg.Brain.Args}, now), ProjectID: p.ID, Project: ref, Repo: p.Repo, Defaults: cfg.GateDefaults, Certification: cfg.Certification, Attention: cfg.Attention, Channels: interruptChannels(cfg.Attention), Now: now})
 		}
 		d.Replies = append(d.Replies, &intake.ReplyConsumer{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now})
 	}
@@ -129,6 +129,14 @@ func (d *Daemon) AddChannelWorker(w *channelworker.Worker) {
 	if w != nil {
 		d.Channels = append(d.Channels, w)
 	}
+}
+
+func interruptChannels(attention config.Attention) []storage.InterruptChannel {
+	channels := make([]storage.InterruptChannel, 0, len(attention.Channels))
+	for _, c := range attention.Channels {
+		channels = append(channels, storage.InterruptChannel{ID: c.ID, Type: c.Type, TargetRef: c.TargetRef, Capabilities: append([]string(nil), c.Capabilities...), Default: c.Default})
+	}
+	return channels
 }
 
 func operators(o config.Operators, k forge.Kind) []string {

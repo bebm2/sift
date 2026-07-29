@@ -271,7 +271,15 @@ func (s *Server) operatorRequest(req Request) Response {
 		if !onlyKeys(req.Params) {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)
 		}
-		return success(req.RequestID, doctor(context.Background(), false, s.Home))
+		result := doctor(context.Background(), false, s.Home)
+		if s.db != nil {
+			projections, err := s.db.ChannelDiagnostics(context.Background())
+			if err != nil {
+				return failure(req.RequestID, "storage", "channel projections unavailable", true)
+			}
+			result["channel_deliveries"] = projections
+		}
+		return success(req.RequestID, result)
 	case "ops.kill", "ops.retry":
 		if !onlyKeys(req.Params, "run_id", "expected_version", "request_key") {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)

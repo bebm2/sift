@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -32,11 +33,11 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 		return false, err
 	}
 	defer tx.Rollback()
-	var status, state, held, nonce, reason, base, onExpire, onMax, channel, snapshot, zone, summary string
+	var status, state, held, nonce, reason, base, onExpire, onMax, channel, snapshot, zone, summary, delivery string
 	var version, expiresAt, expiresAfter, window int64
 	var escalation, max, total, perRun int
 	var downgraded bool
-	err = tx.QueryRowContext(ctx, `SELECT status,dispatch_state,COALESCE(held_reason,''),nonce,reason,base_severity,on_expire,on_max_escalations,COALESCE(channel_id,''),COALESCE(channel_snapshot_json,''),day_timezone,daily_summary_at,version,expires_at_ms,expires_after_ms,escalation_count,max_escalations,suggested_downgrade,critical_window_ms,critical_total_limit,critical_per_run_limit FROM interrupts WHERE id=?`, cmd.InterruptID).Scan(&status, &state, &held, &nonce, &reason, &base, &onExpire, &onMax, &channel, &snapshot, &zone, &summary, &version, &expiresAt, &expiresAfter, &escalation, &max, &downgraded, &window, &total, &perRun)
+	err = tx.QueryRowContext(ctx, `SELECT status,dispatch_state,COALESCE(held_reason,''),nonce,reason,base_severity,on_expire,on_max_escalations,COALESCE(channel_id,''),COALESCE(channel_snapshot_json,''),delivery,day_timezone,daily_summary_at,version,expires_at_ms,expires_after_ms,escalation_count,max_escalations,suggested_downgrade,critical_window_ms,critical_total_limit,critical_per_run_limit FROM interrupts WHERE id=?`, cmd.InterruptID).Scan(&status, &state, &held, &nonce, &reason, &base, &onExpire, &onMax, &channel, &snapshot, &delivery, &zone, &summary, &version, &expiresAt, &expiresAfter, &escalation, &max, &downgraded, &window, &total, &perRun)
 	if err == sql.ErrNoRows || status != "open" || version != cmd.ExpectedVersion || nonce != cmd.ExpectedNonce {
 		return false, ErrRejectedStale
 	}
@@ -47,7 +48,11 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 		if state != "ready" || expiresAt <= cmd.NowMS {
 			return false, ErrRejectedStale
 		}
-		if err := addDailyBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce, cmd.NowMS, channel, snapshot, zone, summary); err != nil {
+		if delivery == "immediate" {
+			if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce, escalation, "normal", cmd.NowMS); err != nil {
+				return false, err
+			}
+		} else if err := addDailyBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce, cmd.NowMS, channel, snapshot, zone, summary); err != nil {
 			return false, err
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='batched',next_dispatch_at_ms=NULL,version=version+1,updated_at_ms=? WHERE id=? AND status='open' AND dispatch_state='ready' AND version=? AND nonce=?`, cmd.NowMS, cmd.InterruptID, cmd.ExpectedVersion, cmd.ExpectedNonce)
@@ -105,11 +110,6 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 	if err != nil {
 		return false, err
 	}
-	if n, _ := res.RowsAffected(); n == 1 && delivery == "immediate" {
-		if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, newNonce, escalation+1, "strong", cmd.NowMS); err != nil {
-			return false, err
-		}
-	}
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.escalated")
 }
 
@@ -152,8 +152,8 @@ func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceI
 }
 
 func enqueueInterruptChannelTx(ctx context.Context, tx *sql.Tx, id string, version int64, nonce string, escalation int, priority string, now int64) error {
-	var channel, snapshot, headline, brief string
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(channel_id,''),COALESCE(channel_snapshot_json,''),headline,brief_markdown FROM interrupts WHERE id=?`, id).Scan(&channel, &snapshot, &headline, &brief); err != nil {
+	var channel, snapshot, headline, brief, forgeKind, forgeHost, forgeProject, targetKind, targetID string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(i.channel_id,''),COALESCE(i.channel_snapshot_json,''),i.headline,i.brief_markdown,r.forge_kind,r.forge_host,r.forge_project_key,CASE WHEN r.issue_id IS NOT NULL THEN 'issue' ELSE r.discussion_target_kind END,COALESCE(r.issue_id,r.discussion_target_id) FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, id).Scan(&channel, &snapshot, &headline, &brief, &forgeKind, &forgeHost, &forgeProject, &targetKind, &targetID); err != nil {
 		return err
 	}
 	if channel == "" || snapshot == "" {
@@ -169,7 +169,7 @@ func enqueueInterruptChannelTx(ctx context.Context, tx *sql.Tx, id string, versi
 	if err := insertOperation(ctx, tx, Operation{Key: key, Kind: OperationChannelPublish, Payload: payload, InterruptID: id}, "", "", now); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries(id,delivery_id,interrupt_id,surface,channel_id,channel_snapshot_json,interrupt_version,nonce,escalation_no,priority,operation_key,state,attempt_count,created_at_ms) VALUES(?,?,?,'channel',?,?,?,?,?,?,?,'pending',0,?)`, newID(), deliveryID, id, channel, snapshot, version, nonce, escalation, priority, key, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries(id,delivery_id,interrupt_id,surface,channel_id,channel_snapshot_json,interrupt_version,nonce,escalation_no,priority,operation_key,state,attempt_count,forge_kind,forge_host,forge_project_key,forge_alert_target_kind,forge_alert_target_id,created_at_ms) VALUES(?,?,?,'channel',?,?,?,?,?,?,?,'pending',0,?,?,?,?,?,?)`, newID(), deliveryID, id, channel, snapshot, version, nonce, escalation, priority, key, forgeKind, forgeHost, forgeProject, targetKind, targetID, now)
 	return err
 }
 
@@ -230,20 +230,39 @@ func addDailyBatchMemberTx(ctx context.Context, tx *sql.Tx, id string, version i
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM attention_admissions WHERE admission_key=?`, id+":initial").Scan(&admission); err != nil {
 		return err
 	}
-	return addBatchMemberTx(ctx, tx, "daily:"+channel+":"+fmt.Sprint(at), "daily_summary", id, version, nonce, admission, channel, snapshot, at, now)
+	return addBatchMemberTx(ctx, tx, "", "daily_summary", id, version, nonce, admission, channel, snapshot, at, now)
 }
 func addCriticalBatchMemberTx(ctx context.Context, tx *sql.Tx, id string, version int64, nonce, admission, channel, snapshot string, now int64) error {
 	if channel == "" || snapshot == "" {
 		return fmt.Errorf("%w: fused interrupt lacks channel snapshot", ErrInterruptRejected)
 	}
-	return addBatchMemberTx(ctx, tx, "critical:"+admission+":"+channel, "critical_fuse", id, version, nonce, admission, channel, snapshot, now, now)
+	return addBatchMemberTx(ctx, tx, "", "critical_fuse", id, version, nonce, admission, channel, snapshot, now, now)
 }
+func mustBatchZone(ctx context.Context, tx *sql.Tx, interruptID string) string {
+	var zone string
+	if err := tx.QueryRowContext(ctx, `SELECT day_timezone FROM interrupts WHERE id=?`, interruptID).Scan(&zone); err != nil || zone == "" {
+		return "UTC"
+	}
+	return zone
+}
+
 func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, version int64, nonce, admission, channel, snapshot string, due, now int64) error {
 	var project, forgeKind, host, forgeProject, targetKind, targetID, headline, reason, severity, links, opts string
 	if err := tx.QueryRowContext(ctx, `SELECT r.project_id,r.forge_kind,r.forge_host,r.forge_project_key,CASE WHEN r.issue_id IS NOT NULL THEN 'issue' ELSE r.discussion_target_kind END,COALESCE(r.issue_id,r.discussion_target_id),i.headline,i.reason,i.severity,i.links_json,i.options_json FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, id).Scan(&project, &forgeKind, &host, &forgeProject, &targetKind, &targetID, &headline, &reason, &severity, &links, &opts); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,operation_key,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,NULL,?)`, batch, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, now); err != nil {
+	enc := base64.RawURLEncoding.EncodeToString
+	if kind == "daily_summary" {
+		batch = fmt.Sprintf("daily:%s:%s:%d:%s:%s:%s:%s:%s:%s", project, mustBatchZone(ctx, tx, id), due, channel, forgeKind, enc([]byte(host)), enc([]byte(forgeProject)), targetKind, enc([]byte(targetID)))
+	} else {
+		batch = fmt.Sprintf("critical:global:global:%s:%s:%s:%s:%s:%s:%s", admission, channel, forgeKind, enc([]byte(host)), enc([]byte(forgeProject)), targetKind, enc([]byte(targetID)))
+	}
+	deliveryID := batch + ":publish:1"
+	scope, scopeID := "global", "global"
+	if kind == "daily_summary" {
+		scope, scopeID = "day", mustBatchZone(ctx, tx, id)+":"+fmt.Sprint(due)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,due_at_ms,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, kind, deliveryID, scope, scopeID, due, now, now); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batch_members(batch_id,interrupt_id,admission_id,member_key,channel_id,channel_snapshot_json,delivery_id,interrupt_version,nonce,headline,reason,severity,links_json,options_json,joined_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, id, admission, batch+":"+id, channel, snapshot, batch+":"+id, version, nonce, headline, reason, severity, links, opts, now)
@@ -292,5 +311,5 @@ func (d *DB) SupervisorInterruptTick(ctx context.Context, now int64) error {
 			return err
 		}
 	}
-	return nil
+	return d.PrepareDueAttentionBatches(ctx, now)
 }

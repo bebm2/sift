@@ -157,7 +157,18 @@ type RawAttentionReasonDefault struct {
 	OnMaxEscalations *string `json:"on_max_escalations,omitempty"`
 }
 
+type RawAttentionChannel struct {
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Target struct {
+		SecretRef string `json:"secret_ref"`
+	} `json:"target"`
+	Capabilities []string `json:"capabilities"`
+	Default      bool     `json:"default"`
+}
+
 type RawAttention struct {
+	Channels                 *[]RawAttentionChannel               `json:"channels,omitempty"`
 	DayTimezone              *string                              `json:"day_timezone,omitempty"`
 	DailyQuota               *RawDailyQuota                       `json:"daily_quota,omitempty"`
 	MaxEscalations           *int                                 `json:"max_escalations,omitempty"`

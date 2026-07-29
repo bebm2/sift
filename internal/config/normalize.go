@@ -581,6 +581,25 @@ func normalizeForge(raw *RawForge, cfg *Config) error {
 }
 
 func normalizeAttention(raw *RawAttention, cfg *Config) error {
+	if raw.Channels != nil {
+		seen := map[string]bool{}
+		defaults := 0
+		channels := make([]AttentionChannel, 0, len(*raw.Channels))
+		for _, c := range *raw.Channels {
+			if c.ID == "" || seen[c.ID] || c.Type != "webhook" || c.Target.SecretRef == "" || len(c.Capabilities) == 0 {
+				return configError("attention.channels", "channels must have unique id, webhook type, secret_ref and capabilities")
+			}
+			seen[c.ID] = true
+			if c.Default {
+				defaults++
+			}
+			channels = append(channels, AttentionChannel{ID: c.ID, Type: c.Type, TargetRef: "secret_ref:" + c.Target.SecretRef, Capabilities: append([]string(nil), c.Capabilities...), Default: c.Default})
+		}
+		if defaults > 1 {
+			return configError("attention.channels", "at most one default channel")
+		}
+		cfg.Attention.Channels = channels
+	}
 	if raw.DayTimezone != nil {
 		tz := *raw.DayTimezone
 		if tz != "local" {
