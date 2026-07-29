@@ -372,7 +372,7 @@ attention:
 | `America/New_York` / `02:30`，`2026-03-08T06:59:00Z` (`1772953140000`，本地 `01:59 EST`) | `quota_day=2026-03-08`, `due_at_ms=1772953200000`（gap 后本地 `03:00 EDT`） |
 | `America/New_York` / `01:30`，`2026-11-01T05:29:00Z` (`1793510940000`，本地第一次 `01:29 EDT`) | `quota_day=2026-11-01`, `due_at_ms=1793511000000`（fold 第一次本地 `01:30 EDT`） |
 
-入批恰在 `daily_summary_at` 的 instant（`1785286800000`）与其后一毫秒都取下一次 occurrence，不能立即补发。前一日摘要时刻后至次日摘要时刻前的两个 quota day 成员，只有冻结 Channel、project 与已验证 Forge discussion target 都相同才加入同一个 `daily:<project_id>:<zone>:<due_at_ms>:<channel_id>:<target_kind>:<base64url(target_id)>` batch；不同 Channel、项目或 target 必为不同 batch。运行期机器时区变化不影响已冻结 snapshot/hash 或历史回放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3、§6.6](storage.md) 与 [`outbox.md` §10](outbox.md)；并发、拒绝混批与响应丢失重放统一复用 storage §6.6 的 exact bytes fixture。
+入批恰在 `daily_summary_at` 的 instant（`1785286800000`）与其后一毫秒都取下一次 occurrence，不能立即补发。前一日摘要时刻后至次日摘要时刻前的两个 quota day 成员，只有冻结 Channel、project 与完整已验证 Forge discussion target 都相同才加入同一个 `daily:<project_id>:<zone>:<due_at_ms>:<channel_id>:<forge_kind>:<base64url(forge_host)>:<base64url(forge_project_key)>:<target_kind>:<base64url(target_id)>` batch；不同 Channel、项目或任一 target 字段必为不同 batch。运行期机器时区变化不影响已冻结 snapshot/hash 或历史回放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3、§6.6](storage.md) 与 [`outbox.md` §10](outbox.md)；并发、拒绝混批与响应丢失重放统一复用 storage §6.6 的 exact bytes fixture。
 
 #### `attention.reason_defaults`
 

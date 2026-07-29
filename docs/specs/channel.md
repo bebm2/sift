@@ -37,7 +37,7 @@ operation key: interrupt:<interrupt_id>:publish:<escalation_no>
 
 单条 payload 来自创建或 `AdvanceInterrupt` 冻结的 snapshot；batch payload 来自 `PrepareAttentionBatch` 的 sealed payload。adapter 不读取当前 Run、Forge、配置、nonce 或 registry 来刷新它。batch renderer 逐成员展示 stable ID、headline、links、options 与该 nonce 下完整命令；没有 batch 级 Command。
 
-V0 选择**单一冻结 batch 运维目标**策略。跨项目 batch 禁止：batch identity 纳入 `project_id`，成员还必须具有逐字节相同的已验证 Forge discussion target（`forge_kind`、`forge_host`、`forge_project_key`、`target_kind`、`target_id`）。该 target 在建 batch 时冻结到 `attention_batches` 和 sealed payload；不满足绑定的 candidate 不得进入该 batch，保持其既有 held/单条处理路径，worker 绝不猜测“第一成员”。故一个 batch delivery 只有一个 Forge 告警目标。
+V0 选择**单一冻结 batch 运维目标**策略。跨项目 batch 禁止：batch identity 纳入 `project_id`，并按 [`storage.md` §6.3](storage.md#63-attention_admissionsattention_batches-与成员) 将 `forge_kind`、`forge_host`、`forge_project_key`、`target_kind`、`target_id` 各自编码进稳定 key；成员还必须具有逐字节相同的已验证 Forge discussion target（这五个字段）。因此同 project/kind/id 而 host 或 project key 不同的并发入批不会碰撞，也不得依赖并发先后作决定。该 target 在建 batch 时冻结到 `attention_batches` 和 sealed payload；不满足绑定的 candidate 不得进入该 batch，保持其既有 held/单条处理路径，worker 绝不猜测“第一成员”。故一个 batch delivery 只有一个 Forge 告警目标。
 
 `PrepareAttentionBatch` 是唯一 sealing 入口。worker 不得改 sealed payload、排除/增加成员、改变 batch identity 或再次 admission；也不扣配额、创建/关闭/升级 Interrupt。这些动作只经 [`interrupt.md`](interrupt.md) 与 [`storage.md`](storage.md) 的既有写端口。Forge 首发、Channel delivery、batch sealing 和失败告警是同一领域事实的不同 outbox 副作用；Channel 成功不能替代 Forge comment，反之亦然。
 
@@ -45,16 +45,16 @@ V0 选择**单一冻结 batch 运维目标**策略。跨项目 batch 禁止：ba
 
 worker 遵守 [`outbox.md` §1、§4、§10](outbox.md)：同领域事务先提交 operation，随后 claim/lease 和 immutable result；payload 不可改，过期 worker completion 拒绝。transient/rate-limited 按 config 的 outbox retry 和 Retry-After 继续原 operation；auth/capability 和 contract/semantic conflict 按 outbox 收敛，不能切换未冻结 target。`max_attempts>0` 达限即 `failed`，不再声称“继续重试”。
 
-每个 immutable Channel operation 只有一个 durable failure episode，`generation=1`：单条的 `subject_id` 是其 `interrupt_deliveries.delivery_id`，batch 的 `subject_id` 是其 `batch_deliveries.delivery_id`。`CompleteOutboxAttempt` 是唯一更新者，并在同一事务写 delivery、episode 和可能的 alert operation：
+每个 immutable Channel operation 只有一个 durable failure episode，`generation=1`：单条的 `subject_id` 是其 `interrupt_deliveries.delivery_id`，batch 的 `subject_id` 是其 `batch_deliveries.delivery_id`。`CompleteOutboxAttempt` 与 `ClaimOutboxOperation` reclaim 分支是唯一写端口；二者都必须在各自的 owner/lease CAS 同一事务写 delivery、episode 和可能的 alert operation。reclaim 先为旧 attempt 写入 immutable `lease_expired` result，并在同一事务把该 result 计入 episode；不得由 worker 另起事务补写。
 
-- `transient`、`rate_limited` 及 reclaim 写入的 `lease_expired` result 使 `consecutive_failures` 加一；
+- `transient`、`rate_limited` 及 reclaim 写入的 `lease_expired` result 使 `consecutive_failures` 加一；reclaim 的计数、阈值 alert 与新 attempt lease 必须同一 CAS 提交；
 - `auth_or_capability`、`contract_violation`、`semantic_conflict` 或 `max_attempts` 达限的失败 result 同样计入一次并终结为 `ended_failed`；
 - success 将计数清零并终结为 `ended_delivered`；已终结 episode 不会因旧 worker 或 alert completion 重开；
 - 从 0 到达 `attention.channel_failure_alert_after` 的事务创建且只创建一次 `forge_alert`，key 为 `alert:channel_failure:<subject_id>:1`。单条 alert 用该 Run 已冻结的 verified discussion target；batch alert 用 §3 冻结的 batch target。alert 自身失败绝不递归创建 alert。
 
-lease CAS 保证同一 operation completion 串行；重启从 `channel_failure_episodes` 恢复，不能由内存或 attempt 文本重算。threshold 前后、并发 completion、重启、alert 失败和 max-attempt terminal 的 exact vectors 及投影在 [`storage.md` §6.6](storage.md) 与 [`outbox.md` §10](outbox.md)。
+lease CAS 保证同一 operation completion/reclaim 串行；重启从 `channel_failure_episodes` 恢复，不能由内存或 attempt 文本重算。threshold 前后、lease expiry/reclaim、重启、并发 stale completion、alert 失败和 max-attempt terminal 的 exact vectors 及投影在 [`storage.md` §6.6](storage.md) 与 [`outbox.md` §10](outbox.md)。
 
-告警评论至少含 Channel operation key、episode/generation、连续失败数、最近安全错误分类、“已生成但未确认送达”或 terminal 状态，以及 `sift ps`/`sift doctor` 标记。凭据、原始 stderr、endpoint 与 query secret 按 outbox 错误摘要规则剥离。
+告警评论至少含 Channel operation key、episode/generation、连续失败数、最近安全错误分类、“已生成但未确认送达”或 terminal 状态，以及 `sift ps`/`sift doctor` 标记；其 closed `forge_alert` body 与 [`outbox.md` §5.1](outbox.md#51-payload) 共用必填 `markdown`，并由持久化 operation/episode 安全字段确定性渲染，canonical exact payload/digest 见 [`storage.md` §6.6](storage.md#66-channel-batch-and-failure-episode-exact-vectors)。凭据、原始 stderr、endpoint 与 query secret 按 outbox 错误摘要规则剥离。
 
 ## 5. 升级、可见性与非目标
 
