@@ -248,6 +248,36 @@ brain:
 
 语义错误不受 `max_attempts` 影响，直接收敛为 terminal/stale/conflict；瞬时错误才退避。
 
+### 3.7.1 `attention.channels[]`
+
+Channel 是附加投递面；forge comment 首发不属于此 registry。有效 config snapshot 中每个 Channel 由下列 closed object 冻结：
+
+```yaml
+attention:
+  channels:
+    - id: ops-slack
+      type: webhook
+      enabled: true
+      target: {secret_ref: SIFT_CHANNEL_OPS_SLACK}
+      capabilities: [text]
+      renderer: plain-v1
+      default: true
+```
+
+| 字段 | 类型/约束 |
+|------|-----------|
+| `id` | string；`^[a-z][a-z0-9-]{0,62}$`，全局唯一 |
+| `type` | `webhook`；新增类型必须版本化并注册适配器 |
+| `enabled` | boolean；false 的 Channel 不进入候选 |
+| `target` | closed object；V0 仅 `{secret_ref: string}`，值为环境/密钥存储引用；不得写 URL、token 或凭据明文 |
+| `capabilities` | closed set；V0 允许 `voice`、`text`、`visual`，至少一项，排序去重 |
+| `renderer` | `plain-v1`；只接受由服务端确定性 renderer 生成的 Interrupt/batch 文本 |
+| `default` | boolean；启用 Channel 中最多一个为 true；未声明时按 `id` UTF-8 bytes 最小者作为默认 |
+
+Channel 的 `target` 只在启动探测时解析并验证；凭据引用本身进入 canonical snapshot，解析值不进入 config JSON、日志、Brain 输入或 outbox payload。候选算法为：从**创建 Run 冻结的 config snapshot** 取 `enabled=true`、capability 包含 `min_modality` 且项目未隔离的 Channel，按 `id` UTF-8 bytes 排序；default 必须属于该集合，否则选择排序后的第一项。零候选不调用 T6，Interrupt 仍完成 forge 首发，并以 `held_reason=no_compatible_channel|channel_isolated` 保存。
+
+每条单 delivery 和每个 attention batch 都冻结 `channel_id/type/target_ref/capabilities/renderer` snapshot；outbox 只携带该非秘密 snapshot 和解析后的 target reference，不从当前配置重建，不携带凭据明文。运行期 Channel isolation 只影响新的 delivery，既有 Interrupt 的冻结选择不漂移；失败按 outbox 的唯一告警和重试规则处理。
+
 ### 3.8 `forge`
 
 | 字段 | 默认 | 约束/语义 |
@@ -305,6 +335,7 @@ attention:
       on_expire: escalate
       on_max_escalations: hold
   daily_summary_at: "09:00"
+  channels: []
 ```
 
 | 字段 | 默认 | 约束 |
@@ -318,6 +349,7 @@ attention:
 | `critical_fuse.total_limit` | `5` | `1..1000`；窗口内全局 critical 上限 |
 | `critical_fuse.per_run_limit` | `2` | `1..total_limit`；同窗口同一 Run 的 critical 上限 |
 | `daily_summary_at` | `09:00` | `HH:MM`；按 `day_timezone` 解释，而非 daemon 所在机器的时区 |
+| `channels` | `[]` | closed Channel objects，字段契约见 §3.7.1 |
 | `hold_max_duration` | `720h`（30 天） | `1m..8760h` |
 | `channel_failure_alert_after` | `3` | `1..100`；连续失败后改走 forge 告警评论 |
 

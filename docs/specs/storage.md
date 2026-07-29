@@ -359,8 +359,17 @@ PRAGMA wal_autocheckpoint = 1000;
 | `version` | INTEGER | NOT NULL，初值 1；nonce/超时更新时 +1 |
 | `status` | TEXT | `open \| closed` |
 | `dispatch_state` | TEXT | `ready \| batched \| held \| probe_in_progress` |
-| `expires_at_ms` | INTEGER | NOT NULL |
+| `expires_at_ms` | INTEGER | NOT NULL；自动 hold 后保留历史值，但 held 对象失去 expiry 扫描资格 |
+| `expires_after_ms` | INTEGER | NOT NULL；创建时冻结 |
 | `on_expire` | TEXT | `hold \| escalate \| auto_reject` |
+| `on_max_escalations` | TEXT | `hold \| auto_reject`；创建时冻结 |
+| `suggested_downgrade` | INTEGER | NOT NULL boolean；升级复用，不重读 T6/config |
+| `channel_id` | TEXT | NULL；最终 Channel ID |
+| `channel_snapshot_json` | TEXT | NULL；含 type/target_ref/capabilities/renderer，不含凭据 |
+| `delivery` | TEXT | `immediate \| batch \| next_window \| held` |
+| `next_dispatch_at_ms` | INTEGER | NULL；held 时必须为 NULL |
+| `held_reason` | TEXT | NULL 或 `manual \| no_compatible_channel \| channel_isolated \| batch_after_expiry \| quota_rejected \| critical_fuse \| expiry \| max_escalations` |
+| `hold_max_duration_ms` | INTEGER | NOT NULL；创建时冻结 |
 | `escalation_count` | INTEGER | NOT NULL，默认 0 |
 | `max_escalations` | INTEGER | NOT NULL；创建时冻结配置 |
 | `close_reason` | TEXT | NULL 或 `responded \| expired_auto_reject \| superseded_by_fact \| superseded_by_decision \| external_fact` |
@@ -369,6 +378,8 @@ PRAGMA wal_autocheckpoint = 1000;
 | `calibration_id` | TEXT | NULL UNIQUE FK calibration_entries；仅 Gate HITL 创建时不可变绑定 |
 | `created_at_ms` | INTEGER | NOT NULL |
 | `updated_at_ms` | INTEGER | NOT NULL |
+
+创建、hold、expiry 与 escalation 均通过 `AdvanceInterrupt` 的 expected `version`/`nonce` CAS：创建冻结 expiry/on-max/hold/channel/delivery 快照；manual hold 只按 Command 规则重算 `expires_at_ms`，自动 hold 将 `dispatch_state=held`、`held_reason` 写入并令 `next_dispatch_at_ms=NULL`，扫描谓词为 `status=open AND dispatch_state NOT IN (held,probe_in_progress) AND expires_at_ms <= now`。每次升级原子地递增 `escalation_count`/`version`、轮换 nonce、写入 `nonce_issued_at_ms`、重算 expires/dispatch；`max_escalations=0` 直接走冻结的 on-max 去向。旧 tick、重启快照和重复请求的 CAS 失败不得产生任何 admission、delivery 或 outbox。
 
 约束：
 
@@ -398,6 +409,11 @@ PRAGMA wal_autocheckpoint = 1000;
 | `id` | TEXT | PK |
 | `interrupt_id` | TEXT | NOT NULL FK interrupts |
 | `surface` | TEXT | `forge_comment \| channel` |
+| `channel_id` | TEXT | NULL；`channel` surface 必填 |
+| `channel_snapshot_json` | TEXT | NULL；`channel` surface 必填，不得含凭据明文 |
+| `interrupt_version` | INTEGER | NOT NULL；创建时冻结 |
+| `nonce` | TEXT | NOT NULL；创建时冻结 |
+| `escalation_no` | INTEGER | NOT NULL；创建时冻结 |
 | `priority` | TEXT | `normal \| strong` |
 | `operation_key` | TEXT | NOT NULL UNIQUE |
 | `state` | TEXT | `pending \| delivered \| failed` |
@@ -427,9 +443,9 @@ PRAGMA wal_autocheckpoint = 1000;
 | `critical_source` | TEXT | NULL 或 `initial \| escalation` |
 | `created_at_ms` | INTEGER | NOT NULL |
 
-每个 Interrupt 最多一行初发 `quota_charged|quota_batched`，或一行初发 `critical_admitted|critical_fused`；首次由 high/normal 等升级至 critical 时，至多额外一行 `critical_admitted|critical_fused`，且 `critical_source=escalation`。`critical_admitted|critical_fused` 的 `critical_source` 必填，其他 kind 为 NULL。`quota_charged` 必须引用该 Interrupt 的实际 `charged_budget_entry_id`。`critical_admitted|critical_fused` 在初发有 charge 时引用该 charge，升级 admission 复用它；若初发为 `quota_batched`，两种 critical admission 的 `attention_charge_entry_id` 均为 NULL，且不得补造 charge。`quota_batched` 的两列均为 NULL。两个 partial unique index `UNIQUE(interrupt_id) WHERE kind IN (quota_charged,quota_batched)` 与 `UNIQUE(interrupt_id) WHERE kind IN (critical_admitted,critical_fused)` 保证每 Interrupt 最多一次 initial decision 与最多一次 critical transition；INSERT 后禁止 UPDATE/DELETE。
+每个 Interrupt 最多一行初发 `quota_charged|quota_batched`，或一行初发 `critical_admitted|critical_fused`；首次由 high/normal 等升级至 critical 时，至多额外一行 `critical_admitted|critical_fused`，且 `critical_source=escalation`。`critical_admitted|critical_fused` 的 `critical_source` 必填，其他 kind 为 NULL。`quota_charged` 必须引用该 Interrupt 的实际 `charged_budget_entry_id`。`critical_admitted|critical_fused` 在初发有 charge 时引用该 charge，升级 admission 复用它；若初发为 `quota_batched`，两种 critical admission 的 `attention_charge_entry_id` 均为 NULL，且不得补造 charge。`quota_batched` 的两列均为 NULL。唯一 admission key 为 `<interrupt_id>:initial` 或 `<interrupt_id>:critical`，因此重复 tick、窗口边界重放只返回既有事实。两个 partial unique index `UNIQUE(interrupt_id) WHERE kind IN (quota_charged,quota_batched)` 与 `UNIQUE(interrupt_id) WHERE kind IN (critical_admitted,critical_fused)` 保证每 Interrupt 最多一次 initial decision 与最多一次 critical transition；INSERT 后禁止 UPDATE/DELETE。
 
-`attention_batches` 是 versioned、可恢复的摘要对象，不把摘要伪造成 Interrupt/reason。`id` 是由其稳定 identity 生成的 batch ID，`operation_key` 由该 ID 固定导出；均不得使用当前时间、worker 或可变文本。
+`attention_batches` 是 versioned、可恢复的摘要对象，不把摘要伪造成 Interrupt/reason。它是 Channel identity 的唯一 batch authority；interrupt.md 不得定义 parallel batch tables, states, keys or prepare ports。`id` 是由其稳定 identity 生成的 batch ID，`operation_key` 由该 ID 固定导出；均不得使用当前时间、worker 或可变文本。
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|

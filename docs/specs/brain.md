@@ -433,7 +433,7 @@ T4 在已有的、确定性生成的 Interrupt 候选上调用；它不判断是
 | `links` | array | 0..32 个 closed `{label,target}`，按 `(target,label)` UTF-8 bytes 排序去重；只含发射器已验证链接 |
 | `candidate_options` | array | 1..4 个 closed `{id,label,effect,risk}`；顺序和内容逐字段等于 [`interrupt.md` §3.1](interrupt.md) 对该 reason 的确定性候选集 |
 
-`links[]` 的 `label` 是 1..128 bytes string，`target` 是 1..4096 bytes string，并且必须逐字段等于发射器已验证的 HTTPS Forge URL 或绝对本地路径。`candidate_options[]` 的 `id` 是 1..64 bytes、匹配 `[a-z][a-z0-9_-]*` 的 ASCII string；`label` 为 1..256 bytes，`effect`/`risk` 各为 1..1000 bytes，三者均不得含 CR、LF 或 Unicode `Cc`。这些 bounds 只让 schema 可生成；领域层仍要求整个 option 与对应 reason 的 canonical literal 逐字节相等。
+`links[]` 的 `label` 是 1..128 bytes string，`target` 是 1..4096 bytes string，并且必须逐字段等于发射器已验证的 HTTPS Forge URL、绝对本地路径，或服务端生成的 `sift://event/<32 lowercase hex>` 安全事件引用；后者只允许 `failure_evidence_ref`。`candidate_options[]` 的 `id` 是 1..64 bytes、匹配 `[a-z][a-z0-9_-]*` 的 ASCII string；`label` 为 1..256 bytes，`effect`/`risk` 各为 1..1000 bytes，三者均不得含 CR、LF 或 Unicode `Cc`。这些 bounds 只让 schema 可生成；领域层仍要求整个 option 与对应 reason 的 canonical literal 逐字节相等。
 
 所有 fallback brief、链接 label/target 与 option 文案都是 untrusted display data；T4 不跟随链接。输入先由发射器作领域校验；确定性骨架非法是调用方 contract violation，不 reserve Brain call，也不能让 T4 修复。合法输入的整份 canonical JSON 超过 `brain.max_input_bytes` 时不调用 provider，按 §11.3 兜底。
 
