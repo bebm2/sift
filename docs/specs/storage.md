@@ -393,7 +393,7 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 - 初始 nonce 的 `nonce_issued_at_ms` 等于 `created_at_ms`；每次 nonce 轮换必须同一 CAS 更新 `nonce_issued_at_ms` 并递增 version。非 nonce 更新不得改写该时间。
 - `dispatch_state=held` 当且仅当 `held_reason` 非空且 `next_dispatch_at_ms` 为 NULL；`ready` 当且仅当 `held_reason` 为 NULL 且 `next_dispatch_at_ms` 非空；`batched|probe_in_progress` 时两者均为 NULL。`expires_after_ms`、`hold_max_duration_ms` 和非 NULL `next_dispatch_at_ms` 都是正整数毫秒。
 - `probe_in_progress` 时拒绝新指令，但合法迟到事实仍可经仲裁入口提交。
-- 创建或轮换 nonce 时，`approval_label_cutoff_position` 必须先 CAS 置 NULL 并递增 version；Forge 在事务外穷举目标的 label stream 后，`SetApprovalLabelCutoff(interrupt_id,expected_version,nonce,position)` 以第二笔 CAS 写入最高证明位置。空 stream 写入 sentinel `0`；没有证明位置能力或扫描未穷尽时保持 NULL，Command 对 label approval fail closed。
+- `EmitInterrupt`（创建）以及 `AdvanceInterrupt` / `ApplyCommandEvent`（轮换）是 nonce/cutoff 的唯一初始写者：它们在同一 expected-version/nonce CAS 中把 `approval_label_cutoff_position` 置 NULL、递增 version 并写新 nonce。随后 Forge 在事务外穷举目标的 label stream，唯一后继写者 `SetApprovalLabelCutoff(interrupt_id, expected_version, nonce, position)` 仅在该 Interrupt 仍 open、version 和 nonce 都匹配、cutoff 仍为 NULL 时以 CAS 写入最高证明位置；它不得写任何其他列。空 stream 写 sentinel `0`；无 position capability、未穷尽扫描、CAS=0、nonce/version 不符、Interrupt 已关闭或 cutoff 已非 NULL 均返回 persisted `unavailable|stale|already_cut_over`，不重扫、不轮换、不覆盖。扫描前崩溃只留下 NULL；扫描后、cutover 前崩溃重放同一 `(version,nonce,position)`，至多一次成功；cutover 后崩溃读取既有位置。所有 NULL 情况均令 Command label approval fail closed。
 
 `close_reason` 只说明该 Interrupt 为何不再待决，不替代 attempt resolution 或 RPC disposition：
 
@@ -477,11 +477,16 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 
 `interrupt_command_targets` 是每个 Interrupt 恰好一行的不可变目标绑定：`interrupt_id` PK/FK interrupts、`publish_operation_id` NOT NULL UNIQUE FK outbox_operations（必须是初始 forge_comment operation）、`target_kind` NOT NULL (`issue|change`)、`target_id` NOT NULL、`created_at_ms` NOT NULL。目标必须与同一发布 operation 的 payload 逐字节相等。
 
-`interrupt_command_effect_bindings` 是 reason owner 在 EmitInterrupt 五件事事务中创建的不可变一对一 binding：`interrupt_id` PK/FK、`reason`、`binding_schema_version=1`、`binding_json`、`binding_digest` UNIQUE、`created_at_ms`。`binding_json` 只允许这些 closed arms：`design_approval(task_spec_snapshot_id,run_id)`、`guardrail_violation(run_id,head_sha,rule_id,matched_paths_digest)`、`code_review(change_id,head_sha,review_policy_snapshot_digest)`、`agent_blocked(run_id,attempt_no,generation)`、`merge_conflict(change_id,head_sha,conflict_digest)`、`failure_review(run_id,attempt_no,generation,retry_kind=gate_recheck|new_attempt)`、`startup_stall(run_id,attempt_no,generation)`。每个 arm 的 FK/组合 FK、reason 一致性和禁止未知字段由写端口及 CHECK 共同保证；缺失、跨 reason 或重复 binding 回滚。
+`interrupt_command_effect_bindings` 是 reason owner 在 EmitInterrupt 五件事事务中创建的不可变一对一 binding：`interrupt_id` PK/FK、`reason`、`binding_schema_version=1`、`binding_json`、`binding_digest` UNIQUE、`created_at_ms`。`binding_json` 只允许这些 closed arms：`design_approval(task_spec_snapshot_id,run_id)`、`guardrail_violation(run_id,head_sha,rule_id,matched_paths_digest)`、`code_review(change_id,head_sha,review_policy_snapshot_digest)`、`agent_blocked(run_id,attempt_no,generation)`、`merge_conflict(change_id,head_sha,conflict_digest)`、`startup_stall(run_id,attempt_no,generation)`，以及以下穷尽的 `failure_review` tagged variants：
+
+- `failure_review_attempt(run_id,attempt_no,generation,retry_kind,gate_recheck{change_id,head_sha}|new_attempt{terminal_attempt_no,terminal_generation})`：`attempt_no`/`generation` 非 NULL，且 `(run_id,attempt_no,generation)` 必须组合 FK 到该 Interrupt 的 attempt；`gate_recheck` 只允许 `retry_kind=gate_recheck`，`change_id/head_sha` 非 NULL，且该 Change/head 属于同一 Run；`new_attempt` 只允许 `retry_kind=new_attempt`，其 terminal pair 必须等于该 binding 的 attempt/generation 并组合 FK 到一个 failed attempt。
+- `failure_review_report_quota(run_id,attempt_no=null,quota_exhaustion_id,retry_kind,gate_recheck{change_id,head_sha}|new_attempt{terminal_attempt_no,terminal_generation})`：`quota_exhaustion_id` 非 NULL FK `report_quota_exhaustions`（且同 Run），`attempt_no` 必为 NULL；`gate_recheck` 的非 NULL Change/head 和 `new_attempt` 的非 NULL terminal pair 分别服从上一 arm 的同 Run FK/组合 FK。故它不从“当前 attempt”猜测；它携带可直接创建 `gate:<interrupt_id>:<head_sha>:reeval:1` 的 operation identity，或可直接 terminalize 后创建下一 attempt 的 recipe。
+
+两 arm 的 `retry_kind` 只能为 `gate_recheck|new_attempt`，tag、required/null 字段、`options_json` 中是否存在 `retry` 与 `retry_kind` 的可用 arm 由同一 CHECK 交叉验证；未知字段、跨 reason、无 retry 却有 retry arm、重复 binding 均回滚。每个 arm 的其他 FK/组合 FK、reason 一致性和 canonical JSON/digest 由写端口及 CHECK 共同保证。
 
 `command_effects` 是 `ApplyCommandEvent` 创建的不可变事实表：`id` PK、`interrupt_id` FK、`event_id` FK events、`effect_kind` (`one_time_exemption|human_review_approval`)、`run_id` FK、`change_id`、`head_sha`、`rule_id`、`matched_paths_digest`、`review_policy_snapshot_digest`、`created_at_ms`。CHECK 要求 exemption 恰有 run/head/rule/path digest，review approval 恰有 run/change/head/review-policy digest；各自 binding identity 唯一。Gate 下一份 snapshot 消费 effect，不修改历史 Gate 输入。
 
-`command_event_outcomes` 解决 retry 的 initial/final 归属，是唯一允许 CAS 补全结局的可变投影：`id` PK、`event_key` UNIQUE、`initial_event_id` UNIQUE FK events、`final_event_id` NULL UNIQUE FK events、`state=pending|final`、`created_at_ms`、`finalized_at_ms` NULL。初始 retry 插入 pending，最终事务以 CAS 补一次 final event/state/time；非 retry 在同一事务插入 initial=final 的 final 状态。receipt 只链接 initial 也能唯一解析最终事件；任何同 key 异 digest 均为 contract violation。
+`command_event_outcomes` 解决 retry 的 initial/final 归属，是唯一允许 CAS 补全结局的可变投影：`id` PK、`event_key` UNIQUE、`initial_event_id` UNIQUE FK events、`final_event_id` NULL UNIQUE FK events、`state=pending|final`、`created_at_ms`、`finalized_at_ms` NULL。初始 retry 只可插入 `(state=pending,final_event_id=NULL,finalized_at_ms=NULL)`；唯一 finalizer 在同一事务插入 §6.1 指定的 final event（其 `final_for_event_id=initial_event_id`），再以 `WHERE state='pending' AND final_event_id IS NULL AND finalized_at_ms IS NULL` CAS 一次写入该 ID、`state=final` 和非 NULL finalization time。trigger 拒绝 INSERT final retry relation、pending 的 UPDATE 以外的任何 UPDATE、final 的任何 UPDATE、以及 final event/key/type 与 initial event key 不匹配。非 retry 只可同事务插入 `initial_event_id=final_event_id,state=final`。receipt 只链接 initial 也能唯一解析最终事件；任何同 key 异 digest 均为 contract violation。
 
 ### 6.5 Batch delivery 投影
 
@@ -656,7 +661,7 @@ M1 冻结上述表与约束，并仅实现 fake 骨架链所需的 Forge Run/rec
 | `updated_at_ms` | INTEGER | NOT NULL |
 | `completed_at_ms` | INTEGER | NULL |
 
-`executing` 必须同时有 lease owner/expiry；其他 state 不得保留有效 lease。terminal state 为 succeeded/failed/stale/conflict。payload 一经创建不可改；重试只更新执行字段。`gate_re_evaluation` 的 `operation_key` 是 `gate:<interrupt_id>:<head_sha-or-none>:reeval:1`，同 Interrupt/head 只允许一条；`created_from_event_id` 必须指向创建该 operation 的 final command event。claim/replay 由同一 key 返回既有 operation，终态为 `succeeded|failed|conflict`；失败必须产生确定性的后续 Gate/Interrupt 结局，不能留下无界 `waiting_human`。`rerun_checks` 的 claim/reclaim、request-start 与 complete 另按 §8.5 执行，不得套用通用 lease-expiry 重试。
+`executing` 必须同时有 lease owner/expiry；其他 state 不得保留有效 lease。terminal state 为 succeeded/failed/stale/conflict。payload 一经创建不可改；重试只更新执行字段。`gate_re_evaluation` 的 `operation_key` 是 `gate:<interrupt_id>:<head_sha-or-none>:reeval:1`，同 Interrupt/head 只允许一条；`created_from_event_id` 必须指向创建该 operation 的 final command event。claim/replay 由同一 key 返回既有 operation。`CompleteOutboxAttempt` is its only terminal owner: `succeeded` atomically records the frozen Gate evaluation and its verdict successor; `failed` atomically creates/deduplicates a new open `failure_review` Interrupt with `failure_review_attempt(...,gate_recheck{same change_id,head_sha})`, records the failure event, and leaves the Run waiting behind that new Interrupt; `conflict` atomically records the conflict event and creates/deduplicates exactly one successor `gate:<interrupt_id>:<replacement_head_sha>:reeval:1` from the worker's verified replacement-head payload. A conflict without a verified replacement head is instead the same failed/failure-review branch. Thus every closed source Interrupt has either a completed Gate result, one open failure-review Interrupt, or one identified pending successor; it can never leave unbounded `waiting_human`. The result insertion, operation CAS, Run/Interrupt transition and stated successor are one transaction, so replay/lease-loss returns the existing terminal result and successor. `rerun_checks` 的 claim/reclaim、request-start 与 complete 另按 §8.5 执行，不得套用通用 lease-expiry 重试。
 
 ### 8.2 `check_rerun_consumptions`（不可变）
 
@@ -1034,6 +1039,7 @@ Gate record 来自同一 snapshot/evaluation；Brain record 一条 logical recor
 | `StartOrAdvanceProbe` | attempt probe + 受控终止观测事件 |
 | `EmitInterrupt` | Run transition + Interrupt + initial attention admission/budget/critical fuse + event + publish outbox |
 | `AdvanceInterrupt` | Supervisor 的 hold/escalate/auto_reject，及升级首次 critical admission/fuse：Interrupt CAS + 可选 Run transition/batch/outbox/event |
+| `SetApprovalLabelCutoff(interruptID, expectedVersion, nonce, position)` | 唯一 label-cutoff 后继写端口：只以 §6.1 的 NULL/version/nonce CAS 写 `approval_label_cutoff_position`；返回 `cut_over|unavailable|stale|already_cut_over`，不写其他列 |
 | `PrepareAttentionBatch` | due batch 的成员 open-CAS、payload sealing、唯一 Channel operation 与事件；不做外部 IO |
 | `ApplyCommandEvent(envelope, parsedAction?)` | Command 唯一 public command port：receipt/canonical identity、initial/final event、private Ledger decision/effect、Run/Interrupt CAS、probe request and outbox/ack in one transaction; it may call only private `resolveAttemptRaceTx` and `recordHumanDecisionTx` |
 | `ApplyRetryProbeResult` | startup_stall probe finalizer唯一 public result port；内部调用 private `resolveAttemptRaceTx`，不得先关闭 Interrupt |
@@ -1079,13 +1085,17 @@ CAS 失败整笔回滚并返回 `RejectedStale`；非法状态组合在开事务
 5. 子配额已满时，不写 receipt/event/Report charge；以 `(run_id,daily_bucket_start_ms)` INSERT `report_quota_exhaustions` 与安全 event。INSERT 冲突只复用既有 exhaustion；首次记录按 `interrupt.md §5.1` 固定 facts 至多创建一个 `failure_review`，其 command binding 必须声明合法 `retry_kind`。
 6. `EmitInterrupt` 结构拒绝或任意内部错误回滚 rate CAS、receipt、charge、Interrupt、admission、outbox 和 exhaustion；仅在领域回滚后另行提交确定性拒绝诊断。事务提交后才返回 RPC success。
 
+### 12.2.2 Approval-label cutover
+
+`EmitInterrupt`、`AdvanceInterrupt` 或 `ApplyCommandEvent` 先在各自 nonce CAS 中置 cutoff 为 NULL 并提交；不得持事务扫描 Forge。Forge 扫描完成后，`SetApprovalLabelCutoff` 在单一事务中读取 Interrupt，验证 open、`version=expectedVersion`、nonce 相等、cutoff=NULL 与 position（`0` sentinel 或正 canonical decimal），再只更新 cutoff。CAS=0 时按 §6.1 返回既有状态；调用者只能重读/重放，绝不以旧扫描写新 nonce。故创建、轮换、全量扫描和迟到旧扫描的调用图唯一为 `EmitInterrupt|AdvanceInterrupt|ApplyCommandEvent → Forge scan → SetApprovalLabelCutoff`，且旧扫描只能得到 stale。
+
 ### 12.3 Intake batch
 
 同一事务写完本批 forge receipts、`pending_evaluation` intake 投影、Run/外部事实投影与事件后，最后更新 `forge_cursors`。任一对象失败则整批游标不前进；下次重读靠 receipt 唯一键去重，不重复创建 intake 投影、Run 或事件。
 
 ### 12.4 Outbox claim
 
-CAS 认领到期的 pending/retryable，或接管 lease 已过期的 executing operation；通用 reclaim 先关闭旧 attempt result，再写新 lease owner/expiry、attempt_count+1并新增 outbox_attempt。`rerun_checks` 必须改按 §8.5 查询旧 attempt 的 durable request-start：已开始则 conflict + failure_review，无该事实才可重试。外部动作在提交后执行。执行结果再以 operation id + lease owner CAS 收敛；过期 worker 不得覆盖新 owner 结果。
+CAS 认领到期的 pending/retryable，或接管 lease 已过期的 executing operation；通用 reclaim 先关闭旧 attempt result，再写新 lease owner/expiry、attempt_count+1并新增 outbox_attempt。`rerun_checks` 必须改按 §8.5 查询旧 attempt 的 durable request-start：已开始则 conflict + failure_review，无该事实才可重试。`gate_re_evaluation` 以 §8.1 的 succeeded/failed/conflict closed successor matrix 完成；其 worker 在事务外验证 replacement head，`CompleteOutboxAttempt` 再在同一 lease CAS 事务中写 Gate result、failure-review 或 successor operation，不能由 worker 另调 `EmitInterrupt` 或 `RecordGateEvaluation` 拼接。外部动作在提交后执行。执行结果再以 operation id + lease owner CAS 收敛；过期 worker 不得覆盖新 owner 结果。
 
 ### 12.5 `startup_stall` retry 成功
 
@@ -1181,6 +1191,9 @@ COMMIT
 - `intake_assessments`
 - `gate_input_snapshots`
 - `brain_gate_input_links`
+- `interrupt_command_targets`
+- `interrupt_command_effect_bindings`
+- `command_effects`
 - `gate_evaluations`
 - `gate_cache`
 - `ledger_entries`
@@ -1190,7 +1203,7 @@ COMMIT
 
 `brain_calls` 禁止 DELETE；UPDATE trigger 只允许一次 `running → valid | fallback` 终结（补全终结字段），身份、输入与 `call_seq` 列任何修改都 abort。`brain_call_counters` 与 `intake_items` 是可变投影，以 `version` CAS 并发控制，不加 append-only trigger。
 
-对可变投影另设列级 trigger：`outbox_operations.payload_schema_version/payload_json/payload_digest` 创建后不可改；`attempts.attempt_resolution` 只能从 NULL 与同事务 NULL resolution 时间写为一组非空值；隔离不得由 `frozen` 直接覆盖为另一原因，且解除必须同时写 `isolation_released_at_ms/isolation_release_event_id`；同 generation 的 claim permit 不可替换；Interrupt 的 `charged_budget_entry_id`（包括 NULL）/`generation_key` 与关闭字段创建后不可改。违反时 abort，而不是只靠存储接口纪律。
+对可变投影另设列级 trigger：`outbox_operations.payload_schema_version/payload_json/payload_digest` 创建后不可改；`attempts.attempt_resolution` 只能从 NULL 与同事务 NULL resolution 时间写为一组非空值；隔离不得由 `frozen` 直接覆盖为另一原因，且解除必须同时写 `isolation_released_at_ms/isolation_release_event_id`；同 generation 的 claim permit 不可替换；Interrupt 的 `charged_budget_entry_id`（包括 NULL）/`generation_key` 与关闭字段创建后不可改；`command_event_outcomes` 只允许 §6.4 所述一次 pending→final CAS，且 final event 的 `final_for_event_id`、event key and type 必须匹配 initial event。违反时 abort，而不是只靠存储接口纪律。
 
 迁移连接可在迁移事务中替换 trigger；运行时存储接口无关闭 trigger 的能力。
 
