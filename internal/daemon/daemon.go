@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/miaoxiaoyong/sift/internal/brain"
+	"github.com/miaoxiaoyong/sift/internal/channelworker"
 	"github.com/miaoxiaoyong/sift/internal/config"
 	"github.com/miaoxiaoyong/sift/internal/forge"
 	"github.com/miaoxiaoyong/sift/internal/forgebudget"
@@ -30,6 +31,7 @@ type Daemon struct {
 	Comments    []*forgeworker.CommentWorker
 	Changes     []*forgeworker.ChangeWorker
 	Merges      []*forgeworker.MergeWorker
+	Channels    []*channelworker.Worker
 	Successes   []*gate.SuccessReconciler
 	Gates       []*gate.Reconciler
 	Replies     []*intake.ReplyConsumer
@@ -112,6 +114,15 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 // recovery has produced this daemon's boot ID.
 func (d *Daemon) SetLaunchWorker(w *launchworker.Worker) { d.Launch = w }
 
+// AddChannelWorker installs the independently scoped channel_publish consumer.
+// Assembly owns production construction; this seam is also used by integration
+// tests that provide a secret resolver and webhook transport.
+func (d *Daemon) AddChannelWorker(w *channelworker.Worker) {
+	if w != nil {
+		d.Channels = append(d.Channels, w)
+	}
+}
+
 func operators(o config.Operators, k forge.Kind) []string {
 	if k == forge.KindGitLab {
 		return append([]string(nil), o.GitLab...)
@@ -172,6 +183,11 @@ func (d *Daemon) OutboxTick(ctx context.Context) error {
 	for i, w := range d.Merges {
 		if err := w.RunOnce(ctx); err != nil {
 			return fmt.Errorf("merge[%d]: %w", i, err)
+		}
+	}
+	for i, w := range d.Channels {
+		if err := w.RunOnce(ctx); err != nil {
+			return fmt.Errorf("channel_publish[%d]: %w", i, err)
 		}
 	}
 	if d.Launch != nil {

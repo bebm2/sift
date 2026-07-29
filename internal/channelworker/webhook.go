@@ -1,6 +1,4 @@
-// Package channelworker contains the side-effecting consumers for Channel
-// operations. It intentionally has no storage write port beyond completing an
-// outbox attempt.
+// Package channelworker contains the side-effecting consumers for Channel operations.
 package channelworker
 
 import (
@@ -8,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 
@@ -49,12 +48,83 @@ type webhookPayload struct {
 		Renderer     string   `json:"renderer"`
 		Capabilities []string `json:"capabilities"`
 	} `json:"channel"`
+	ForgeAlertTarget struct {
+		ForgeKind       string `json:"forge_kind"`
+		ForgeHost       string `json:"forge_host"`
+		ForgeProjectKey string `json:"forge_project_key"`
+		TargetKind      string `json:"target_kind"`
+		TargetID        string `json:"target_id"`
+	} `json:"forge_alert_target"`
 	RenderedText string            `json:"rendered_text"`
 	Members      []json.RawMessage `json:"members"`
 }
 
-// WebhookAdapter executes exactly one attempt. It resolves only the sealed
-// secret_ref handle; endpoint values never enter evidence or diagnostics.
+type batchMember struct {
+	DeliveryID       string            `json:"delivery_id"`
+	InterruptID      string            `json:"interrupt_id"`
+	InterruptVersion int               `json:"interrupt_version"`
+	Nonce            string            `json:"nonce"`
+	Headline         string            `json:"headline"`
+	Reason           string            `json:"reason"`
+	Severity         string            `json:"severity"`
+	Links            []json.RawMessage `json:"links"`
+	Options          []json.RawMessage `json:"options"`
+	CommandLines     []string          `json:"command_lines"`
+}
+
+func decodeClosed(raw []byte, dst any) error {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return errors.New("trailing JSON")
+	}
+	return nil
+}
+
+func required(raw []byte, names ...string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	for _, name := range names {
+		if value, ok := fields[name]; !ok || string(value) == "null" {
+			return false
+		}
+	}
+	return true
+}
+
+func only(raw []byte, names ...string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	allowed := make(map[string]bool, len(names))
+	for _, name := range names {
+		allowed[name] = true
+	}
+	for name := range fields {
+		if !allowed[name] {
+			return false
+		}
+	}
+	return true
+}
+
+func validChannel(p webhookPayload) bool {
+	if p.DeliveryID == "" || p.Channel.ID == "" || p.Channel.Type != "webhook" || p.Channel.Renderer != "plain-v1" || len(p.Channel.Capabilities) == 0 {
+		return false
+	}
+	const prefix = "secret_ref:"
+	return strings.HasPrefix(p.Channel.TargetRef, prefix) && len(p.Channel.TargetRef) > len(prefix) && !strings.ContainsAny(p.Channel.TargetRef[len(prefix):], "\r\n")
+}
+
+// WebhookAdapter executes exactly one sealed attempt. Errors crossing this
+// boundary are classifications only: sender text can contain endpoint secrets.
 type WebhookAdapter struct {
 	Resolver SecretResolver
 	Sender   WebhookSender
@@ -62,50 +132,66 @@ type WebhookAdapter struct {
 
 func (a WebhookAdapter) Publish(ctx context.Context, payload []byte, operationKey string) (json.RawMessage, error) {
 	var p webhookPayload
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&p); err != nil {
-		return nil, fmt.Errorf("%w: invalid JSON", ErrContractViolation)
-	}
-	if p.DeliveryKind != "interrupt" && p.DeliveryKind != "attention_batch" || p.DeliveryID == "" || p.Channel.Type != "webhook" || p.Channel.Renderer != "plain-v1" {
+	if err := decodeClosed(payload, &p); err != nil || !required(payload, "delivery_kind", "delivery_id", "channel", "rendered_text") || !validChannel(p) {
 		return nil, fmt.Errorf("%w: closed channel_publish payload", ErrContractViolation)
 	}
-	if p.DeliveryKind == "attention_batch" && len(p.Members) == 0 {
-		return nil, fmt.Errorf("%w: empty batch", ErrContractViolation)
-	}
-	const prefix = "secret_ref:"
-	if !strings.HasPrefix(p.Channel.TargetRef, prefix) || len(p.Channel.TargetRef) == len(prefix) || strings.ContainsAny(p.Channel.TargetRef[len(prefix):], "\r\n") {
-		return nil, fmt.Errorf("%w: target_ref", ErrContractViolation)
+	if p.DeliveryKind == "interrupt" {
+		if !only(payload, "delivery_kind", "delivery_id", "interrupt_id", "escalation_no", "priority", "interrupt_version", "nonce", "channel", "rendered_text") || !required(payload, "interrupt_id", "escalation_no", "interrupt_version", "nonce") || p.InterruptID == "" || p.Nonce == "" {
+			return nil, fmt.Errorf("%w: interrupt payload", ErrContractViolation)
+		}
+	} else if p.DeliveryKind == "attention_batch" {
+		if !only(payload, "delivery_kind", "delivery_id", "batch_id", "batch_kind", "channel", "project_id", "forge_alert_target", "scope", "scope_id", "due_at_ms", "members", "rendered_text") || !required(payload, "batch_id", "batch_kind", "project_id", "scope", "scope_id", "due_at_ms", "forge_alert_target", "members") || p.BatchID == "" || p.ProjectID == "" || p.ForgeAlertTarget.ForgeKind == "" || p.ForgeAlertTarget.ForgeHost == "" || p.ForgeAlertTarget.ForgeProjectKey == "" || p.ForgeAlertTarget.TargetKind == "" || p.ForgeAlertTarget.TargetID == "" || len(p.Members) == 0 {
+			return nil, fmt.Errorf("%w: batch payload", ErrContractViolation)
+		}
+		last := ""
+		for _, raw := range p.Members {
+			var member batchMember
+			if err := decodeClosed(raw, &member); err != nil || !required(raw, "delivery_id", "interrupt_id", "interrupt_version", "nonce", "headline", "reason", "severity", "links", "options", "command_lines") || member.DeliveryID == "" || !strings.HasPrefix(member.DeliveryID, p.BatchID+":") || member.InterruptID == "" || member.Nonce == "" || member.InterruptID <= last {
+				return nil, fmt.Errorf("%w: batch member", ErrContractViolation)
+			}
+			last = member.InterruptID
+		}
+	} else {
+		return nil, fmt.Errorf("%w: delivery kind", ErrContractViolation)
 	}
 	if a.Resolver == nil {
 		return nil, ErrAuthOrCapability
 	}
-	endpoint, err := a.Resolver.Resolve(ctx, p.Channel.TargetRef[len(prefix):])
+	endpoint, err := a.Resolver.Resolve(ctx, strings.TrimPrefix(p.Channel.TargetRef, "secret_ref:"))
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolver rejected handle", ErrAuthOrCapability)
 	}
-	parsed, parseErr := url.Parse(endpoint)
-	if endpoint == "" || strings.ContainsAny(endpoint, "\r\n") || parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+	parsed, err := url.Parse(endpoint)
+	if endpoint == "" || strings.ContainsAny(endpoint, "\r\n") || err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, fmt.Errorf("%w: resolved endpoint", ErrContractViolation)
 	}
 	if a.Sender == nil {
 		return nil, ErrAuthOrCapability
 	}
-	body := p.RenderedText + "\n[sift " + operationKey + "]"
-	remote, err := a.Sender.Send(ctx, endpoint, body)
+	remote, err := a.Sender.Send(ctx, endpoint, p.RenderedText+"\n[sift "+operationKey+"]")
 	if err != nil {
-		return nil, err
+		switch {
+		case errors.Is(err, ErrRateLimited):
+			return nil, ErrRateLimited
+		case errors.Is(err, ErrAuthOrCapability):
+			return nil, ErrAuthOrCapability
+		case errors.Is(err, ErrContractViolation):
+			return nil, ErrContractViolation
+		}
+		return nil, ErrTransient
 	}
 	return json.RawMessage(fmt.Sprintf(`{"remote_ref":%q}`, remote)), nil
 }
 
 type Worker struct {
-	DB         *storage.DB
-	Adapter    WebhookAdapter
-	Now        func() int64
-	LeaseMS    int64
-	WorkerID   string
-	AlertAfter int
+	DB          *storage.DB
+	Adapter     WebhookAdapter
+	Now         func() int64
+	LeaseMS     int64
+	WorkerID    string
+	AlertAfter  int
+	Backoff     storage.BackoffPolicy
+	MaxAttempts int
 }
 
 func (w *Worker) RunOnce(ctx context.Context) error {
@@ -118,18 +204,22 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		return err
 	}
 	evidence, err := w.Adapter.Publish(ctx, claim.Payload, claim.Key)
+	outcome := storage.CompleteOutcome{NowMS: now, ChannelFailureAlertAfter: w.AlertAfter, MaxAttempts: w.MaxAttempts}
 	if err == nil {
-		return w.DB.CompleteOutboxAttempt(ctx, *claim, storage.CompleteOutcome{State: storage.OperationSucceeded, Evidence: evidence, NowMS: now, ChannelFailureAlertAfter: w.AlertAfter})
+		outcome.State, outcome.Evidence = storage.OperationSucceeded, evidence
+		return w.DB.CompleteOutboxAttempt(ctx, *claim, outcome)
 	}
-	state, class := storage.OperationRetryable, storage.ErrorTransient
-	summary := err.Error()
+	outcome.State, outcome.ErrorClass, outcome.ErrorSummary, outcome.Backoff = storage.OperationRetryable, storage.ErrorTransient, "channel publish failed", w.Backoff
+	if outcome.Backoff.InitialDelayMS == 0 {
+		outcome.Backoff = storage.BackoffPolicy{InitialDelayMS: 1000, MaxDelayMS: 60000, Multiplier: 2}
+	}
 	switch {
 	case errors.Is(err, ErrAuthOrCapability):
-		state, class = storage.OperationFailed, storage.ErrorAuthCapability
+		outcome.State, outcome.ErrorClass, outcome.ErrorSummary = storage.OperationFailed, storage.ErrorAuthCapability, "channel authentication or capability failure"
 	case errors.Is(err, ErrContractViolation):
-		state, class = storage.OperationFailed, storage.ErrorContract
+		outcome.State, outcome.ErrorClass, outcome.ErrorSummary = storage.OperationFailed, storage.ErrorContract, "channel payload or endpoint contract violation"
 	case errors.Is(err, ErrRateLimited):
-		class = storage.ErrorRateLimited
+		outcome.ErrorClass, outcome.ErrorSummary = storage.ErrorRateLimited, "channel rate limited"
 	}
-	return w.DB.CompleteOutboxAttempt(ctx, *claim, storage.CompleteOutcome{State: state, ErrorClass: class, ErrorSummary: summary, NowMS: now, Backoff: storage.BackoffPolicy{InitialDelayMS: 1000, MaxDelayMS: 60000, Multiplier: 2}, ChannelFailureAlertAfter: w.AlertAfter})
+	return w.DB.CompleteOutboxAttempt(ctx, *claim, outcome)
 }

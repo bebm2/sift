@@ -28,13 +28,14 @@ CREATE TABLE IF NOT EXISTS channel_failure_episodes (
 }
 
 type channelPayload struct {
-	DeliveryKind string `json:"delivery_kind"`
-	DeliveryID   string `json:"delivery_id"`
-	InterruptID  string `json:"interrupt_id"`
-	BatchID      string `json:"batch_id"`
-	Channel      struct {
-		TargetRef string `json:"target_ref"`
-	} `json:"channel"`
+	DeliveryKind     string            `json:"delivery_kind"`
+	DeliveryID       string            `json:"delivery_id"`
+	InterruptID      string            `json:"interrupt_id"`
+	InterruptVersion int               `json:"interrupt_version"`
+	Nonce            string            `json:"nonce"`
+	EscalationNo     int               `json:"escalation_no"`
+	BatchID          string            `json:"batch_id"`
+	Channel          json.RawMessage   `json:"channel"`
 	ProjectID        string            `json:"project_id"`
 	ForgeAlertTarget *forgeAlertTarget `json:"forge_alert_target"`
 }
@@ -55,20 +56,29 @@ func applyChannelOutcomeTx(ctx context.Context, tx *sql.Tx, claim ClaimedOperati
 	}
 	subject := channelSubject(p)
 	batch := p.DeliveryKind == "attention_batch"
+	var remote struct {
+		RemoteRef string `json:"remote_ref"`
+	}
+	_ = json.Unmarshal(outcome.Evidence, &remote)
+	var res sql.Result
+	var err error
 	if batch {
-		_, err := tx.ExecContext(ctx, `UPDATE batch_deliveries SET attempt_count=attempt_count+1, state=?, last_error=?, delivered_at_ms=CASE WHEN ?='delivered' THEN ? ELSE delivered_at_ms END WHERE delivery_id=?`, channelDeliveryState(outcome), nullable(outcome.ErrorSummary), channelDeliveryState(outcome), outcome.NowMS, subject)
-		if err != nil {
-			return err
-		}
+		res, err = tx.ExecContext(ctx, `UPDATE batch_deliveries SET attempt_count=attempt_count+1, state=?, remote_ref=CASE WHEN ?='delivered' THEN ? ELSE remote_ref END, last_error=?, delivered_at_ms=CASE WHEN ?='delivered' THEN ? ELSE delivered_at_ms END WHERE delivery_id=? AND operation_key=?`, channelDeliveryState(outcome), channelDeliveryState(outcome), nullable(remote.RemoteRef), nullable(outcome.ErrorSummary), channelDeliveryState(outcome), outcome.NowMS, subject, claim.Key)
 	} else {
-		_, err := tx.ExecContext(ctx, `UPDATE interrupt_deliveries SET attempt_count=attempt_count+1, state=?, last_error=?, delivered_at_ms=CASE WHEN ?='delivered' THEN ? ELSE delivered_at_ms END WHERE operation_key=? OR id=?`, channelDeliveryState(outcome), nullable(outcome.ErrorSummary), channelDeliveryState(outcome), outcome.NowMS, claim.Key, subject)
+		res, err = tx.ExecContext(ctx, `UPDATE interrupt_deliveries SET attempt_count=attempt_count+1, state=?, remote_ref=CASE WHEN ?='delivered' THEN ? ELSE remote_ref END, last_error=?, delivered_at_ms=CASE WHEN ?='delivered' THEN ? ELSE delivered_at_ms END WHERE delivery_id=? AND operation_key=?`, channelDeliveryState(outcome), channelDeliveryState(outcome), nullable(remote.RemoteRef), nullable(outcome.ErrorSummary), channelDeliveryState(outcome), outcome.NowMS, subject, claim.Key)
+	}
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
 		if err != nil {
 			return err
 		}
+		return fmt.Errorf("storage: missing channel delivery projection")
 	}
 	var old int
 	var oldAlert sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT consecutive_failures,alert_operation_key FROM channel_failure_episodes WHERE subject_id=? AND generation=1`, subject).Scan(&old, &oldAlert)
+	err = tx.QueryRowContext(ctx, `SELECT consecutive_failures,alert_operation_key FROM channel_failure_episodes WHERE subject_id=? AND generation=1`, subject).Scan(&old, &oldAlert)
 	if err == sql.ErrNoRows {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO channel_failure_episodes(subject_id,generation,consecutive_failures,state,last_error_class,created_at_ms,updated_at_ms) VALUES(?,1,0,'open',NULL,?,?)`, subject, outcome.NowMS, outcome.NowMS); err != nil {
 			return err
@@ -97,10 +107,20 @@ func applyChannelOutcomeTx(ctx context.Context, tx *sql.Tx, claim ClaimedOperati
 	if _, err = tx.ExecContext(ctx, `UPDATE channel_failure_episodes SET consecutive_failures=?,state=?,last_error_class=?,updated_at_ms=?,ended_at_ms=CASE WHEN ? THEN ? ELSE ended_at_ms END WHERE subject_id=? AND generation=1 AND state NOT LIKE 'ended_%'`, count, state, nullable(string(outcome.ErrorClass)), outcome.NowMS, terminal, outcome.NowMS, subject); err != nil {
 		return err
 	}
-	if old == 0 && count >= threshold && !oldAlert.Valid && p.ForgeAlertTarget != nil {
+	if old < threshold && count >= threshold && !oldAlert.Valid {
+		target := p.ForgeAlertTarget
+		if target == nil && !batch {
+			target = &forgeAlertTarget{}
+			err := tx.QueryRowContext(ctx, `SELECT r.forge_kind,r.forge_host,r.forge_project_key,CASE WHEN r.issue_id IS NOT NULL THEN 'issue' ELSE r.discussion_target_kind END,COALESCE(r.issue_id,r.discussion_target_id) FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, p.InterruptID).Scan(&target.ForgeKind, &target.ForgeHost, &target.ForgeProjectKey, &target.TargetKind, &target.TargetID)
+			if err != nil || target.ForgeKind == "" || target.ForgeHost == "" || target.ForgeProjectKey == "" || target.TargetKind == "" || target.TargetID == "" {
+				return fmt.Errorf("storage: missing frozen channel alert target")
+			}
+		}
+		if target == nil {
+			return fmt.Errorf("storage: missing batch channel alert target")
+		}
 		key := AlertOperationKey("channel_failure", subject, 1)
 		markdown := fmt.Sprintf("[sift alert:channel_failure:%s:1]\nChannel operation: %s\nEpisode generation: 1\nConsecutive failures: %d\nLatest error class: %s\nStatus: generated_not_delivered\nDiagnostics: sift ps; sift doctor", subject, claim.Key, count, outcome.ErrorClass)
-		target := p.ForgeAlertTarget
 		payload, _ := json.Marshal(map[string]any{"forge_kind": target.ForgeKind, "forge_host": target.ForgeHost, "forge_project_key": target.ForgeProjectKey, "target_kind": target.TargetKind, "target_id": target.TargetID, "purpose": "channel_failure", "markdown": markdown})
 		if err := insertOperation(ctx, tx, Operation{Key: key, Kind: OperationForgeAlert, Payload: payload}, "", "", outcome.NowMS); err != nil {
 			return err
@@ -140,10 +160,22 @@ func (d *DB) EnqueueChannelPublish(ctx context.Context, op Operation, deliveryID
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return err
 	}
+	if p.DeliveryID != deliveryID {
+		return fmt.Errorf("storage: channel delivery identity mismatch")
+	}
 	if p.DeliveryKind == "attention_batch" {
 		_, err = tx.ExecContext(ctx, `INSERT INTO batch_deliveries(batch_id,delivery_id,operation_key,state,created_at_ms) VALUES(?,?,?,'pending',?)`, p.BatchID, deliveryID, op.Key, nowMS)
 	} else {
-		_, err = tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries(id,interrupt_id,surface,priority,operation_key,state,attempt_count,created_at_ms) VALUES(?,?, 'channel','normal',?,'pending',0,?)`, newID(), p.InterruptID, op.Key, nowMS)
+		if p.InterruptID == "" || p.InterruptVersion < 1 || p.Nonce == "" {
+			return fmt.Errorf("storage: invalid interrupt channel delivery")
+		}
+		var channel struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(p.Channel, &channel) != nil || channel.ID == "" {
+			return fmt.Errorf("storage: invalid channel snapshot")
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries(id,delivery_id,interrupt_id,surface,channel_id,channel_snapshot_json,interrupt_version,nonce,escalation_no,priority,operation_key,state,attempt_count,created_at_ms) VALUES(?,?,?,'channel',?,?,?,?,?,'normal',?,'pending',0,?)`, newID(), deliveryID, p.InterruptID, channel.ID, string(p.Channel), p.InterruptVersion, p.Nonce, p.EscalationNo, op.Key, nowMS)
 	}
 	if err != nil {
 		return err
