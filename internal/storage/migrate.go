@@ -168,6 +168,20 @@ func applyMigrations(ctx context.Context, db *sql.DB, binaryVersion string, now 
 // migration file itself contains no transaction control; the pool's
 // _txlock=immediate makes BeginTx a BEGIN IMMEDIATE.
 func applyOne(ctx context.Context, db *sql.DB, m migration, binaryVersion string, now time.Time) error {
+	// 0021 rebuilds interrupts. SQLite only honors foreign_keys outside a
+	// transaction, so execute its otherwise transactional migration with FK
+	// enforcement temporarily disabled. This preserves FK definitions on the
+	// replacement table and lets populated pre-0021 databases advance.
+	foreignKeysDisabled := false
+	if m.version == 21 {
+		if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+			return fmt.Errorf("storage: disable foreign keys for migration %s: %w", m.name, err)
+		}
+		foreignKeysDisabled = true
+		defer func() {
+			_, _ = db.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+		}()
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("storage: begin migration %s: %w", m.name, err)
@@ -186,6 +200,18 @@ func applyOne(ctx context.Context, db *sql.DB, m migration, binaryVersion string
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("storage: commit migration %s: %w", m.name, err)
+	}
+	if foreignKeysDisabled {
+		if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+			return fmt.Errorf("storage: re-enable foreign keys for migration %s: %w", m.name, err)
+		}
+		var violation string
+		if err := db.QueryRowContext(ctx, `PRAGMA foreign_key_check`).Scan(&violation); err != sql.ErrNoRows {
+			if err != nil {
+				return fmt.Errorf("storage: check foreign keys after migration %s: %w", m.name, err)
+			}
+			return fmt.Errorf("storage: foreign key violation after migration %s: %s", m.name, violation)
+		}
 	}
 	return nil
 }

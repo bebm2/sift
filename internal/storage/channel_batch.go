@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 )
@@ -79,6 +80,11 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 		if err != nil {
 			return err
 		}
+		if kind == "critical_fuse" {
+			if err := openCriticalSuccessorTx(ctx, tx, batchID, nowMS); err != nil {
+				return err
+			}
+		}
 		return tx.Commit()
 	}
 	var channel any
@@ -103,11 +109,63 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 	if _, err = tx.ExecContext(ctx, `UPDATE attention_batches SET state='sealed',operation_key=?,payload_json=?,payload_digest=?,sealed_at_ms=?,updated_at_ms=? WHERE id=? AND state='collecting'`, key, string(payload), digestJSON(payload), nowMS, nowMS, batchID); err != nil {
 		return err
 	}
+	if kind == "critical_fuse" {
+		if err := openCriticalSuccessorTx(ctx, tx, batchID, nowMS); err != nil {
+			return err
+		}
+	}
 	if err = tx.Commit(); err == nil {
 		d.wakeOutbox()
 	}
 	return err
 }
+
+// openCriticalSuccessorTx redecides a due fuse episode from the durable
+// admitted-evidence window. A successor has a new immutable episode identity;
+// the sealed batch is never retimed or reused.
+func openCriticalSuccessorTx(ctx context.Context, tx *sql.Tx, batchID string, nowMS int64) error {
+	var project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, scope, scopeID string
+	if err := tx.QueryRowContext(ctx, `SELECT project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,scope,scope_id FROM attention_batches WHERE id=?`, batchID).Scan(&project, &channel, &snapshot, &forgeKind, &host, &forgeProject, &targetKind, &targetID, &scope, &scopeID); err != nil {
+		return err
+	}
+	where, args := `a.created_at_ms>? AND a.created_at_ms<=?`, []any{nowMS, nowMS}
+	var window int64
+	if scope == "run" {
+		where += " AND a.run_id=?"
+		args = append(args, scopeID)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT i.critical_window_ms FROM attention_admissions a JOIN interrupts i ON i.id=a.interrupt_id WHERE a.kind='critical_admitted'`+map[bool]string{true: " AND a.run_id=?", false: ""}[scope == "run"]+` ORDER BY a.created_at_ms,a.id LIMIT 1`, func() []any {
+		if scope == "run" {
+			return []any{scopeID}
+		}
+		return nil
+	}()...).Scan(&window); err != nil {
+		return err
+	}
+	args[0] = nowMS - window
+	var count, limit int
+	query := `SELECT COUNT(*),MIN(CASE WHEN ?='global' THEN i.critical_total_limit ELSE i.critical_per_run_limit END) FROM attention_admissions a JOIN interrupts i ON i.id=a.interrupt_id WHERE a.kind='critical_admitted' AND ` + where
+	if err := tx.QueryRowContext(ctx, query, append([]any{scope}, args...)...).Scan(&count, &limit); err != nil {
+		return err
+	}
+	if count < limit {
+		return nil
+	}
+	var episode string
+	if err := tx.QueryRowContext(ctx, `SELECT a.id FROM attention_admissions a WHERE a.kind='critical_admitted' AND `+where+` ORDER BY a.created_at_ms,a.id LIMIT 1`, args...).Scan(&episode); err != nil {
+		return err
+	}
+	var due int64
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(a.created_at_ms)+? FROM attention_admissions a WHERE a.kind='critical_admitted' AND `+where, append([]any{window}, args...)...).Scan(&due); err != nil {
+		return err
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	id := fmt.Sprintf("critical:%s:%s:%s:%s:%s:%s:%s:%s:%s", scope, scopeID, episode, channel, forgeKind, enc([]byte(host)), enc([]byte(forgeProject)), targetKind, enc([]byte(targetID)))
+	deliveryID := id + ":publish:1"
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, "critical_fuse", deliveryID, scope, scopeID, episode, due, nowMS, nowMS)
+	return err
+}
+
 func joinBatchText(parts []string) string {
 	out := ""
 	for i, p := range parts {

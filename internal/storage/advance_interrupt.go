@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -133,29 +135,16 @@ func (d *DB) holdAdvance(ctx context.Context, tx *sql.Tx, cmd AdvanceInterruptCm
 }
 
 func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceInterruptCmd) (bool, error) {
-	var runID, status, reason, binding string
-	var runVersion int64
-	if err := tx.QueryRowContext(ctx, `SELECT r.id,r.status,r.version,i.reason,b.binding_json FROM interrupts i JOIN runs r ON r.id=i.run_id JOIN interrupt_command_effect_bindings b ON b.interrupt_id=i.id WHERE i.id=?`, cmd.InterruptID).Scan(&runID, &status, &runVersion, &reason, &binding); err != nil {
+	var runID, status, reason, binding, bindingDigest string
+	var runVersion, bindingSchema int64
+	if err := tx.QueryRowContext(ctx, `SELECT r.id,r.status,r.version,i.reason,b.binding_schema_version,b.binding_json,b.binding_digest FROM interrupts i JOIN runs r ON r.id=i.run_id JOIN interrupt_command_effect_bindings b ON b.interrupt_id=i.id WHERE i.id=?`, cmd.InterruptID).Scan(&runID, &status, &runVersion, &reason, &bindingSchema, &binding, &bindingDigest); err != nil {
 		return false, err
 	}
-	var arm map[string]json.RawMessage
-	if json.Unmarshal([]byte(binding), &arm) != nil {
-		return false, fmt.Errorf("%w: corrupt effect binding", ErrInterruptRejected)
-	}
-	var armName, boundRun string
-	if json.Unmarshal(arm["arm"], &armName) != nil || json.Unmarshal(arm["run_id"], &boundRun) != nil || boundRun != runID {
-		return false, fmt.Errorf("%w: corrupt effect binding", ErrInterruptRejected)
+	armName, err := validateEffectBinding(reason, runID, bindingSchema, binding, bindingDigest)
+	if err != nil {
+		return false, err
 	}
 	noTransition := armName == "report_quota_failure_review"
-	if noTransition {
-		for _, field := range []string{"daily_bucket_start_ms", "daily_bucket_end_ms", "security_event_id"} {
-			if _, ok := arm[field]; !ok {
-				return false, fmt.Errorf("%w: corrupt report quota binding", ErrInterruptRejected)
-			}
-		}
-	} else if armName != reason {
-		return false, fmt.Errorf("%w: binding reason mismatch", ErrInterruptRejected)
-	}
 	if !noTransition {
 		if RunStatus(status) != RunWaitingHuman {
 			return false, ErrRejectedStale
@@ -169,6 +158,109 @@ func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceI
 		return false, err
 	}
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.expired_auto_reject")
+}
+
+func validateEffectBinding(reason, runID string, schema int64, raw, digest string) (string, error) {
+	var binding map[string]json.RawMessage
+	if schema != 1 || json.Unmarshal([]byte(raw), &binding) != nil {
+		return "", fmt.Errorf("%w: corrupt effect binding", ErrInterruptRejected)
+	}
+	canonical, err := canonicalJSON(binding)
+	if err != nil || string(canonical) != raw {
+		return "", fmt.Errorf("%w: non-canonical effect binding", ErrInterruptRejected)
+	}
+	sum := sha256.Sum256(canonical)
+	if digest != hex.EncodeToString(sum[:]) {
+		return "", fmt.Errorf("%w: effect binding digest mismatch", ErrInterruptRejected)
+	}
+	var arm, boundRun string
+	if json.Unmarshal(binding["arm"], &arm) != nil || json.Unmarshal(binding["run_id"], &boundRun) != nil || boundRun != runID {
+		return "", fmt.Errorf("%w: corrupt effect binding", ErrInterruptRejected)
+	}
+	fields := map[string][]string{
+		"design_approval":             {"arm", "run_id", "task_spec_snapshot_id"},
+		"guardrail_violation":         {"arm", "run_id", "rule_id", "matched_paths_digest"},
+		"code_review":                 {"arm", "run_id", "change_id", "head_sha"},
+		"agent_blocked":               {"arm", "run_id", "attempt_no", "generation", "report_id"},
+		"merge_conflict":              {"arm", "run_id", "change_id", "head_sha", "conflict_digest"},
+		"startup_stall":               {"arm", "run_id", "attempt_no", "generation"},
+		"failure_review_attempt":      {"arm", "run_id", "attempt_no", "generation", "retry_kind", "change_id", "head_sha", "terminal_attempt_no", "terminal_generation"},
+		"report_quota_failure_review": {"arm", "run_id", "daily_bucket_start_ms", "daily_bucket_end_ms", "security_event_id"},
+	}
+	expected, ok := fields[arm]
+	if !ok || len(binding) != len(expected) {
+		return "", fmt.Errorf("%w: invalid effect binding arm", ErrInterruptRejected)
+	}
+	for _, field := range expected {
+		if _, ok := binding[field]; !ok {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	}
+	if (arm == "failure_review_attempt" || arm == "report_quota_failure_review") != (reason == string(InterruptFailureReview)) || (arm != "failure_review_attempt" && arm != "report_quota_failure_review" && arm != reason) {
+		return "", fmt.Errorf("%w: binding reason mismatch", ErrInterruptRejected)
+	}
+	text := func(name string) bool { var v string; return json.Unmarshal(binding[name], &v) == nil && v != "" }
+	integer := func(name string) bool { var v int64; return json.Unmarshal(binding[name], &v) == nil }
+	for _, name := range []string{"run_id"} {
+		if !text(name) {
+			return "", fmt.Errorf("%w: invalid effect binding field", ErrInterruptRejected)
+		}
+	}
+	switch arm {
+	case "design_approval":
+		if !text("task_spec_snapshot_id") {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	case "guardrail_violation":
+		if !text("rule_id") || !text("matched_paths_digest") {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	case "code_review":
+		if !text("change_id") || !text("head_sha") {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	case "agent_blocked":
+		if !integer("attempt_no") || !integer("generation") || !text("report_id") {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	case "merge_conflict":
+		if !text("change_id") || !text("head_sha") || !text("conflict_digest") {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	case "startup_stall":
+		if !integer("attempt_no") || !integer("generation") {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	case "report_quota_failure_review":
+		if !integer("daily_bucket_start_ms") || !integer("daily_bucket_end_ms") || !text("security_event_id") {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+	case "failure_review_attempt":
+		var retry string
+		if !integer("attempt_no") || !integer("generation") || json.Unmarshal(binding["retry_kind"], &retry) != nil {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+		var change, head, terminalAttempt, terminalGeneration any
+		if json.Unmarshal(binding["change_id"], &change) != nil || json.Unmarshal(binding["head_sha"], &head) != nil || json.Unmarshal(binding["terminal_attempt_no"], &terminalAttempt) != nil || json.Unmarshal(binding["terminal_generation"], &terminalGeneration) != nil {
+			return "", fmt.Errorf("%w: incomplete effect binding", ErrInterruptRejected)
+		}
+		if retry == "gate_recheck" {
+			if _, ok := change.(string); !ok {
+				return "", fmt.Errorf("%w: invalid effect binding", ErrInterruptRejected)
+			}
+			if _, ok := head.(string); !ok || terminalAttempt != nil || terminalGeneration != nil {
+				return "", fmt.Errorf("%w: invalid effect binding", ErrInterruptRejected)
+			}
+		} else if retry == "new_attempt" {
+			var attempt, generation, terminalAttemptValue, terminalGenerationValue int64
+			if change != nil || head != nil || json.Unmarshal(binding["attempt_no"], &attempt) != nil || json.Unmarshal(binding["generation"], &generation) != nil || json.Unmarshal(binding["terminal_attempt_no"], &terminalAttemptValue) != nil || json.Unmarshal(binding["terminal_generation"], &terminalGenerationValue) != nil || attempt != terminalAttemptValue || generation != terminalGenerationValue {
+				return "", fmt.Errorf("%w: invalid effect binding", ErrInterruptRejected)
+			}
+		} else {
+			return "", fmt.Errorf("%w: invalid effect binding", ErrInterruptRejected)
+		}
+	}
+	return arm, nil
 }
 
 func enqueueInterruptChannelTx(ctx context.Context, tx *sql.Tx, id string, version int64, nonce string, escalation int, priority string, now int64) error {
@@ -358,19 +450,26 @@ func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, v
 			scope, scopeID = parts[1], parts[2]
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,due_at_ms,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, kind, deliveryID, scope, scopeID, due, now, now); err != nil {
+	episode := any(nil)
+	if kind == "critical_fuse" {
+		parts := strings.Split(batch, ":")
+		if len(parts) < 4 {
+			return fmt.Errorf("%w: invalid critical batch identity", ErrInterruptRejected)
+		}
+		episode = parts[3]
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, kind, deliveryID, scope, scopeID, episode, due, now, now); err != nil {
 		return fmt.Errorf("create attention batch: %w", err)
 	}
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batch_members(batch_id,interrupt_id,admission_id,member_key,channel_id,channel_snapshot_json,delivery_id,interrupt_version,nonce,headline,reason,severity,links_json,options_json,joined_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, batch, id, admission, batch+":"+id, channel, snapshot, batch+":"+id, version, nonce, headline, reason, severity, links, opts, now)
 	if err != nil {
 		return fmt.Errorf("add attention batch member: %w", err)
 	}
-	var gotChannel, gotSnapshot, gotNonce string
-	var gotVersion int
-	if err := tx.QueryRowContext(ctx, `SELECT channel_id,channel_snapshot_json,interrupt_version,nonce FROM attention_batch_members WHERE batch_id=? AND interrupt_id=?`, batch, id).Scan(&gotChannel, &gotSnapshot, &gotVersion, &gotNonce); err != nil {
+	var gotChannel, gotSnapshot string
+	if err := tx.QueryRowContext(ctx, `SELECT channel_id,channel_snapshot_json FROM attention_batch_members WHERE batch_id=? AND interrupt_id=?`, batch, id).Scan(&gotChannel, &gotSnapshot); err != nil {
 		return err
 	}
-	if gotChannel != channel || gotSnapshot != snapshot || int64(gotVersion) != version || gotNonce != nonce {
+	if gotChannel != channel || gotSnapshot != snapshot {
 		return fmt.Errorf("%w: batch member identity collision", ErrInterruptRejected)
 	}
 	return nil
