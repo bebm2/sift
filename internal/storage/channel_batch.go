@@ -159,8 +159,19 @@ func openCriticalSuccessorTx(ctx context.Context, tx *sql.Tx, batchID string, no
 	enc := base64.RawURLEncoding.EncodeToString
 	id := fmt.Sprintf("critical:%s:%s:%s:%s:%s:%s:%s:%s:%s", scope, scopeID, episode, channel, forgeKind, enc([]byte(host)), enc([]byte(forgeProject)), targetKind, enc([]byte(targetID)))
 	deliveryID := id + ":publish:1"
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,critical_window_ms,critical_total_limit,critical_per_run_limit,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, "critical_fuse", deliveryID, scope, scopeID, episode, due, window, limitTotal, limitRun, nowMS, nowMS)
-	return err
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches(id,state,project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,critical_window_ms,critical_total_limit,critical_per_run_limit,created_at_ms,updated_at_ms) VALUES(?,'collecting',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, project, channel, snapshot, forgeKind, host, forgeProject, targetKind, targetID, "critical_fuse", deliveryID, scope, scopeID, episode, due, window, limitTotal, limitRun, nowMS, nowMS); err != nil {
+		return err
+	}
+	var gotProject, gotChannel, gotSnapshot, gotForgeKind, gotHost, gotForgeProject, gotTargetKind, gotTargetID, gotKind, gotDelivery, gotScope, gotScopeID, gotEpisode string
+	var gotDue, gotWindow int64
+	var gotTotal, gotRun int
+	if err := tx.QueryRowContext(ctx, `SELECT project_id,channel_id,channel_snapshot_json,forge_kind,forge_host,forge_project_key,target_kind,target_id,kind,delivery_id,scope,scope_id,episode_admission_id,due_at_ms,critical_window_ms,critical_total_limit,critical_per_run_limit FROM attention_batches WHERE id=?`, id).Scan(&gotProject, &gotChannel, &gotSnapshot, &gotForgeKind, &gotHost, &gotForgeProject, &gotTargetKind, &gotTargetID, &gotKind, &gotDelivery, &gotScope, &gotScopeID, &gotEpisode, &gotDue, &gotWindow, &gotTotal, &gotRun); err != nil {
+		return err
+	}
+	if gotProject != project || gotChannel != channel || gotSnapshot != snapshot || gotForgeKind != forgeKind || gotHost != host || gotForgeProject != forgeProject || gotTargetKind != targetKind || gotTargetID != targetID || gotKind != "critical_fuse" || gotDelivery != deliveryID || gotScope != scope || gotScopeID != scopeID || gotEpisode != episode || gotDue != due || gotWindow != window || gotTotal != limitTotal || gotRun != limitRun {
+		return fmt.Errorf("storage: critical successor identity collision")
+	}
+	return nil
 }
 
 func joinBatchText(parts []string) string {
