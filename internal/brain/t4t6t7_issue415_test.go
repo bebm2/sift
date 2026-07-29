@@ -1,8 +1,11 @@
 package brain
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -42,79 +45,225 @@ func TestIssue415ReasonsUseStorageCanonicalSet(t *testing.T) {
 	}
 }
 
-func TestIssue415T7TraceProjectAndPreReserveValidation(t *testing.T) {
-	project := "project-7"
-	key := "aggregate:v1:project:" + base64.RawURLEncoding.EncodeToString([]byte(project)) + ":bug:1:2"
-	input, err := BuildT7Input(issue415T7Input(key, project, nil))
+func issue436T7JSON(t *testing.T, in T7Input) []byte {
+	t.Helper()
+	b, err := decode.Canonical(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := T7Contract(key, project, nil, []string{"cat"}).ValidateInput(CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: key, ProjectID: project, Input: input}); err != nil {
-		t.Fatalf("project round trip: %v", err)
+	return b
+}
+
+func issue436TraceCounts(t *testing.T, db *storage.DB) (calls, attempts int) {
+	t.Helper()
+	var replay bytes.Buffer
+	if err := db.ExportBrainCallsJSONL(context.Background(), &replay); err != nil {
+		t.Fatal(err)
 	}
-	if err := T7Contract(key, "wrong", nil, []string{"cat"}).ValidateInput(CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: key, ProjectID: "wrong", Input: input}); err == nil {
-		t.Fatal("project trace drift accepted")
+	for _, line := range bytes.Split(bytes.TrimSpace(replay.Bytes()), []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var record struct {
+			Attempts []json.RawMessage `json:"attempts"`
+		}
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatal(err)
+		}
+		calls++
+		attempts += len(record.Attempts)
+	}
+	return calls, attempts
+}
+
+func TestIssue436T7MalformedInputsDoNotReserveOrCallProvider(t *testing.T) {
+	const globalAll = "aggregate:v1:global:all:1:2"
+	project := "project-7"
+	projectKey := "aggregate:v1:project:" + base64.RawURLEncoding.EncodeToString([]byte(project)) + ":bug:1:2"
+	base := func() T7Input { return issue415T7Input(globalAll, "", []TaskKind{TaskBug}) }
+	canonical := func(in T7Input) []byte {
+		b, err := BuildT7Input(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	params := func(input []byte) CallParams {
+		return CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: globalAll, Input: input}
+	}
+	secondCategory := func(kind TaskKind, id string) T7CategoryEvidence {
+		c := base().Categories[0]
+		c.TaskKind, c.EvidenceID = kind, id
+		return c
 	}
 
-	global := "aggregate:v1:global:all:1:2"
-	good, err := BuildT7Input(issue415T7Input(global, "", []TaskKind{TaskBug}))
-	if err != nil {
-		t.Fatal(err)
+	valid := canonical(base())
+	projectInput := canonical(issue415T7Input(projectKey, project, nil))
+	concrete := issue415T7Input("aggregate:v1:global:bug:1:2", "", nil)
+	concrete.Categories[0].TaskKind = TaskFeature
+	allMissing := base()
+	allMissing.Categories = []T7CategoryEvidence{secondCategory(TaskBug, "cat")}
+	allExtra := base()
+	allExtra.Categories = []T7CategoryEvidence{secondCategory(TaskBug, "cat"), secondCategory(TaskChore, "cat-chore"), secondCategory(TaskDocs, "cat-docs")}
+
+	cases := []struct {
+		name     string
+		contract TouchpointContract
+		params   CallParams
+	}{
+		{"required_missing", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), params([]byte(`{"aggregate_key":"aggregate:v1:global:all:1:2"}`))},
+		{"category_negative_count", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.Categories[0].EvidenceSummary.TotalSamples = -1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"category_negative_exceeds_total", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.Categories[0].EvidenceSummary.NegativeSamples = 1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"category_leaks_exceed_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.Categories[0].EvidenceSummary.NegativeSamples, in.Categories[0].EvidenceSummary.LeakCount = 1, 2
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"category_false_blocks_exceed_remainder", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.Categories[0].EvidenceSummary.TotalSamples, in.Categories[0].EvidenceSummary.FalseBlockCount = 1, 2
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"replay_negative_count", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.TotalSamples = -1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"replay_negative_exceeds_total", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.NegativeSamples = 1
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"replay_leaks_exceed_negative", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.NegativeSamples, in.ReplaySummary.LeakCount = 1, 2
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"replay_false_blocks_exceed_remainder", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.TotalSamples, in.ReplaySummary.FalseBlockCount = 1, 2
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"scope_drift", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), CallParams{Scope: storage.BrainScopeRun, SubjectKey: globalAll, Input: valid}},
+		{"subject_drift", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:bug:1:2", Input: valid}},
+		{"project_drift", T7Contract(projectKey, project, nil, []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: projectKey, ProjectID: "wrong-project", Input: projectInput}},
+		{"window_drift", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams { in := base(); in.Window.EndMS = 3; return params(issue436T7JSON(t, in)) }()},
+		{"concrete_category_drift", T7Contract("aggregate:v1:global:bug:1:2", "", nil, []string{"cat"}), CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: "aggregate:v1:global:bug:1:2", Input: issue436T7JSON(t, concrete)}},
+		{"all_nil_expected_kinds", T7Contract(globalAll, "", nil, []string{"cat"}), params(valid)},
+		{"all_empty_expected_kinds", T7Contract(globalAll, "", []TaskKind{}, []string{"cat"}), params(valid)},
+		{"all_missing_category", T7Contract(globalAll, "", []TaskKind{TaskBug, TaskChore}, []string{"cat", "cat-chore"}), params(issue436T7JSON(t, allMissing))},
+		{"all_extra_category", T7Contract(globalAll, "", []TaskKind{TaskBug, TaskChore}, []string{"cat", "cat-chore"}), params(issue436T7JSON(t, allExtra))},
+		{"duplicate_category_replay_evidence", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.ReplaySummary.EvidenceID = "cat"
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"duplicate_category_semantic_evidence", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.SemanticMaterial = []T7SemanticMaterial{{EntryID: "cat", MaterialKind: "ask_text", Text: "text"}}
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"duplicate_replay_semantic_evidence", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.SemanticMaterial = []T7SemanticMaterial{{EntryID: "replay", MaterialKind: "ask_text", Text: "text"}}
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"categories_unsorted", T7Contract(globalAll, "", []TaskKind{TaskBug, TaskChore}, []string{"cat", "cat-chore"}), func() CallParams {
+			in := base()
+			in.Categories = []T7CategoryEvidence{secondCategory(TaskChore, "cat-chore"), secondCategory(TaskBug, "cat")}
+			return params(issue436T7JSON(t, in))
+		}()},
+		{"semantic_unsorted", T7Contract(globalAll, "", []TaskKind{TaskBug}, []string{"cat"}), func() CallParams {
+			in := base()
+			in.SemanticMaterial = []T7SemanticMaterial{{EntryID: "z", MaterialKind: "ask_text", Text: "z"}, {EntryID: "a", MaterialKind: "ask_text", Text: "a"}}
+			return params(issue436T7JSON(t, in))
+		}()},
 	}
-	bad := issue415T7Input(global, "", []TaskKind{TaskBug})
-	bad.Categories[0].EvidenceSummary.NegativeSamples = 1
-	badJSON, err := decode.Canonical(bad)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db := openShellDB(t)
-	provider := &FakeProvider{}
-	shell := newShellAt(db, shellCfg(100), provider, shellTestBase+1, shellTestBase+2, shellTestBase+3)
-	contract := T7Contract(global, "", []TaskKind{TaskBug}, []string{"cat"})
-	if _, err := shell.Call(context.Background(), contract, CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: global, Input: badJSON}); err == nil {
-		t.Fatal("count overflow accepted")
-	}
-	if len(provider.Requests) != 0 {
-		t.Fatal("provider called for invalid input")
-	}
-	result, err := shell.Call(context.Background(), contract, CallParams{Scope: storage.BrainScopeAggregate, SubjectKey: global, Input: good})
-	if err != nil || result.CallSeq != 1 {
-		t.Fatalf("invalid input reserved a trace: %+v %v", result, err)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openShellDB(t)
+			provider := &FakeProvider{}
+			shell := newShellAt(db, shellCfg(100), provider, shellTestBase+1)
+			beforeCalls, beforeAttempts := issue436TraceCounts(t, db)
+			if _, err := shell.Call(context.Background(), tc.contract, tc.params); err == nil {
+				t.Fatal("malformed T7 input was accepted")
+			}
+			afterCalls, afterAttempts := issue436TraceCounts(t, db)
+			if afterCalls != beforeCalls || afterAttempts != beforeAttempts || len(provider.Requests) != 0 {
+				t.Fatalf("malformed input created trace or provider request: calls %d→%d attempts %d→%d requests=%d", beforeCalls, afterCalls, beforeAttempts, afterAttempts, len(provider.Requests))
+			}
+		})
 	}
 }
 
-func TestIssue415ValidAdaptersPreserveBrainIdentity(t *testing.T) {
-	result := CallResult{CallID: "call-valid", Status: "valid", PromptVersion: "T/v1/test", OutputSchemaVersion: 1}
-	t4, source, err := T4ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: []byte(`{"headline":"Review required","conclusion":"check failed","key_points":["review needed"],"recommended_option_id":"review","options":["review"]}`)}, t4Input())
-	if err != nil || t4.Normal == nil || t4.Fallback != nil || source.Kind != "brain" || source.LogicalCallID != result.CallID || source.PromptVersion != result.PromptVersion || source.OutputSchemaVersion != 1 {
+func TestIssue436ValidAdaptersPreserveOutputAndCompleteBrainSource(t *testing.T) {
+	result := CallResult{CallID: "call-valid", Status: "valid", PromptVersion: "T/v1/test", OutputSchemaVersion: 7}
+	wantSource := BrainSource{Kind: "brain", LogicalCallID: result.CallID, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion}
+	t4JSON := []byte(`{"headline":"Review required","conclusion":"check failed","key_points":["review needed"],"recommended_option_id":"review","options":["review"]}`)
+	var wantT4 T4Output
+	if err := decode.Decode(t4JSON, &wantT4, decode.Closed); err != nil {
+		t.Fatal(err)
+	}
+	t4, source, err := T4ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: t4JSON}, t4Input())
+	if err != nil || t4.Normal == nil || t4.Fallback != nil || !reflect.DeepEqual(*t4.Normal, wantT4) || !reflect.DeepEqual(source, wantSource) {
 		t.Fatalf("T4 valid adapter = %#v %#v %v", t4, source, err)
 	}
-	t6, source, err := T6ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: []byte(`{"delivery":"batch","channel_id":"chat","suggested_downgrade":false,"rationale":"wait"}`)}, t6Input())
-	if err != nil || t6.Delivery == nil || source.Kind != "brain" || source.LogicalCallID != result.CallID || source.PromptVersion != result.PromptVersion {
+	t6JSON := []byte(`{"delivery":"batch","channel_id":"chat","suggested_downgrade":false,"rationale":"wait"}`)
+	var wantT6 T6Output
+	if err := decode.Decode(t6JSON, &wantT6, decode.Closed); err != nil {
+		t.Fatal(err)
+	}
+	t6, source, err := T6ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: t6JSON}, t6Input())
+	if err != nil || !reflect.DeepEqual(t6, wantT6) || !reflect.DeepEqual(source, wantSource) {
 		t.Fatalf("T6 valid adapter = %#v %#v %v", t6, source, err)
 	}
-	t7, source, err := T7ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: []byte(`{"proposal_kind":"policy","target_scope":"global","title":"Review trend","body":"Human review only.","evidence_entry_ids":["cat"],"requires_human_approval":true}`)}, "aggregate:v1:global:all:1:2", []string{"cat"})
-	if err != nil || t7.Proposal == nil || t7.NoDraft || source.Kind != "brain" || source.LogicalCallID != result.CallID || source.PromptVersion != result.PromptVersion {
+	t7JSON := []byte(`{"proposal_kind":"policy","target_scope":"global","title":"Review trend","body":"Human review only.","evidence_entry_ids":["cat"],"requires_human_approval":true}`)
+	var wantT7 T7Output
+	if err := decode.Decode(t7JSON, &wantT7, decode.Closed); err != nil {
+		t.Fatal(err)
+	}
+	t7, source, err := T7ResultFromCall(CallResult{CallID: result.CallID, Status: result.Status, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion, Output: t7JSON}, "aggregate:v1:global:all:1:2", []string{"cat"})
+	if err != nil || t7.Proposal == nil || t7.NoDraft || !reflect.DeepEqual(*t7.Proposal, wantT7) || !reflect.DeepEqual(source, wantSource) {
 		t.Fatalf("T7 valid adapter = %#v %#v %v", t7, source, err)
 	}
 }
 
-func TestIssue415FallbackAdaptersAreClosed(t *testing.T) {
-	for _, tc := range []struct{ raw, want string }{{"provider_disabled", "provider_disabled"}, {"token_budget_exceeded", "token_threshold"}, {"input_too_large", "input_too_large"}, {"invalid_output", "invalid_output"}, {"provider_error", "provider_error"}, {"recovery", "recovery"}} {
-		reason := tc.want
-		call := CallResult{CallID: "call-" + reason, Status: "fallback", FallbackReason: tc.raw}
+func TestIssue436FallbackAdaptersPreserveSourceAndT4Skeleton(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"provider_disabled", "provider_disabled"}, {"token_budget_exceeded", "token_threshold"}, {"input_too_large", "input_too_large"}, {"invalid_output", "invalid_output"}, {"attempts exhausted: provider detail must not leak", "provider_error"}, {"recovery: private operator detail must not leak", "recovery"}} {
+		call := CallResult{CallID: "call-" + tc.want, Status: "fallback", FallbackReason: tc.raw}
+		assertSource := func(t *testing.T, got BrainSource, touchpoint string) {
+			t.Helper()
+			want := BrainSource{Kind: "fallback", LogicalCallID: call.CallID, Version: touchpoint + "/fallback/v1", Reason: tc.want}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s source = %#v, want %#v", touchpoint, got, want)
+			}
+			if strings.Contains(got.Reason, "detail") || strings.Contains(got.Reason, "private") {
+				t.Fatalf("%s source leaked raw fallback reason: %#v", touchpoint, got)
+			}
+		}
 		t4, source, err := T4ResultFromCall(call, t4Input())
-		if err != nil || t4.Fallback == nil || t4.Normal != nil || source.Reason != tc.want || source.Version != "T4/fallback/v1" {
-			t.Fatalf("T4 %q: %#v %#v %v", reason, t4, source, err)
+		if err != nil || t4.Fallback == nil || t4.Normal != nil {
+			t.Fatalf("T4 %q: %#v %v", tc.want, t4, err)
 		}
+		assertSource(t, source, "T4")
 		t7, source, err := T7ResultFromCall(call, "aggregate:v1:global:all:1:2", []string{"cat"})
-		if err != nil || !t7.NoDraft || t7.Proposal != nil || source.Reason != tc.want || source.Version != "T7/fallback/v1" {
-			t.Fatalf("T7 %q: %#v %#v %v", reason, t7, source, err)
+		if err != nil || !t7.NoDraft || t7.Proposal != nil {
+			t.Fatalf("T7 %q: %#v %v", tc.want, t7, err)
 		}
+		assertSource(t, source, "T7")
 		for _, severity := range []InterruptSeverity{"low", "normal", "high", "critical"} {
 			in := t6Input()
 			in.Candidate.Severity = severity
-			out, _, err := T6ResultFromCall(call, in)
+			out, source, err := T6ResultFromCall(call, in)
 			want := T6Delivery("batch")
 			if severity == "high" || severity == "critical" {
 				want = "immediate"
@@ -122,12 +271,18 @@ func TestIssue415FallbackAdaptersAreClosed(t *testing.T) {
 			if err != nil || out.Delivery == nil || *out.Delivery != want {
 				t.Fatalf("T6 %s: %#v %v", severity, out, err)
 			}
+			assertSource(t, source, "T6")
 		}
 	}
+
 	in := t4Input()
-	in.Interrupt.Links = []T4Link{{Label: "evidence", Target: "https://example.test/e"}}
+	in.AttemptNo = intPtr(3)
+	in.Interrupt.FallbackBrief = "check failed: build 17"
+	in.Interrupt.BriefFragments = []string{"build 17 failed", "review needed"}
+	in.Interrupt.Links = []T4Link{{Label: "event", Target: "sift://event/0123456789abcdef0123456789abcdef"}, {Label: "evidence", Target: "https://example.test/e"}}
+	in.Interrupt.CandidateOptions = []T4Option{{ID: "review", Label: "Review", Effect: "open review", Risk: "delay"}, {ID: "retry", Label: "Retry", Effect: "retry check", Risk: "cost"}}
 	var fallback T4Input
-	if err := decode.Decode(T4FallbackOutput(in), &fallback, decode.Closed); err != nil || len(fallback.Interrupt.Links) != 1 || fallback.Interrupt.FallbackBrief != in.Interrupt.FallbackBrief {
-		t.Fatalf("lossless fallback: %#v %v", fallback, err)
+	if err := decode.Decode(T4FallbackOutput(in), &fallback, decode.Closed); err != nil || !reflect.DeepEqual(fallback, in) {
+		t.Fatalf("lossless T4 fallback skeleton = %#v, want %#v: %v", fallback, in, err)
 	}
 }
