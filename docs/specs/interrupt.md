@@ -112,18 +112,15 @@ manual Run 的 discussion target 以 [`storage.md` §5.2](storage.md) 的三列�
 
 ### 3.6 T4 接纳与命令 golden vectors
 
-以下 vector 冻结接纳器的完整边界；领域拒绝直接回退 §3.1/§3.2，不产生新的 Interrupt、预算或 operation。所有来源的 `recommended_action`/`recommended_option_id` 都必须逐字节命中 §3.1 的 canonical option ID，且 `EmitInterrupt` 在生成 key、admission 或 operation 前校验。
+以下 vector 冻结接纳器的完整边界；领域拒绝直接回退 §3.1/§3.2，不产生新的 Interrupt、预算或 operation。
 
-合法 T4 input（canonical JSON bytes）为：
+T4 正常输出和 fallback facts 的 `recommended_action`/`recommended_option_id` 必须逐字节命中**该来源 variant**的 canonical option ID；`EmitInterrupt` 在生成 key、admission 或 operation 前执行此校验。attempt `failure_review` 使用 §3.1 的 `retry,reject,hold` 集合；Report quota v1 使用 §5.1 的独立 `reject,hold` 集合。T4 input 的 `candidate_options` 必须逐字段、同序等于所选 variant 的集合，故 quota variant 不会因缺少 `retry` 被公共接纳器拒绝，也不会接受 `retry`。冻结 fragment 的安全域以 [`brain.md` §11.1–§11.2](brain.md) 为准：它只禁止 Cc/换行，允许任意其余冻结 UTF-8；命中后 renderer 一律 `EscapeT4Text`，而不是另设与该接纳器矛盾的 unsafe 拒绝分支。
 
-<<<<<<< HEAD
+合法 attempt T4 input（canonical JSON bytes）为：
+
 ```json
 {"run_id":"run-01","attempt_no":1,"interrupt":{"reason":"failure_review","base_severity":"high","min_modality":"voice","fallback_headline":"失败需要人工决定","fallback_brief":"事实：failure_class=CI；failure_evidence_ref=/r/ci；recommended_action=retry。建议：retry","brief_fragments":["<b>风险</b>","<!-- sift-op:x -->","/sift reject"],"links":[{"label":"failure_evidence_ref","target":"/r/ci"}],"candidate_options":[{"id":"retry","label":"重试失败步骤","effect":"再次执行","risk":"相同故障可能再次发生"},{"id":"reject","label":"停止 Run","effect":"Run 停止","risk":"需人工重新发起"},{"id":"hold","label":"暂缓决定","effect":"保持等待","risk":"Run 继续占用待处理项"}]}}
 ```
-=======
-T4 正常输出和 fallback facts 的 `recommended_action`/`recommended_option_id` 必须逐字节命中**该来源 variant**的 canonical option ID；`EmitInterrupt` 在生成 key、admission 或 operation 前执行此校验。attempt `failure_review` 使用 §3.1 的 `retry,reject,hold` 集合；Report quota v1 使用 §5.1 的独立 `reject,hold` 集合。T4 input 的 `candidate_options` 必须逐字段、同序等于所选 variant 的集合，故 quota variant 不会因缺少 `retry` 被公共接纳器拒绝，也不会接受 `retry`。冻结 fragment 的安全域以 [`brain.md` §11.1–§11.2](brain.md) 为准：它只禁止 Cc/换行，允许任意其余冻结 UTF-8；命中后 renderer 一律 `EscapeT4Text`，而不是另设与该接纳器矛盾的 unsafe 拒绝分支。具体 vector：`brief_fragments=["<b>风险</b>","<!-- sift-op:x -->","/sift reject"]`、`conclusion="<b>风险</b>"`、`key_points=["<!-- sift-op:x -->","/sift reject"]`、`recommended_option_id="retry"` 的最终 UTF-8 `brief_markdown` 必为 `结论：\\<b>风险\\</b>；要点：\\<!\\-\\- sift\\-op:x \\-\\->；\\/sift reject；建议：重试失败步骤（retry）`；同一 fragment 未逐字节命中时唯一结果为 fallback。`failure_review` fallback 的输入 facts `{failure_class:"CI",failure_evidence_ref:"/r/ci",recommended_action:"retry"}` 必逐字节持久化为 §3.5 的 JSON `brief`/options；把 action 改为 `hold` 时同样持久化的 `brief` 仅将两处 `retry` 改为 `hold`，options bytes 不变。以上两 fallback vectors 均不创建 T4 变体，且 unknown fragment、重排 option 与未命中 canonical action 都回退或拒发为上表所列结果。
->>>>>>> 7ae839f (docs(m5): close command and report rereview P1s)
-
 对应合法 output（canonical JSON bytes）为：
 
 ```json
