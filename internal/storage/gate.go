@@ -25,6 +25,7 @@ type GateEvaluationRecord struct {
 	CertificationVersion              string
 	RiskSourceVersion                 string
 	VerdictDigest, ShadowDecision     string
+	ConflictDigest                    string
 	FeaturesJSON                      json.RawMessage
 	BrainInputLinks                   []GateBrainInputLink
 	CacheHit                          bool
@@ -87,6 +88,12 @@ func (d *DB) RecordGateEvaluationAndEmitInterrupt(ctx context.Context, r GateEva
 	if cmd.RunID != r.RunID || cmd.CalibrationID != "" {
 		return RecordedGateEvaluation{}, Interrupt{}, errors.New("storage: invalid gate interrupt binding")
 	}
+	if cmd.Reason == InterruptMergeConflict {
+		if cmd.Generation.ConflictDigest != MergeConflictDigest(cmd.Generation.ChangeID, cmd.Generation.HeadSHA) {
+			return RecordedGateEvaluation{}, Interrupt{}, errors.New("storage: invalid merge conflict digest")
+		}
+		r.ConflictDigest = cmd.Generation.ConflictDigest
+	}
 	if cmd.Reason == InterruptCodeReview {
 		if cmd.Generation.PolicySnapshotID != "" && cmd.Generation.PolicySnapshotID != r.EffectivePolicyHash {
 			return RecordedGateEvaluation{}, Interrupt{}, errors.New("storage: code review policy snapshot does not match gate record")
@@ -124,7 +131,7 @@ func recordGateEvaluationTxWithIDs(ctx context.Context, tx *sql.Tx, r GateEvalua
 	}
 	// Snapshots are content-addressed. Repeated calls share the immutable input
 	// row but always receive fresh evaluation/calibration rows below.
-	if _, err := tx.ExecContext(ctx, `INSERT INTO gate_input_snapshots (id,gate_input_hash,schema_version,canonical_json,head_sha,effective_policy_hash,certification_version,risk_source_version,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(gate_input_hash) DO NOTHING`, out.SnapshotID, r.GateInputHash, r.SnapshotSchemaVersion, string(r.SnapshotJSON), r.HeadSHA, r.EffectivePolicyHash, r.CertificationVersion, r.RiskSourceVersion, r.NowMS); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO gate_input_snapshots (id,gate_input_hash,schema_version,canonical_json,head_sha,effective_policy_hash,certification_version,risk_source_version,conflict_digest,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(gate_input_hash) DO NOTHING`, out.SnapshotID, r.GateInputHash, r.SnapshotSchemaVersion, string(r.SnapshotJSON), r.HeadSHA, r.EffectivePolicyHash, r.CertificationVersion, r.RiskSourceVersion, nullable(r.ConflictDigest), r.NowMS); err != nil {
 		return out, err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM gate_input_snapshots WHERE gate_input_hash=?`, r.GateInputHash).Scan(&out.SnapshotID); err != nil {

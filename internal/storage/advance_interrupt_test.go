@@ -125,6 +125,9 @@ func TestAdvanceInterruptRepeatedCriticalFuseSealsCurrentAuthority(t *testing.T)
 	if authorityVersion != version || authorityNonce != nonce {
 		t.Fatalf("authority = %d/%s, want %d/%s", authorityVersion, authorityNonce, version, nonce)
 	}
+	if _, err := db.db.Exec(`UPDATE attention_batch_member_authority SET nonce='forged' WHERE batch_id=? AND interrupt_id=?`, batch, fused.ID); err == nil || !strings.Contains(err.Error(), "current open Interrupt") {
+		t.Fatalf("forged collecting authority update = %v", err)
+	}
 	if err := db.PrepareDueAttentionBatches(ctx, testNow+1_000_000); err != nil {
 		t.Fatal(err)
 	}

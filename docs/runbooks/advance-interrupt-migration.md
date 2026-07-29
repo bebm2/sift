@@ -46,5 +46,5 @@ PRAGMA foreign_key_check;
 SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;
 ```
 
-应分别返回无行和 `43`。如备份修复无法证明 binding provenance，保持服务
+应分别返回无行和 `45`。如备份修复无法证明 binding provenance，保持服务
 停止并重新生成受影响 Interrupt，而不是绕过 0038 的约束。
