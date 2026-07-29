@@ -627,14 +627,27 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 		})
 	}
 	entryID, err := chargeAttentionTx(ctx, tx, cmd, severity)
-	if err != nil {
+	quotaBatched := errors.Is(err, ErrAttentionQuotaExceeded)
+	if err != nil && !quotaBatched {
 		return Interrupt{}, err
+	}
+	if quotaBatched {
+		// Exhaustion is an admission outcome, not an emission failure. The
+		// Interrupt remains actionable through its frozen daily summary.
+		if dispatch.channelID == "" || dispatch.channelSnapshot == "" {
+			return Interrupt{}, fmt.Errorf("%w: quota batch lacks channel", ErrInterruptRejected)
+		}
+		at, ok := nextSummary(cmd.NowMS, timezoneOrUTC(cmd.DayTimezone), summaryOrDefault(cmd.DailySummaryAt))
+		if !ok || at >= cmd.NowMS+cmd.ExpiresAfterMS {
+			return Interrupt{}, fmt.Errorf("%w: quota batch after expiry", ErrInterruptRejected)
+		}
+		dispatch.state, dispatch.delivery, dispatch.heldReason, dispatch.nextDispatchAtMS = "batched", "batch", "", nil
 	}
 	in := Interrupt{ID: newID(), RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, GenerationKey: key, Reason: cmd.Reason, Severity: severity, Headline: headline, Brief: brief, Options: t.options, MinModality: t.modality, Links: links, ExpiresAtMS: cmd.NowMS + cmd.ExpiresAfterMS, OnExpire: cmd.OnExpire, ChargedBudgetEntryID: entryID, ChannelID: dispatch.channelID, Delivery: dispatch.delivery, SuggestedDowngrade: dispatch.suggestedDowngrade, NextDispatchAtMS: dispatch.nextDispatchAtMS, HeldReason: dispatch.heldReason}
 	optionsJSON, _ := json.Marshal(in.Options)
 	linksJSON, _ := json.Marshal(in.Links)
 	nonce := newID()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,channel_id,channel_snapshot_json,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms,expires_after_ms,on_max_escalations,base_severity,nonce_issued_at_ms,day_timezone,daily_summary_at,critical_window_ms,critical_total_limit,critical_per_run_limit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), nonce, dispatch.state, nullable(in.ChannelID), nullable(dispatch.channelSnapshot), nullable(in.Delivery), in.SuggestedDowngrade, nullableInt64(in.NextDispatchAtMS), nullable(in.HeldReason), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS, cmd.ExpiresAfterMS, cmd.OnMaxEscalations, baseSeverity, cmd.NowMS, timezoneOrUTC(cmd.DayTimezone), summaryOrDefault(cmd.DailySummaryAt), fuseWindowOrDefault(cmd.CriticalWindowMS), fuseTotalOrDefault(cmd.CriticalTotalLimit), fuseRunOrDefault(cmd.CriticalPerRunLimit)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,channel_id,channel_snapshot_json,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms,expires_after_ms,on_max_escalations,base_severity,nonce_issued_at_ms,day_timezone,daily_summary_at,critical_window_ms,critical_total_limit,critical_per_run_limit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), nonce, dispatch.state, nullable(in.ChannelID), nullable(dispatch.channelSnapshot), nullable(in.Delivery), in.SuggestedDowngrade, nullableInt64(in.NextDispatchAtMS), nullable(in.HeldReason), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, nullable(in.ChargedBudgetEntryID), nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS, cmd.ExpiresAfterMS, cmd.OnMaxEscalations, baseSeverity, cmd.NowMS, timezoneOrUTC(cmd.DayTimezone), summaryOrDefault(cmd.DailySummaryAt), fuseWindowOrDefault(cmd.CriticalWindowMS), fuseTotalOrDefault(cmd.CriticalTotalLimit), fuseRunOrDefault(cmd.CriticalPerRunLimit)); err != nil {
 		// Two recovery/termination callers can discover the same stall at
 		// once. SQLite serializes the writers, so the loser may observe the
 		// unique generation-key constraint only after the winner commits.
@@ -647,16 +660,25 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 		return Interrupt{}, err
 	}
 	if in.Severity != SeverityCritical {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,attention_charge_entry_id,severity,quota_day,day_timezone,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)`, newID(), in.ID, in.ID+":initial", "quota_charged", in.ID, nullable(in.ChargedBudgetEntryID), in.Severity, quotaDay(cmd.NowMS, timezoneOrUTC(cmd.DayTimezone)), timezoneOrUTC(cmd.DayTimezone), in.RunID, cmd.NowMS); err != nil {
+		admissionKind := "quota_charged"
+		if quotaBatched {
+			admissionKind = "quota_batched"
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attention_admissions(id,interrupt_id,admission_key,kind,metric_identity,attention_charge_entry_id,severity,quota_day,day_timezone,run_id,critical_source,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)`, newID(), in.ID, in.ID+":initial", admissionKind, in.ID, nullable(in.ChargedBudgetEntryID), in.Severity, quotaDay(cmd.NowMS, timezoneOrUTC(cmd.DayTimezone)), timezoneOrUTC(cmd.DayTimezone), in.RunID, cmd.NowMS); err != nil {
 			return Interrupt{}, err
 		}
+		if quotaBatched {
+			if err := addDailyBatchMemberTx(ctx, tx, in.ID, 1, nonce, cmd.NowMS, dispatch.channelID, dispatch.channelSnapshot, timezoneOrUTC(cmd.DayTimezone), summaryOrDefault(cmd.DailySummaryAt)); err != nil {
+				return Interrupt{}, err
+			}
+		}
 	} else {
-		admitted, admissionID, err := admitCriticalTx(ctx, tx, in.ID, cmd.NowMS, "initial", fuseWindowOrDefault(cmd.CriticalWindowMS), fuseTotalOrDefault(cmd.CriticalTotalLimit), fuseRunOrDefault(cmd.CriticalPerRunLimit))
+		admitted, admissionID, scope, err := admitCriticalTx(ctx, tx, in.ID, in.Severity, cmd.NowMS, "initial", fuseWindowOrDefault(cmd.CriticalWindowMS), fuseTotalOrDefault(cmd.CriticalTotalLimit), fuseRunOrDefault(cmd.CriticalPerRunLimit))
 		if err != nil {
 			return Interrupt{}, err
 		}
 		if !admitted {
-			if err := addCriticalBatchMemberTx(ctx, tx, in.ID, 1, nonce, admissionID, dispatch.channelID, dispatch.channelSnapshot, cmd.NowMS); err != nil {
+			if err := addCriticalBatchMemberTx(ctx, tx, in.ID, 1, nonce, admissionID+":"+scope, dispatch.channelID, dispatch.channelSnapshot, cmd.NowMS); err != nil {
 				return Interrupt{}, err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET dispatch_state='batched',delivery='batch',held_reason=NULL,next_dispatch_at_ms=NULL WHERE id=?`, in.ID); err != nil {
@@ -1118,7 +1140,7 @@ func interruptByKeyTx(ctx context.Context, tx *sql.Tx, key string) (Interrupt, b
 	var opts, links string
 	var reason, severity, on string
 	var channelID, delivery, heldReason sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,channel_id,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,charged_budget_entry_id FROM interrupts WHERE generation_key=?`, key).Scan(&in.ID, &in.RunID, &n, &in.GenerationKey, &reason, &severity, &in.Headline, &in.Brief, &opts, &in.MinModality, &links, &channelID, &delivery, &in.SuggestedDowngrade, &next, &heldReason, &in.ExpiresAtMS, &on, &in.ChargedBudgetEntryID)
+	err := tx.QueryRowContext(ctx, `SELECT id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,channel_id,delivery,suggested_downgrade,next_dispatch_at_ms,held_reason,expires_at_ms,on_expire,COALESCE(charged_budget_entry_id,'') FROM interrupts WHERE generation_key=?`, key).Scan(&in.ID, &in.RunID, &n, &in.GenerationKey, &reason, &severity, &in.Headline, &in.Brief, &opts, &in.MinModality, &links, &channelID, &delivery, &in.SuggestedDowngrade, &next, &heldReason, &in.ExpiresAtMS, &on, &in.ChargedBudgetEntryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Interrupt{}, false, nil
 	}

@@ -47,7 +47,7 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 	} else if err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT m.delivery_id,m.interrupt_id,m.interrupt_version,m.nonce,m.headline,m.reason,m.severity,m.links_json,m.options_json FROM attention_batch_members m JOIN interrupts i ON i.id=m.interrupt_id WHERE m.batch_id=? AND m.excluded_at_ms IS NULL AND i.status='open' AND i.version=m.interrupt_version AND i.nonce=m.nonce ORDER BY m.interrupt_id`, batchID)
+	rows, err := tx.QueryContext(ctx, `SELECT m.delivery_id,m.interrupt_id,m.interrupt_version,m.nonce,m.headline,m.reason,m.severity,m.links_json,m.options_json,i.run_id FROM attention_batch_members m JOIN interrupts i ON i.id=m.interrupt_id WHERE m.batch_id=? AND m.excluded_at_ms IS NULL AND i.status='open' AND i.version=m.interrupt_version AND i.nonce=m.nonce ORDER BY m.interrupt_id`, batchID)
 	if err != nil {
 		return err
 	}
@@ -55,17 +55,21 @@ func (d *DB) prepareAttentionBatch(ctx context.Context, batchID string, nowMS in
 	members := []map[string]any{}
 	texts := []string{}
 	for rows.Next() {
-		var delivery, id, nonce, headline, reason, severity, links, options string
+		var delivery, id, nonce, headline, reason, severity, links, options, runID string
 		var version int
-		if err := rows.Scan(&delivery, &id, &version, &nonce, &headline, &reason, &severity, &links, &options); err != nil {
+		if err := rows.Scan(&delivery, &id, &version, &nonce, &headline, &reason, &severity, &links, &options, &runID); err != nil {
 			return err
 		}
 		var l, o any
 		if json.Unmarshal([]byte(links), &l) != nil || json.Unmarshal([]byte(options), &o) != nil {
 			return fmt.Errorf("storage: corrupt batch member")
 		}
-		members = append(members, map[string]any{"delivery_id": delivery, "interrupt_id": id, "interrupt_version": version, "nonce": nonce, "headline": headline, "reason": reason, "severity": severity, "links": l, "options": o, "command_lines": []string{}})
-		texts = append(texts, id+": "+headline)
+		rendered, commandLines, err := renderChannelInterrupt(headline, "", links, options, runID, nonce)
+		if err != nil {
+			return err
+		}
+		members = append(members, map[string]any{"delivery_id": delivery, "interrupt_id": id, "interrupt_version": version, "nonce": nonce, "headline": headline, "reason": reason, "severity": severity, "links": l, "options": o, "command_lines": commandLines})
+		texts = append(texts, id+": "+rendered)
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -108,9 +112,46 @@ func joinBatchText(parts []string) string {
 	out := ""
 	for i, p := range parts {
 		if i > 0 {
-			out += "；"
+			out += "\n\n"
 		}
 		out += p
 	}
 	return out
+}
+
+// renderChannelInterrupt is the sole deterministic Channel renderer. Command
+// lines always carry the delivery's current Run and nonce; a summary never
+// creates a batch-wide command.
+func renderChannelInterrupt(headline, brief, linksJSON, optionsJSON, runID, nonce string) (string, []string, error) {
+	var links []InterruptLink
+	var options []InterruptOption
+	if err := json.Unmarshal([]byte(linksJSON), &links); err != nil {
+		return "", nil, fmt.Errorf("storage: corrupt interrupt links")
+	}
+	if err := json.Unmarshal([]byte(optionsJSON), &options); err != nil {
+		return "", nil, fmt.Errorf("storage: corrupt interrupt options")
+	}
+	lines := []string{headline}
+	if brief != "" {
+		lines = append(lines, brief)
+	}
+	for _, link := range links {
+		lines = append(lines, link.Label+": "+link.Target)
+	}
+	commands := make([]string, 0, len(options))
+	for _, option := range options {
+		lines = append(lines, option.Label+"（"+option.ID+"）："+option.Effect+"；风险："+option.Risk)
+		command := "/sift " + option.ID + " " + runID + " " + nonce
+		switch option.ID {
+		case "reject":
+			command += " [<reason>]"
+		case "hold":
+			command += " 1h"
+		case "ask":
+			command += " <text>"
+		}
+		commands = append(commands, command)
+		lines = append(lines, command)
+	}
+	return joinBatchText(lines), commands, nil
 }

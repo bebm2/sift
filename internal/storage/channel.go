@@ -55,20 +55,36 @@ BEGIN SELECT RAISE(ABORT,'sealed attention batch is immutable'); END;`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type legacyBinding struct {
+		id, reason, runID string
+		created           int64
+	}
+	var missing []legacyBinding
 	for rows.Next() {
-		var id, reason, runID string
-		var created int64
-		if err := rows.Scan(&id, &reason, &runID, &created); err != nil {
+		var row legacyBinding
+		if err := rows.Scan(&row.id, &row.reason, &row.runID, &row.created); err != nil {
+			rows.Close()
 			return err
 		}
-		binding, _ := json.Marshal(map[string]any{"arm": "run_transition", "run_id": runID})
+		missing = append(missing, row)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, row := range missing {
+		// Historical rows did not retain every arm-specific identity. Keep the
+		// binding explicit and unique rather than fabricating run_transition.
+		binding, _ := json.Marshal(map[string]any{"arm": row.reason, "legacy_interrupt_id": row.id, "run_id": row.runID})
 		sum := sha256.Sum256(binding)
-		if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) VALUES(?,?,1,?,?,?)`, id, reason, string(binding), hex.EncodeToString(sum[:]), created); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) VALUES(?,?,1,?,?,?)`, row.id, row.reason, string(binding), hex.EncodeToString(sum[:]), row.created); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 type channelPayload struct {
