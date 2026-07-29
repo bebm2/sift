@@ -452,13 +452,16 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 
 每个 Interrupt 最多一行初发 `quota_charged|quota_batched`，或一行初发 `critical_admitted|critical_fused`；首次由 high/normal 等升级至 critical 时，至多额外一行 `critical_admitted|critical_fused`，且 `critical_source=escalation`。`critical_admitted|critical_fused` 的 `critical_source` 必填，其他 kind 为 NULL。`quota_charged` 必须引用该 Interrupt 的实际 `charged_budget_entry_id`。`critical_admitted|critical_fused` 在初发有 charge 时引用该 charge，升级 admission 复用它；若初发为 `quota_batched`，两种 critical admission 的 `attention_charge_entry_id` 均为 NULL，且不得补造 charge。`quota_batched` 的两列均为 NULL。唯一 admission key 为 `<interrupt_id>:initial` 或 `<interrupt_id>:critical`，因此重复 tick、窗口边界重放只返回既有事实。两条合法 admission 共享 `metric_identity=<interrupt_id>`：已送达 `quota_batched` member 再升级为 `critical_admitted|critical_fused` 时，前者和成功 critical delivery 都保留各自 admission/delivery 审计，但指标只按该 stable lineage 计一次。两个 partial unique index `UNIQUE(interrupt_id) WHERE kind IN (quota_charged,quota_batched)` 与 `UNIQUE(interrupt_id) WHERE kind IN (critical_admitted,critical_fused)` 保证每 Interrupt 最多一次 initial decision 与最多一次 critical transition；INSERT 后禁止 UPDATE/DELETE。
 
-`attention_batches` 是 versioned、可恢复的摘要对象，不把摘要伪造成 Interrupt/reason。它是 Channel identity 的唯一 batch authority；interrupt.md 不得定义 parallel batch tables, states, keys or prepare ports。`id` 是由其稳定 identity 生成的 batch ID，`operation_key` 由该 ID 固定导出；均不得使用当前时间、worker 或可变文本。
+`attention_batches` 是 versioned、可恢复的摘要对象，不把摘要伪造成 Interrupt/reason。它是 Channel identity 的唯一 batch authority；interrupt.md 不得定义 parallel batch tables, states, keys or prepare ports。`id` 是由其稳定 identity 生成的 batch ID，`operation_key` 由该 ID 固定导出；均不得使用当前时间、worker 或可变文本。V0 batch 禁止跨项目，且只能容纳同一已验证 Forge discussion target 的成员；不能形成该绑定的 candidate 不得入 batch。
 
 | 列 | 类型 | 约束/说明 |
 |----|------|-----------|
-| `id` | TEXT | PK；daily 为 `daily:<zone>:<due_at_ms>:<channel_id>`，critical 为 `critical:<scope>:<scope_id>:<episode_admission_id>:<channel_id>` 的稳定 identity |
+| `id` | TEXT | PK；daily 为 `daily:<project_id>:<zone>:<due_at_ms>:<channel_id>:<target_kind>:<base64url(target_id)>`，critical 为同样纳入 `project_id`、target identity 的稳定 identity；均不得使用 worker/时间以外的未冻结值 |
+| `project_id` | TEXT | NOT NULL FK projects；所有 member 的 project 必须逐字节相同 |
+| `forge_kind` / `forge_host` / `forge_project_key` | TEXT | NOT NULL；冻结的单一 Forge project identity |
+| `forge_alert_target_kind` / `forge_alert_target_id` | TEXT | NOT NULL；同一 batch 所有 member 已验证且逐字节相同的 `issue|change` discussion target；唯一 failure alert 使用它 |
 | `kind` | TEXT | `daily_summary \| critical_fuse` |
-| `channel_id` / `channel_snapshot_json` | TEXT | NOT NULL；入批时冻结的 Channel ID / `{type,target_ref,capabilities,renderer}`，不得含凭据 |
+| `channel_id` / `channel_snapshot_json` | TEXT | NOT NULL；入批时冻结的 Channel ID / `{type,target_ref,capabilities,renderer}`，不得含 endpoint 或凭据 |
 | `delivery_id` | TEXT | NOT NULL UNIQUE；`<batch_id>:publish:1`，sealed payload、operation 与 delivery projection 使用同一值 |
 | `scope` / `scope_id` | TEXT | daily 为 `day` / `<zone>:<due_at_ms>`；critical 为 `global` / `global` 或 `run` / `<run_id>` |
 | `quota_day` / `day_timezone` | TEXT | daily 成员可各自携带 quota day，batch 级 quota day 为 NULL；daily 的 day_timezone 必填；critical 为 NULL |
@@ -471,7 +474,7 @@ Command 字段迁移必须把旧 `forge_event_receipts(project_id,forge_event_id
 
 daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时刻；同一规范化 zone、scheduled occurrence 和冻结 Channel 只能有一个 batch，成员各自保留自己的 quota day。不同 Channel 必须建立不同 batch，绝不混合为一个 delivery。critical episode 在首个 `critical_fused` 时打开；窗口采用半开区间 `[created_at_ms, created_at_ms + window)`，因此 evidence 在 `due_at_ms` 恰好 expiry 时已不计数。episode 的 `due_at_ms` 是使当前 scope 的 admitted evidence 首次少于 limit 的最早 expiry。到期时必须在事务内重裁决：若仍饱和，则 sealing/保持旧 batch 后，以当前最早计数 evidence 的 admission ID 打开 successor episode，并为其计算新的 due_at；不得原地修改已创建 batch 的 due_at 或永久停在 collecting。只有重新裁决后低于 limit 才允许新 candidate 开新 episode。候选同时命中 global 和 per-Run 时只归 global batch；因此一个 Interrupt 绝不进入两批。
 
-`attention_batch_members` 保存 batch 的不可重复成员与发送时需要的冻结展示绑定：主键 `(batch_id, interrupt_id)`，另有唯一 `member_key=<batch_id>:<interrupt_id>`；列为 `admission_id`（FK attention_admissions）、`channel_id`、`channel_snapshot_json`（两者逐字节等于 batch）、`delivery_id=<batch_id>:<interrupt_id>`（UNIQUE）、`interrupt_version`、`nonce`、`headline`、`reason`、`severity`、`links_json`、`options_json`、`joined_at_ms`、`excluded_at_ms`。入批时冻结这些值；同一 Interrupt 不能在同一 batch 有第二成员。关闭或由事实 supersede 的事务在 batch 仍为 `collecting` 时必须把成员标为 excluded。到期的 `PrepareAttentionBatch` 在同一事务重读其余成员的 open/version/nonce，排除不再匹配者；有成员时冻结 sorted payload、写唯一 `channel_publish` operation 并把 batch 置 `sealed`，无成员则 `cancelled`。sealed payload、member 快照、operation 和成功 delivery evidence 均不可改；这一定义以 sealing 为发送前的最后关闭排除边界，之后的关闭不会改写已经冻结的外部请求。
+`attention_batch_members` 保存 batch 的不可重复成员与发送时需要的冻结展示绑定：主键 `(batch_id, interrupt_id)`，另有唯一 `member_key=<batch_id>:<interrupt_id>`；列为 `admission_id`（FK attention_admissions）、`channel_id`、`channel_snapshot_json`（两者逐字节等于 batch）、`delivery_id=<batch_id>:<interrupt_id>`（UNIQUE）、`interrupt_version`、`nonce`、`headline`、`reason`、`severity`、`links_json`、`options_json`、`joined_at_ms`、`excluded_at_ms`。入批时还必须断言 member Run 的 project 和已验证 discussion target 等于 batch 冻结列；同一 Interrupt 不能在同一 batch 有第二成员。关闭或由事实 supersede 的事务在 batch 仍为 `collecting` 时必须把成员标为 excluded。到期的 `PrepareAttentionBatch` 在同一事务重读其余成员的 open/version/nonce，排除不再匹配者；有成员时冻结 sorted payload、写唯一 `channel_publish` operation 并把 batch 置 `sealed`，无成员则 `cancelled`。sealed payload、member 快照、operation 和成功 delivery evidence 均不可改；这一定义以 sealing 为发送前的最后关闭排除边界，之后的关闭不会改写已经冻结的外部请求。
 
 ### 6.4 Command target、effect 与 outcome
 
@@ -491,64 +494,44 @@ daily batch 的 `due_at_ms` 是 config §3.9 所定义的下一本地摘要时�
 
 每个 sealed batch 有一条 `batch_deliveries` 投影：`batch_id` PK/FK、`delivery_id` UNIQUE（逐字节等于 `<batch_id>:publish:1`）、`operation_key` UNIQUE、`state=pending|delivered|failed`、`attempt_count`、`remote_ref`、`last_error`、`created_at_ms`、`delivered_at_ms`。它与 `interrupt_deliveries` 同样只提供查询面。`CompleteOutboxAttempt` 成功时原子标记该投影、batch 和逐成员的 Ledger delivery；响应丢失的重放沿用同一 operation key 和 frozen payload，Channel 仍如实为 at-least-once。
 
-### 6.6 Batch exact vectors（config / interrupt / outbox 共用）
+### 6.5.1 `channel_failure_episodes`
 
-以下是唯一的 batch fixture。所有 JSON 均为 [`config.md` §4](config.md) 所定义的 canonical JSON：UTF-8、每一层对象 key 词典序、无多余空白。任何 `payload_digest` 都是紧随其后的 payload UTF-8 bytes 的 SHA-256 小写 hex。冻结输入为 `zone=Asia/Shanghai`、`due_at_ms=1785286800000`、两个 Run `run-a/run-b`、成员 `i-a/i-b`，且 `version=2`、`nonce=n-a/n-b`；所有 `excluded_at_ms` 均冻结为 `1785286800001`。
+每个 immutable `channel_publish` operation 恰有一行 durable episode，主键 `(subject_id,generation)`；单条 `subject_id` 等于 `interrupt_deliveries.delivery_id`，batch 等于 `batch_deliveries.delivery_id`，`generation` V0 固定为 `1`。列为 `subject_id`、`generation`、`consecutive_failures`（非负整数）、`state`（`open|alerted|ended_delivered|ended_failed`）、`last_error_class`、`alert_operation_key`（NULL 或唯一 `alert:channel_failure:<subject_id>:1`）、`created_at_ms`、`updated_at_ms`、`ended_at_ms`。只有 `CompleteOutboxAttempt` 可在 owner/lease CAS 同一事务中创建或更新它及 delivery/alert；已终结行不可重开。`sift ps`/`sift doctor` 直接查询此表及 outbox operation，不能由内存或 error 文本重建。
 
-**同 Channel 并发 insert。** 两个事务分别带 `run-a/i-a` 与 `run-b/i-b` 竞争，唯一最终 batch、member、operation identity 是 `daily:Asia/Shanghai:1785286800000:ops-slack`、两个 member delivery ID 和 `attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1`。sealed `channel_publish.body` 的完整 bytes 为（digest `2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc`）：
+### 6.6 Channel batch and failure-episode exact vectors
 
-```json
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"},{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","headline":"变更等待代码审阅","interrupt_id":"i-b","interrupt_version":2,"links":[],"nonce":"n-b","options":[],"reason":"code_review","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清；i-b: 变更等待代码审阅","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
-```
+The following are the sole V0 fixtures for Channel target and failure recovery. JSON is canonical under [`config.md` §4](config.md). `target_ref` is always a resolver handle, never a URL. `base64url("42")=NDI`.
 
-其完整最终持久化投影 bytes 为：
+**Single-target batch sealing and replay.** Two candidates `i-a` and `i-b` belong to `project-a`, have the same verified GitHub target `owner/project-a` issue `42`, and freeze `ops-slack` with `target_ref=secret_ref:SIFT_CHANNEL_OPS_SLACK`. Their identity is `daily:project-a:Asia/Shanghai:1785286800000:ops-slack:issue:NDI`; its sealed `channel_publish.body` is exactly (SHA-256 `69e429233a51dc103ee3e291b78fb1b857713f271d1b12d4d84d70cbf82a6105`):
 
 ```json
-{"batch":{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","state":"sealed"},"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":null,"interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":null,"interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b"}],"operation":{"key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","type":"channel_publish"}}
+{"batch_id":"daily:project-a:Asia/Shanghai:1785286800000:ops-slack:issue:NDI","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"secret_ref:SIFT_CHANNEL_OPS_SLACK","type":"webhook"},"delivery_id":"daily:project-a:Asia/Shanghai:1785286800000:ops-slack:issue:NDI:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"forge_alert_target":{"forge_host":"github.com","forge_kind":"github","forge_project_key":"owner/project-a","target_id":"42","target_kind":"issue"},"members":[{"command_lines":[],"delivery_id":"daily:project-a:Asia/Shanghai:1785286800000:ops-slack:issue:NDI:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"},{"command_lines":[],"delivery_id":"daily:project-a:Asia/Shanghai:1785286800000:ops-slack:issue:NDI:i-b","headline":"变更等待代码审阅","interrupt_id":"i-b","interrupt_version":2,"links":[],"nonce":"n-b","options":[],"reason":"code_review","severity":"high"}],"project_id":"project-a","rendered_text":"i-a: Agent 需要你澄清；i-b: 变更等待代码审阅","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
 ```
 
-**不同 Channel 并发 insert。** `i-a` 冻结 `ops-slack`、`i-b` 冻结 `ops-teams` 时绝不混批。两个完整 payload bytes 分别为（digest 依次为 `c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10`、`db6d98f746eb3c6bb5af456841a5a914a91e16ddfe69a9e76fdb4e722557be96`）：
+Concurrent inserts return this one batch/member set and `attention-batch:daily:project-a:Asia/Shanghai:1785286800000:ops-slack:issue:NDI:publish:1`; response-loss replay returns those same bytes and key. A candidate with another project or any different forge kind/host/project/target is not a member of this batch and cannot cause its alert to target another Run. It follows its normal single-delivery/held path. Thus cross-project batch is **not allowed**.
+
+`attention_batches` persists the `forge_alert_target` fields above; on failure its one alert payload is closed as:
 
 ```json
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-teams","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-teams","renderer":"plain-v1","target_ref":"https://hooks.example/teams","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:i-b","headline":"变更等待代码审阅","interrupt_id":"i-b","interrupt_version":2,"links":[],"nonce":"n-b","options":[],"reason":"code_review","severity":"high"}],"rendered_text":"i-b: 变更等待代码审阅","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
+{"forge_host":"github.com","forge_kind":"github","forge_project_key":"owner/project-a","purpose":"channel_failure","target_id":"42","target_kind":"issue"}
 ```
 
-对应最终 identity bytes 为：
+No resolver result, endpoint or credential is present in either payload/digest. On secret rotation the replayed Channel operation retains `secret_ref:SIFT_CHANNEL_OPS_SLACK` and adapter resolution uses the rotated value. Missing access is `auth_or_capability`; an invalid resolved endpoint is `contract_violation`.
 
-```json
-{"batches":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-teams","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-teams:publish:1","payload_digest":"db6d98f746eb3c6bb5af456841a5a914a91e16ddfe69a9e76fdb4e722557be96"}],"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","interrupt_id":"i-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-teams:i-b","interrupt_id":"i-b"}]}
-```
+**Failure episode vectors.** `channel_failure_episodes` has one row per immutable Channel operation: `subject_id` is the single/batch delivery ID, `generation=1`, `consecutive_failures`, `state=open|alerted|ended_delivered|ended_failed`, `last_error_class`, `alert_operation_key` nullable, and timestamps. Its unique key is `(subject_id,generation)`. `CompleteOutboxAttempt` writes this row atomically with the immutable result and delivery projection.
 
-**排除。** 若 `i-b` sealing 前不是 `status=open,version=2,nonce=n-b`，它被排除。`i-a` 的 sealed payload 完整 bytes 为（digest `c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10`）：
+| vector | required durable result |
+|---|---|
+| threshold `3`; first then second `transient` completion | count `1`, then `2`; state `open`; no alert |
+| third `rate_limited` completion | count `3`; state `alerted`; exactly `alert:channel_failure:<subject_id>:1` and the frozen target payload above |
+| two workers complete one lease | only owner-matching completion commits; rejected stale completion changes neither count nor alert |
+| daemon restarts after count `2` | row reloads at `2`; next accepted failure creates the same threshold alert once |
+| alert operation itself fails | delivery episode and its alert key remain unchanged; no `channel_failure` alert for the alert |
+| `max_attempts=3`, threshold `3`, third transient result | Channel operation/delivery become `failed`, episode count `3` and `ended_failed`; alert exists and `ps`/`doctor` say generated, not delivered; no fourth Channel retry |
+| success after two retryable failures (unbounded retry policy) | delivery is delivered; count resets to `0`; state `ended_delivered`; no later old completion may reopen it |
 
-```json
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
-```
+`ps`/`doctor` obtain count/state/error/alert key and alert operation state by joining these durable rows, never by reconstructing an in-memory episode.
 
-最终 batch/member/operation bytes 为：
-
-```json
-{"batch":{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10","state":"sealed"},"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":null,"interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":1785286800001,"interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b"}],"operation":{"key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"c894afd28c0c9cd20e4bdbd0c2e56df0675710188bb02f0bd3effe0f9bb5cf10","type":"channel_publish"}}
-```
-
-**空批。** 两个成员都不匹配时，不创建 `channel_publish` operation，完整最终 bytes 为：
-
-```json
-{"batch":{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","id":"daily:Asia/Shanghai:1785286800000:ops-slack","operation_key":null,"payload_digest":null,"payload_json":null,"state":"cancelled"},"members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":1785286800001,"interrupt_id":"i-a","interrupt_version":2,"nonce":"n-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":1785286800001,"interrupt_id":"i-b","interrupt_version":2,"nonce":"n-b"}],"operation":null}
-```
-
-**sealed 后响应丢失重放。** 重放只返回原 operation，绝不创建第二 batch/member/operation；成员随后关闭也不改写 sealed bytes。以同 Channel 双成员 fixture 为例，重放的完整 payload bytes 为（digest `2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc`）：
-
-```json
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"https://hooks.example/slack","type":"webhook"},"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","delivery_kind":"attention_batch","due_at_ms":1785286800000,"members":[{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","headline":"Agent 需要你澄清","interrupt_id":"i-a","interrupt_version":2,"links":[],"nonce":"n-a","options":[],"reason":"agent_blocked","severity":"high"},{"command_lines":[],"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","headline":"变更等待代码审阅","interrupt_id":"i-b","interrupt_version":2,"links":[],"nonce":"n-b","options":[],"reason":"code_review","severity":"high"}],"rendered_text":"i-a: Agent 需要你澄清；i-b: 变更等待代码审阅","scope":"day","scope_id":"Asia/Shanghai:1785286800000"}
-```
-
-完整返回持久化结果 bytes 为：
-
-```json
-{"batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","members":[{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-a","excluded_at_ms":null,"interrupt_id":"i-a"},{"delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:i-b","excluded_at_ms":null,"interrupt_id":"i-b"}],"operation":{"key":"attention-batch:daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","type":"channel_publish"},"payload_digest":"2e2c6af826d5b028e043204908e3aab88ad9f32babe89a4beb438337e4830bfc","state":"sealed"}
-```
 ## 7. Append-only 事件与幂等收据
 
 ### 7.1 `events`（不可变）

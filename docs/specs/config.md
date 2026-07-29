@@ -274,9 +274,9 @@ attention:
 | `renderer` | `plain-v1`；只接受由服务端确定性 renderer 生成的 Interrupt/batch 文本 |
 | `default` | boolean；启用 Channel 中最多一个为 true；未声明时按 `id` UTF-8 bytes 最小者作为默认 |
 
-Channel 的 `target` 只在启动探测时解析并验证；凭据引用本身进入 canonical snapshot，解析值不进入 config JSON、日志、Brain 输入或 outbox payload。候选算法为：从**创建 Run 冻结的 config snapshot** 取 `enabled=true`、capability 包含 `min_modality` 且项目未隔离的 Channel，按 `id` UTF-8 bytes 排序；default 必须属于该集合，否则选择排序后的第一项。零候选不调用 T6，Interrupt 仍完成 forge 首发，并以 `held_reason=no_compatible_channel|channel_isolated` 保存。
+Channel 的 `target` 只在启动探测时解析并验证；凭据引用本身进入 canonical snapshot，解析值不进入 config JSON、日志、Brain 输入或 outbox payload。payload 的唯一 `target_ref` 是非秘密 handle `secret_ref:<name>`，`<name>` 逐字节等于该 `target.secret_ref`；它不是 URL 或已解析 endpoint。候选算法为：从**创建 Run 冻结的 config snapshot** 取 `enabled=true`、capability 包含 `min_modality` 且项目未隔离的 Channel，按 `id` UTF-8 bytes 排序；default 必须属于该集合，否则选择排序后的第一项。零候选不调用 T6，Interrupt 仍完成 forge 首发，并以 `held_reason=no_compatible_channel|channel_isolated` 保存。
 
-每条单 delivery 和每个 attention batch 都冻结 `channel_id/type/target_ref/capabilities/renderer` snapshot；outbox 只携带该非秘密 snapshot 和解析后的 target reference，不从当前配置重建，不携带凭据明文。运行期 Channel isolation 只影响新的 delivery，既有 Interrupt 的冻结选择不漂移；失败按 outbox 的唯一告警和重试规则处理。
+每条单 delivery 和每个 attention batch 都冻结 `channel_id/type/target_ref/capabilities/renderer` snapshot；outbox 只携带该 handle 和非秘密 snapshot，不从当前配置重建，不携带凭据或 endpoint。Channel adapter 是唯一 resolver owner：每个 executing attempt 从 sealed handle 解析当前 endpoint，故 secret rotation 在下一 attempt 生效；缺失/拒绝 handle 为 `auth_or_capability`，不合契约的解析值为 `contract_violation`。运行期 Channel isolation 只影响新的 delivery，既有 Interrupt 的冻结选择不漂移；失败按 outbox 的唯一告警和重试规则处理。
 
 ### 3.8 `forge`
 
@@ -372,7 +372,7 @@ attention:
 | `America/New_York` / `02:30`，`2026-03-08T06:59:00Z` (`1772953140000`，本地 `01:59 EST`) | `quota_day=2026-03-08`, `due_at_ms=1772953200000`（gap 后本地 `03:00 EDT`） |
 | `America/New_York` / `01:30`，`2026-11-01T05:29:00Z` (`1793510940000`，本地第一次 `01:29 EDT`) | `quota_day=2026-11-01`, `due_at_ms=1793511000000`（fold 第一次本地 `01:30 EDT`） |
 
-入批恰在 `daily_summary_at` 的 instant（`1785286800000`）与其后一毫秒都取下一次 occurrence，不能立即补发。前一日摘要时刻后至次日摘要时刻前的两个 quota day 成员，必须按冻结 Channel 加入同一个 `daily:<zone>:<due_at_ms>:<channel_id>` batch；同 occurrence 的不同 Channel 必为不同 batch。运行期机器时区变化不影响已冻结 snapshot/hash 或历史回放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3、§6.6](storage.md) 与 [`outbox.md` §10](outbox.md)；双 Channel 并发、同 Channel 合批、排除、空批和响应丢失重放统一复用 storage §6.6 的 exact bytes fixture。
+入批恰在 `daily_summary_at` 的 instant（`1785286800000`）与其后一毫秒都取下一次 occurrence，不能立即补发。前一日摘要时刻后至次日摘要时刻前的两个 quota day 成员，只有冻结 Channel、project 与已验证 Forge discussion target 都相同才加入同一个 `daily:<project_id>:<zone>:<due_at_ms>:<channel_id>:<target_kind>:<base64url(target_id)>` batch；不同 Channel、项目或 target 必为不同 batch。运行期机器时区变化不影响已冻结 snapshot/hash 或历史回放。daily batch 的稳定键和关闭成员、发送 payload 的规则见 [`storage.md` §6.3、§6.6](storage.md) 与 [`outbox.md` §10](outbox.md)；并发、拒绝混批与响应丢失重放统一复用 storage §6.6 的 exact bytes fixture。
 
 #### `attention.reason_defaults`
 
