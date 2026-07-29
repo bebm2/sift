@@ -167,6 +167,130 @@ func TestAdvanceInterruptDispatchUsesFrozenSummaryDue(t *testing.T) {
 	}
 }
 
+func TestEmitInterruptSummaryExpiryBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		delta      int64
+		wantState  string
+		wantHeld   string
+		wantMember int
+	}{
+		{"before expiry", 99, "ready", "", 0},
+		{"at expiry", 100, "held", "batch_after_expiry", 0},
+		{"after expiry", 101, "held", "batch_after_expiry", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _ := openTestDB(t)
+			ctx := context.Background()
+			if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+				t.Fatal(err)
+			}
+			batchAt := testNow + tc.delta
+			cmd := t6Command(testNow)
+			cmd.ExpiresAfterMS, cmd.BatchAtMS = 100, &batchAt
+			cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+			in, err := emitTestInterrupt(t, ctx, db, cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state, held string
+			if err := db.db.QueryRow(`SELECT dispatch_state,COALESCE(held_reason,'') FROM interrupts WHERE id=?`, in.ID).Scan(&state, &held); err != nil {
+				t.Fatal(err)
+			}
+			if state != tc.wantState || held != tc.wantHeld {
+				t.Fatalf("dispatch = %s/%s, want %s/%s", state, held, tc.wantState, tc.wantHeld)
+			}
+			var members, authority, operations int
+			if err := db.db.QueryRow(`SELECT count(*) FROM attention_batch_members WHERE interrupt_id=?`, in.ID).Scan(&members); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.db.QueryRow(`SELECT count(*) FROM attention_batch_member_authority a JOIN attention_batch_members m ON m.batch_id=a.batch_id AND m.interrupt_id=a.interrupt_id WHERE m.interrupt_id=?`, in.ID).Scan(&authority); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='channel_publish'`).Scan(&operations); err != nil {
+				t.Fatal(err)
+			}
+			if members != tc.wantMember || authority != tc.wantMember || operations != 0 {
+				t.Fatalf("member/authority/channel operations = %d/%d/%d", members, authority, operations)
+			}
+		})
+	}
+}
+
+func TestAdvanceInterruptExcludesStaleDailyMembersAndCancelsEmptyBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		onExpire ExpireAction
+		want     string
+	}{
+		{"close", ExpireAutoReject, "closed"},
+		{"version change", ExpireEscalate, "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, path := openTestDB(t)
+			ctx := context.Background()
+			if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+				t.Fatal(err)
+			}
+			const expiry = int64(48 * 60 * 60 * 1000)
+			cmd := t6Command(testNow)
+			cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
+			cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = expiry, tc.onExpire, ExpireHold, 1
+			cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+			in, err := emitTestInterrupt(t, ctx, db, cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var nonce string
+			if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&nonce); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: 1, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: testNow + expiry}); err != nil || !ok {
+				t.Fatalf("advance = %v, %v", ok, err)
+			}
+			var status string
+			var excluded int
+			if err := db.db.QueryRow(`SELECT status FROM interrupts WHERE id=?`, in.ID).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.db.QueryRow(`SELECT count(*) FROM attention_batch_members WHERE interrupt_id=? AND excluded_at_ms=?`, in.ID, testNow+expiry).Scan(&excluded); err != nil {
+				t.Fatal(err)
+			}
+			if status != tc.want || excluded != 1 {
+				t.Fatalf("status/excluded = %s/%d", status, excluded)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err = Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := db.PrepareDueAttentionBatches(ctx, testNow+expiry); err != nil {
+				t.Fatal(err)
+			}
+			var state string
+			var operations int
+			if err := db.db.QueryRow(`SELECT state FROM attention_batches`).Scan(&state); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='channel_publish'`).Scan(&operations); err != nil {
+				t.Fatal(err)
+			}
+			if state != "cancelled" || operations != 0 {
+				t.Fatalf("batch state/channel operations = %s/%d", state, operations)
+			}
+		})
+	}
+}
+
 func TestAdvanceInterruptRestartRejectsOldTickAndCreatesStrongEscalationDelivery(t *testing.T) {
 	db, path := openTestDB(t)
 	ctx := context.Background()

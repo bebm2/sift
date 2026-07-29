@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAdvanceInterruptEscalatesOnceAndRotatesNonce(t *testing.T) {
@@ -55,7 +56,7 @@ func TestAdvanceInterruptEscalatesOnceAndRotatesNonce(t *testing.T) {
 }
 
 func TestAdvanceInterruptRepeatedCriticalFuseSealsCurrentAuthority(t *testing.T) {
-	db, _ := openTestDB(t)
+	db, path := openTestDB(t)
 	ctx := context.Background()
 	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
 		t.Fatal(err)
@@ -128,6 +129,14 @@ func TestAdvanceInterruptRepeatedCriticalFuseSealsCurrentAuthority(t *testing.T)
 	if _, err := db.db.Exec(`UPDATE attention_batch_member_authority SET nonce='forged' WHERE batch_id=? AND interrupt_id=?`, batch, fused.ID); err == nil || !strings.Contains(err.Error(), "current open Interrupt") {
 		t.Fatalf("forged collecting authority update = %v", err)
 	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
 	if err := db.PrepareDueAttentionBatches(ctx, testNow+1_000_000); err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +146,87 @@ func TestAdvanceInterruptRepeatedCriticalFuseSealsCurrentAuthority(t *testing.T)
 	}
 	if !strings.Contains(payload, `"interrupt_version":4`) || !strings.Contains(payload, `"nonce":"`+nonce+`"`) {
 		t.Fatalf("sealed payload did not use current authority: %s", payload)
+	}
+}
+
+func TestAdvanceInterruptRepeatedFusedMemberCloseCancelsAfterRestart(t *testing.T) {
+	db, path := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []string{"run", "run-2"} {
+		if err := db.SeedForgeRunForTest(ctx, run, "project", "cfg", map[string]string{"run": "42", "run-2": "43"}[run], testNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	emit := func(run string, now int64) Interrupt {
+		cmd := t6Command(now)
+		cmd.RunID, cmd.Generation.ChangeID = run, "change-"+run
+		cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = 10, ExpireEscalate, ExpireAutoReject, 3
+		cmd.CriticalTotalLimit, cmd.CriticalPerRunLimit = 1, 10
+		batchAt := now + 1
+		cmd.BatchAtMS = &batchAt
+		cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}, Default: true}}
+		in, err := emitTestInterrupt(t, ctx, db, cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return in
+	}
+	advance := func(id string, now int64) {
+		var version int64
+		var nonce string
+		if err := db.db.QueryRow(`SELECT version,nonce FROM interrupts WHERE id=?`, id).Scan(&version, &nonce); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: id, ExpectedVersion: version, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: now}); err != nil || !ok {
+			t.Fatalf("advance %s = %v, %v", id, ok, err)
+		}
+	}
+	admitted := emit("run", testNow)
+	advance(admitted.ID, testNow+10)
+	advance(admitted.ID, testNow+20)
+	fused := emit("run-2", testNow+100)
+	advance(fused.ID, testNow+110)
+	advance(fused.ID, testNow+120)
+	advance(fused.ID, testNow+130)
+	advance(fused.ID, testNow+140)
+	var batch, status string
+	var excluded int
+	if err := db.db.QueryRow(`SELECT batch_id FROM attention_batch_members WHERE interrupt_id=?`, fused.ID).Scan(&batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT status FROM interrupts WHERE id=?`, fused.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT count(*) FROM attention_batch_members WHERE batch_id=? AND interrupt_id=? AND excluded_at_ms=?`, batch, fused.ID, testNow+140).Scan(&excluded); err != nil {
+		t.Fatal(err)
+	}
+	if status != "closed" || excluded != 1 {
+		t.Fatalf("fused close status/excluded = %s/%d", status, excluded)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.PrepareDueAttentionBatches(ctx, testNow+1_000_000); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	var operations int
+	if err := db.db.QueryRow(`SELECT state FROM attention_batches WHERE id=?`, batch).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='channel_publish'`).Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if state != "cancelled" || operations != 0 {
+		t.Fatalf("fused batch state/channel operations = %s/%d", state, operations)
 	}
 }
 
