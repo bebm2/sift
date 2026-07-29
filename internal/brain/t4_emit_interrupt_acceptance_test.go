@@ -57,3 +57,57 @@ func TestEmitInterruptT4PersistsProductionCanonicalTrace(t *testing.T) {
 		t.Fatalf("trace input/output = %s / %s, want %s / %s", record.Input, record.Output, wantInput, wantOutput)
 	}
 }
+
+func TestEmitInterruptQuotaT4UsesProductionCanonicalTraceAndPersistedFallback(t *testing.T) {
+	ctx := context.Background()
+	db := openShellDB(t)
+	seedIntakeSubject(t, db, "p")
+	if err := db.SeedReverseSyncRunForTest(ctx, "run-quota", "p", "cfg-p", "42", "", "running", shellTestBase); err != nil {
+		t.Fatal(err)
+	}
+	fake := &FakeProvider{Responses: []FakeResponse{{ResultText: `{"headline":"报告打扰额度已耗尽","conclusion":"额度已耗尽","key_points":["请人工处理"],"recommended_option_id":"hold","options":["reject","hold"]}`, InputTokens: 2, OutputTokens: 3}}}
+	shell := newShellAt(db, shellCfg(100), fake, shellTestBase+1, shellTestBase+2, shellTestBase+3, shellTestBase+4)
+	var gotInput T4Input
+	db.SetInterruptT4(func(ctx context.Context, in storage.InterruptT4Input) (storage.InterruptT4Output, error) {
+		gotInput = T4Input{RunID: in.RunID, AttemptNo: in.AttemptNo, Interrupt: T4Interrupt{Reason: InterruptReason(in.Reason), BaseSeverity: InterruptSeverity(in.Severity), MinModality: InterruptModality(in.Modality), FallbackHeadline: in.Headline, FallbackBrief: in.Brief, BriefFragments: in.Fragments, Links: make([]T4Link, len(in.Links)), CandidateOptions: make([]T4Option, len(in.Options))}}
+		for i, link := range in.Links {
+			gotInput.Interrupt.Links[i] = T4Link{Label: link.Label, Target: link.Target}
+		}
+		for i, option := range in.Options {
+			gotInput.Interrupt.CandidateOptions[i] = T4Option{ID: option.ID, Label: option.Label, Effect: option.Effect, Risk: option.Risk}
+		}
+		return shell.CallT4(ctx, in)
+	})
+	interrupt, err := db.RecordReportQuotaExhaustion(ctx, storage.ReportQuotaExhaustionCmd{
+		RunID: "run-quota", ExpectedRunVersion: 1, DailyBucketStartMS: shellTestBase,
+		DailyBucketEndMS: shellTestBase + 24*60*60*1000, AttentionDailyQuota: map[storage.InterruptSeverity]int{storage.SeverityLow: 3, storage.SeverityNormal: 3, storage.SeverityHigh: 3}, NowMS: shellTestBase,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInput, err := BuildT4Input(gotInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutput, err := T4Contract(gotInput).ValidateOutput([]byte(fake.Responses[0].ResultText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trace bytes.Buffer
+	if err := db.ExportBrainCallsJSONL(ctx, &trace); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Input  json.RawMessage `json:"input"`
+		Output json.RawMessage `json:"validated_output"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(trace.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(record.Input, wantInput) || !bytes.Equal(record.Output, wantOutput) {
+		t.Fatalf("quota trace input/output = %s / %s, want %s / %s", record.Input, record.Output, wantInput, wantOutput)
+	}
+	if interrupt.Headline != "报告打扰额度已耗尽" || interrupt.Brief != "结论：额度已耗尽；要点：请人工处理；建议：暂缓决定（hold）" || len(interrupt.Options) != 2 || interrupt.Options[0].ID != "reject" || interrupt.Options[1].ID != "hold" {
+		t.Fatalf("persisted quota interrupt = %#v", interrupt)
+	}
+}
