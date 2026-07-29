@@ -236,26 +236,27 @@ Payload：
 
 ## 10. Channel publish
 
-`channel_publish` 的 `body.delivery_kind` 是 closed `interrupt | attention_batch` tagged union。单 Interrupt payload 为（Channel 选择和渲染上下文来自 Interrupt 冻结 snapshot，不从当前 config 重建）：
+`channel_publish` 的 `body.delivery_kind` 是 closed `interrupt | attention_batch` tagged union。`channel.target_ref` 唯一为非秘密 `secret_ref:<name>` resolver handle，绝不是 URL/endpoint；adapter 每次 attempt 用 sealed handle 解析当前 secret，而 payload、digest、日志和诊断不保存解析值。单 Interrupt payload 为（Channel 选择和渲染上下文来自 Interrupt 冻结 snapshot，不从当前 config 重建）：
 
 ```json
 {
   "delivery_kind":"interrupt","delivery_id":"interrupt:<interrupt_id>:<escalation_no>:<channel_id>","interrupt_id":"...","escalation_no":0,"priority":"normal",
   "interrupt_version":1,"nonce":"...",
-  "channel":{"id":"...","type":"webhook","target_ref":"...","capabilities":["text"],"renderer":"plain-v1"},
+  "channel":{"id":"...","type":"webhook","target_ref":"secret_ref:<name>","capabilities":["text"],"renderer":"plain-v1"},
   "rendered_text":"..."
 }
 ```
 
-attention batch payload 只能由 [`storage.md` §6.3、§6.6`](storage.md) 的 `PrepareAttentionBatch` 从 sealed member 快照生成；§6.6 的双 Channel、排除、空批与响应丢失 replay payload 是本节唯一 exact fixture；其 `channel` snapshot 必须与 batch 所属成员的冻结 Channel identity 一致，不能由 Channel worker 拼接或改写：
+attention batch payload 只能由 [`storage.md` §6.3、§6.6`](storage.md) 的 `PrepareAttentionBatch` 从 sealed member 快照生成；§6.6 的单一 Forge target、跨项目拒绝与响应丢失 replay payload 是本节唯一 exact fixture；其 `channel` snapshot 和 `forge_alert_target` 必须与 batch 冻结 identity 一致，不能由 Channel worker 拼接或改写：
 
 ```json
 {
-  "delivery_kind":"attention_batch","batch_id":"daily:Asia/Shanghai:1785286800000:ops-slack","delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:publish:1","batch_kind":"daily_summary",
-  "channel":{"id":"ops-slack","type":"webhook","target_ref":"...","capabilities":["text"],"renderer":"plain-v1"},
+  "delivery_kind":"attention_batch","batch_id":"daily:<project_id>:<zone>:<due_at_ms>:<channel_id>:<target_kind>:<base64url(target_id)>","delivery_id":"<batch_id>:publish:1","batch_kind":"daily_summary",
+  "channel":{"id":"ops-slack","type":"webhook","target_ref":"secret_ref:<name>","capabilities":["text"],"renderer":"plain-v1"},
+  "project_id":"...","forge_alert_target":{"forge_kind":"github","forge_host":"github.com","forge_project_key":"...","target_kind":"issue","target_id":"..."},
   "scope":"day","scope_id":"Asia/Shanghai:1785286800000","due_at_ms":1785286800000,
   "members":[{
-    "delivery_id":"daily:Asia/Shanghai:1785286800000:ops-slack:<interrupt_id>","interrupt_id":"...","interrupt_version":1,"nonce":"...","headline":"...",
+    "delivery_id":"<batch_id>:<interrupt_id>","interrupt_id":"...","interrupt_version":1,"nonce":"...","headline":"...",
     "reason":"agent_blocked","severity":"high","links":[],"options":[],"command_lines":[]
   }],"rendered_text":"..."
 }
@@ -265,7 +266,7 @@ attention batch payload 只能由 [`storage.md` §6.3、§6.6`](storage.md) 的 
 
 worker 由 operation key 生成并追加可见标识；payload 不接受调用方 marker。Channel 无查询证据，每个 executing attempt 都可能真实推送；语义明确为 at-least-once。成功响应只证明本次调用返回成功，不证明未重复。
 
-连续失败次数来自同 operation 的 attempt results。达到 config `channel_failure_alert_after` 时，complete 事务以稳定键创建一个 `forge_alert`，并更新单 Interrupt 或 batch delivery/doctor 投影；继续重试原 Channel operation。alert 自身失败不递归创建 alert。
+每个 immutable Channel operation 有一条 durable `channel_failure_episodes` 行：单条 `subject_id=interrupt_deliveries.delivery_id`，batch `subject_id=batch_deliveries.delivery_id`，两者 `generation=1`。`CompleteOutboxAttempt` 同一事务更新 attempt/delivery/episode：`transient`、`rate_limited` 和 reclaim 的 `lease_expired` 均增加连续失败；其他 failed result 也增加一次并以 `ended_failed` 终结，success 清零并以 `ended_delivered` 终结。由 0 达到 config `channel_failure_alert_after` 时，事务以 `alert:channel_failure:<subject_id>:1` 创建一个 `forge_alert`，并更新 delivery/doctor 投影。只有 retry policy 仍允许时继续原 operation；`max_attempts` terminal 后保持“已生成、未送达”及 alert 可见。lease CAS 串行化并发 completion，重启读 episode 行恢复；alert 自身失败不递归创建 alert。batch alert 使用 sealed batch 的单一 verified Forge target，batch 不跨项目或 target，定义和 vectors 见 [`storage.md` §6.3、§6.6`](storage.md)。
 
 escalation 使用新 operation key但复用原 attention charge；同 escalation 重试不新扣费。batch member 的 `quota_batched` admission 没有虚构 charge；其 delivery 审计使用 admission ID，指标去重使用 storage 的 stable `metric_identity`，而不是可能新增的 critical admission ID。
 
