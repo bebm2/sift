@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -89,8 +91,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if version != 29 {
-		t.Fatalf("SchemaVersion = %d, want 29", version)
+	if version != 30 {
+		t.Fatalf("SchemaVersion = %d, want 30", version)
 	}
 
 	embedded, err := loadEmbeddedMigrations()
@@ -133,8 +135,70 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 29 {
-		t.Fatalf("schema_migrations rows = %d, want 29 after reopen", count)
+	if count != 30 {
+		t.Fatalf("schema_migrations rows = %d, want 30 after reopen", count)
+	}
+}
+
+func TestPopulated0020To0021UpgradePreservesForeignKeysAndRestarts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sift.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations (version INTEGER NOT NULL PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL, binary_version TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadEmbeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		if migration.version > 20 {
+			break
+		}
+		if err := applyOne(ctx, raw, migration, "old-binary", time.UnixMilli(testNow)); err != nil {
+			t.Fatalf("apply %04d: %v", migration.version, err)
+		}
+	}
+	for _, statement := range []string{
+		`INSERT INTO config_snapshots(id,config_hash,schema_version,canonical_json,source_present,loaded_at_ms,binary_version) VALUES ('cfg','hash',1,'{}',1,1700000000000,'old')`,
+		`INSERT INTO projects(id,config_snapshot_id,forge_kind,forge_host,forge_project_key,repo_path,enabled,health,isolation_reason,capabilities_json,created_at_ms,updated_at_ms) VALUES ('project','cfg','github','github.com','org/repo','/repo',1,'active',NULL,'{}',1700000000000,1700000000000)`,
+		`INSERT INTO runs(id,source_kind,project_id,config_snapshot_id,forge_kind,forge_host,forge_project_key,issue_id,status,max_attempts,created_at_ms,updated_at_ms) VALUES ('run','forge','project','cfg','github','github.com','org/repo','42','queued',1,1700000000000,1700000000000)`,
+		`INSERT INTO budget_entries(id,kind,scope,scope_id,bucket_start_ms,amount,reason,run_id,operation_key,created_at_ms) VALUES ('charge','attention','run','run',1700000000000,1,'interrupt','run','charge:interrupt',1700000000000)`,
+		`INSERT INTO interrupts(id,run_id,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,status,dispatch_state,expires_at_ms,on_expire,max_escalations,charged_budget_entry_id,created_at_ms,updated_at_ms,expires_after_ms,on_max_escalations,base_severity,nonce_issued_at_ms,day_timezone,daily_summary_at,critical_window_ms,critical_total_limit,critical_per_run_limit) VALUES ('interrupt','run','generation','code_review','normal','review','brief','[]','text','[]','nonce','open','held',1700000000010,'hold',0,'charge',1700000000000,1700000000000,10,'hold','normal',1700000000000,'UTC','09:00',900000,5,2)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatalf("populate 0020 database: %v", err)
+		}
+	}
+	binding := `{"arm":"code_review","change_id":"change","head_sha":"head","review_policy_snapshot_digest":"policy"}`
+	sum := sha256.Sum256([]byte(binding))
+	if _, err := raw.Exec(`INSERT INTO interrupt_command_effect_bindings(interrupt_id,reason,binding_schema_version,binding_json,binding_digest,created_at_ms) VALUES ('interrupt','code_review',1,?,?,1700000000000)`, binding, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("populate 0020 binding: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow + 1)})
+	if err != nil {
+		t.Fatalf("upgrade populated 0020 database: %v", err)
+	}
+	var runID string
+	if err := upgraded.db.QueryRow(`SELECT run_id FROM interrupts WHERE id='interrupt'`).Scan(&runID); err != nil || runID != "run" {
+		t.Fatalf("upgraded interrupt = %q, %v", runID, err)
+	}
+	if err := upgraded.db.QueryRow(`PRAGMA foreign_key_check`).Scan(new(any)); err != sql.ErrNoRows {
+		t.Fatalf("foreign_key_check = %v", err)
+	}
+	if err := upgraded.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(ctx, OpenConfig{Path: path, BinaryVersion: "test-binary", Now: time.UnixMilli(testNow + 2)}); err != nil {
+		t.Fatalf("restart after populated upgrade: %v", err)
+	} else {
+		defer reopened.Close()
 	}
 }
 

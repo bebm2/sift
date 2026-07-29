@@ -140,7 +140,7 @@ func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceI
 	if err := tx.QueryRowContext(ctx, `SELECT r.id,r.status,r.version,i.reason,b.binding_schema_version,b.binding_json,b.binding_digest FROM interrupts i JOIN runs r ON r.id=i.run_id JOIN interrupt_command_effect_bindings b ON b.interrupt_id=i.id WHERE i.id=?`, cmd.InterruptID).Scan(&runID, &status, &runVersion, &reason, &bindingSchema, &binding, &bindingDigest); err != nil {
 		return false, err
 	}
-	armName, err := validateEffectBinding(reason, runID, bindingSchema, binding, bindingDigest)
+	armName, err := validateEffectBinding(ctx, tx, cmd.InterruptID, reason, runID, bindingSchema, binding, bindingDigest)
 	if err != nil {
 		return false, err
 	}
@@ -160,7 +160,7 @@ func (d *DB) closeExpiredInterrupt(ctx context.Context, tx *sql.Tx, cmd AdvanceI
 	return finishAdvance(ctx, tx, res, cmd, "interrupt.expired_auto_reject")
 }
 
-func validateEffectBinding(reason, runID string, schema int64, raw, digest string) (string, error) {
+func validateEffectBinding(ctx context.Context, tx *sql.Tx, interruptID, reason, runID string, schema int64, raw, digest string) (string, error) {
 	var binding map[string]json.RawMessage
 	if schema != 1 || json.Unmarshal([]byte(raw), &binding) != nil {
 		return "", fmt.Errorf("%w: corrupt effect binding", ErrInterruptRejected)
@@ -269,7 +269,48 @@ func validateEffectBinding(reason, runID string, schema int64, raw, digest strin
 			return "", fmt.Errorf("%w: invalid effect binding", ErrInterruptRejected)
 		}
 	}
+	if err := validateEffectBindingReferences(ctx, tx, arm, interruptID, runID, binding); err != nil {
+		return "", err
+	}
 	return arm, nil
+}
+
+func validateEffectBindingReferences(ctx context.Context, tx *sql.Tx, arm, interruptID, runID string, binding map[string]json.RawMessage) error {
+	textValue := func(name string) string {
+		var value string
+		_ = json.Unmarshal(binding[name], &value)
+		return value
+	}
+	integerValue := func(name string) int64 {
+		var value int64
+		_ = json.Unmarshal(binding[name], &value)
+		return value
+	}
+	var exists int
+	var err error
+	switch arm {
+	case "design_approval":
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_spec_snapshots WHERE id=? AND run_id=?)`, textValue("task_spec_snapshot_id"), runID).Scan(&exists)
+	case "startup_stall", "failure_review_attempt":
+		query := `SELECT EXISTS(SELECT 1 FROM attempts a JOIN interrupts i ON i.id=? WHERE a.run_id=? AND a.run_id=i.run_id AND a.attempt_no=? AND a.generation=?)`
+		args := []any{interruptID, runID, integerValue("attempt_no"), integerValue("generation")}
+		if arm == "failure_review_attempt" {
+			var retry string
+			_ = json.Unmarshal(binding["retry_kind"], &retry)
+			if retry == "new_attempt" {
+				query = `SELECT EXISTS(SELECT 1 FROM attempts a JOIN interrupts i ON i.id=? WHERE a.run_id=? AND a.run_id=i.run_id AND a.attempt_no=? AND a.generation=? AND phase='finished' AND ((result_exit_code IS NOT NULL AND result_exit_code<>0) OR result_signal IS NOT NULL))`
+			}
+		}
+		err = tx.QueryRowContext(ctx, query, args...).Scan(&exists)
+	case "report_quota_failure_review":
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM report_quota_exhaustions q JOIN events e ON e.id=q.security_event_id WHERE q.run_id=? AND q.daily_bucket_start_ms=? AND q.daily_bucket_end_ms=? AND q.security_event_id=? AND e.source='system')`, runID, integerValue("daily_bucket_start_ms"), integerValue("daily_bucket_end_ms"), textValue("security_event_id")).Scan(&exists)
+	default:
+		return nil
+	}
+	if err != nil || exists != 1 {
+		return fmt.Errorf("%w: invalid effect binding reference", ErrInterruptRejected)
+	}
+	return nil
 }
 
 func enqueueInterruptChannelTx(ctx context.Context, tx *sql.Tx, id string, version int64, nonce string, escalation int, priority string, now int64) error {
@@ -485,9 +526,9 @@ func addBatchMemberTx(ctx context.Context, tx *sql.Tx, batch, kind, id string, v
 	if gotAdmission != admission || gotKey != batch+":"+id || gotChannel != channel || gotSnapshot != snapshot || gotDelivery != batch+":"+id || gotHeadline != headline || gotReason != reason || gotLinks != links || gotOpts != opts || gotJoined > now {
 		return fmt.Errorf("%w: batch member identity collision", ErrInterruptRejected)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE attention_batch_members SET interrupt_version=?,nonce=?,headline=?,severity=?,links_json=?,options_json=? WHERE batch_id=? AND interrupt_id=?`, version, nonce, headline, severity, links, opts, batch, id); err != nil {
-		return err
-	}
+	// A member snapshot is its join-time delivery authority.  A later fused
+	// escalation rotates the Interrupt nonce, but must not rewrite that immutable
+	// snapshot; PrepareAttentionBatch will exclude the stale member at sealing.
 	return nil
 }
 
