@@ -342,7 +342,7 @@ func TestRecordReportQuotaExhaustionUsesSystemEventIdentity(t *testing.T) {
 	if _, err := db.db.Exec(`UPDATE runs SET status='running' WHERE id='run'`); err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.RecordReportQuotaExhaustion(ctx, ReportQuotaExhaustionCmd{RunID: "run", ExpectedRunVersion: 1, DailyBucketStartMS: 1754000000000, DailyBucketEndMS: 1754086400000, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", NowMS: testNow})
+	got, err := db.RecordReportQuotaExhaustion(ctx, ReportQuotaExhaustionCmd{RunID: "run", ExpectedRunVersion: 1, DailyBucketStartMS: 1754000000000, DailyBucketEndMS: 1754086400000, AttentionDailyQuota: interruptQuota(), DayTimezone: "UTC", DailySummaryAt: "09:00", Channels: []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"voice"}}}, NowMS: testNow})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,6 +352,13 @@ func TestRecordReportQuotaExhaustionUsesSystemEventIdentity(t *testing.T) {
 	}
 	if got.ID == "" || len(eventID) != 32 || source != "system" || !strings.Contains(ref, "sift://event/"+eventID) {
 		t.Fatalf("interrupt=%#v event=%q source=%q brief=%q", got, eventID, source, ref)
+	}
+	var channelID, operationKey string
+	if err := db.db.QueryRow(`SELECT channel_id,operation_key FROM interrupt_deliveries WHERE interrupt_id=? AND surface='channel'`, got.ID).Scan(&channelID, &operationKey); err != nil {
+		t.Fatal(err)
+	}
+	if channelID != "ops" || operationKey != ChannelPublishOperationKey(got.ID, 0) {
+		t.Fatalf("channel delivery = %q/%q", channelID, operationKey)
 	}
 }
 

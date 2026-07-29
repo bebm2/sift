@@ -21,6 +21,8 @@ type ReportQuotaExhaustionCmd struct {
 	DayTimezone                             string
 	CriticalWindowMS                        int64
 	CriticalTotalLimit, CriticalPerRunLimit int
+	DailySummaryAt                          string
+	Channels                                []InterruptChannel
 	NowMS                                   int64
 }
 
@@ -71,15 +73,22 @@ func (d *DB) RecordReportQuotaExhaustion(ctx context.Context, cmd ReportQuotaExh
 	}
 
 	generation.SecurityEventID = eventID
-	return d.EmitInterrupt(ctx, EmitInterruptCmd{
+	emit := EmitInterruptCmd{
 		RunID: cmd.RunID, ExpectedRunVersion: cmd.ExpectedRunVersion,
 		Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewReportQuota,
 		Facts:      map[string]string{"failure_class": "report_interrupt_quota_exhausted", "failure_evidence_ref": "sift://event/" + eventID, "recommended_action": "hold"},
 		Generation: generation, GatePhase: GateNone, GuardrailLevel: GuardrailNone,
 		AttentionDailyQuota: cmd.AttentionDailyQuota, DayTimezone: cmd.DayTimezone,
 		CriticalWindowMS: cmd.CriticalWindowMS, CriticalTotalLimit: cmd.CriticalTotalLimit, CriticalPerRunLimit: cmd.CriticalPerRunLimit,
+		DailySummaryAt: cmd.DailySummaryAt, Channels: cmd.Channels,
 		Source: SourceSystem, NowMS: cmd.NowMS,
-	})
+	}
+	if cmd.DailySummaryAt != "" {
+		if batchAt, ok := NextDailySummaryAt(cmd.NowMS, cmd.DayTimezone, cmd.DailySummaryAt); ok {
+			emit.BatchAtMS = &batchAt
+		}
+	}
+	return d.EmitInterrupt(ctx, emit)
 }
 
 func reportQuotaFailureDigest(runID string, start, end int64) string {
