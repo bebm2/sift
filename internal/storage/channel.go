@@ -316,7 +316,12 @@ func (d *DB) EnqueueChannelPublish(ctx context.Context, op Operation, deliveryID
 		if p.BatchID == "" || deliveryID != p.BatchID+":publish:1" || p.ProjectID == "" || p.ForgeAlertTarget == nil {
 			return fmt.Errorf("storage: invalid batch identity")
 		}
-		var channel struct{ ID, Type, TargetRef, Renderer string }
+		var channel struct {
+			ID        string `json:"id"`
+			Type      string `json:"type"`
+			TargetRef string `json:"target_ref"`
+			Renderer  string `json:"renderer"`
+		}
 		if json.Unmarshal(p.Channel, &channel) != nil || channel.ID == "" || channel.Type != "webhook" || channel.TargetRef == "" || channel.Renderer != "plain-v1" {
 			return fmt.Errorf("storage: invalid batch channel snapshot")
 		}

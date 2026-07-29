@@ -40,6 +40,27 @@ func writeConfig(t *testing.T, home Home, yaml string) {
 	}
 }
 
+func TestAttentionChannelsNormalizeAndRejectInvalidTargets(t *testing.T) {
+	home := tempHome(t)
+	writeConfig(t, home, "version: 1\nunknown: {}\nattention:\n  channels:\n    - id: ops-slack\n      type: webhook\n      target: {secret_ref: SIFT_CHANNEL_OPS_SLACK}\n      capabilities: [text]\n      renderer: plain-v1\n      default: true\n")
+	if _, err := Load(home, time.Now()); err == nil {
+		t.Fatal("unknown top-level field accepted")
+	}
+	writeConfig(t, home, "version: 1\nattention:\n  channels:\n    - id: ops-slack\n      type: webhook\n      target: {secret_ref: SIFT_CHANNEL_OPS_SLACK}\n      capabilities: [text]\n      renderer: plain-v1\n      default: true\n")
+	snap, err := Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := snap.Config.Attention.Channels
+	if len(ch) != 1 || ch[0].TargetRef != "secret_ref:SIFT_CHANNEL_OPS_SLACK" || !ch[0].Default {
+		t.Fatalf("channels = %#v", ch)
+	}
+	writeConfig(t, home, "version: 1\nattention:\n  channels:\n    - id: ops-slack\n      type: webhook\n      target: {secret_ref: \"\"}\n      capabilities: [text]\n")
+	if _, err := Load(home, time.Now()); err == nil {
+		t.Fatal("empty secret_ref accepted")
+	}
+}
+
 func TestCertificationRulesVersionChangesWithRules(t *testing.T) {
 	base := DefaultConfig().Certification
 	first, err := CertificationRulesVersion(base)
