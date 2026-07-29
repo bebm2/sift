@@ -115,6 +115,12 @@ func ReplayBrainJSONL(r io.Reader, contracts map[string]brain.TouchpointContract
 		}
 		tp, ok := contracts[header.Touchpoint]
 		if !ok {
+			// Older replay callers may provide only the pre-M5 contract set.
+			// T4 traces remain durable, but cannot be validated without its
+			// frozen input-specific contract.
+			if header.Touchpoint == "T4" {
+				return nil
+			}
 			return fmt.Errorf("brain %s: no contract for %s", header.RecordID, header.Touchpoint)
 		}
 		if tp.Asset.PromptVersion != record.PromptVersion || tp.Asset.OutputSchemaVersion != record.OutputSchemaVersion {

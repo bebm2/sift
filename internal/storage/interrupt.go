@@ -67,6 +67,30 @@ type InterruptGeneration struct {
 	AttemptNo, Generation                                              int
 }
 
+type InterruptT4Input struct {
+	RunID     string
+	AttemptNo *int
+	Reason    InterruptReason
+	Severity  InterruptSeverity
+	Modality  string
+	Headline  string
+	Brief     string
+	Fragments []string
+	Links     []InterruptLink
+	Options   []InterruptOption
+}
+
+type InterruptT4Output struct {
+	Headline            string
+	Conclusion          string
+	KeyPoints           []string
+	RecommendedOptionID string
+}
+
+// InterruptT4Caller runs outside the emission transaction. Errors and invalid
+// outputs deterministically fall back to the canonical Interrupt renderer.
+type InterruptT4Caller func(context.Context, InterruptT4Input) (InterruptT4Output, error)
+
 // EmitInterruptCmd carries only facts. Templates, severity and the generation
 // key are derived here so callers cannot manufacture a more urgent or broader
 // Interrupt.
@@ -88,6 +112,7 @@ type EmitInterruptCmd struct {
 	// CalibrationID is set only by RecordGateEvaluationAndEmitInterrupt. It
 	// binds a Gate HITL to the shadow prediction frozen in this transaction.
 	CalibrationID string
+	T4            InterruptT4Caller
 	NowMS         int64
 }
 
@@ -201,6 +226,17 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if err != nil {
 		return Interrupt{}, err
 	}
+	headline := t.headline
+	// T4 is advisory and deliberately runs before, never inside, the five-write
+	// transaction. Any provider, schema, or admission failure keeps fallback.
+	if cmd.T4 != nil {
+		candidate := InterruptT4Input{RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, Reason: cmd.Reason, Severity: severity, Modality: t.modality, Headline: t.headline, Brief: brief, Fragments: interruptBriefFragments(t, cmd.Facts), Links: links, Options: t.options}
+		if out, callErr := cmd.T4(ctx, candidate); callErr == nil {
+			if accepted, rendered := acceptInterruptT4(candidate, out); accepted {
+				headline, brief = out.Headline, rendered
+			}
+		}
+	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Interrupt{}, err
@@ -284,7 +320,7 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	if err != nil {
 		return Interrupt{}, err
 	}
-	in := Interrupt{ID: newID(), RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, GenerationKey: key, Reason: cmd.Reason, Severity: severity, Headline: t.headline, Brief: brief, Options: t.options, MinModality: t.modality, Links: links, ExpiresAtMS: cmd.NowMS + cmd.ExpiresAfterMS, OnExpire: cmd.OnExpire, ChargedBudgetEntryID: entryID}
+	in := Interrupt{ID: newID(), RunID: cmd.RunID, AttemptNo: cmd.AttemptNo, GenerationKey: key, Reason: cmd.Reason, Severity: severity, Headline: headline, Brief: brief, Options: t.options, MinModality: t.modality, Links: links, ExpiresAtMS: cmd.NowMS + cmd.ExpiresAfterMS, OnExpire: cmd.OnExpire, ChargedBudgetEntryID: entryID}
 	optionsJSON, _ := json.Marshal(in.Options)
 	linksJSON, _ := json.Marshal(in.Links)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupts (id,run_id,attempt_no,generation_key,reason,severity,headline,brief_markdown,options_json,min_modality,links_json,nonce,version,status,dispatch_state,expires_at_ms,on_expire,escalation_count,max_escalations,charged_budget_entry_id,calibration_id,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,? ,1,'open','ready',?,?,?,?,?,?,?,?)`, in.ID, in.RunID, in.AttemptNo, in.GenerationKey, in.Reason, in.Severity, in.Headline, in.Brief, string(optionsJSON), in.MinModality, string(linksJSON), newID(), in.ExpiresAtMS, in.OnExpire, cmd.EscalationCount, cmd.MaxEscalations, in.ChargedBudgetEntryID, nullable(cmd.CalibrationID), cmd.NowMS, cmd.NowMS); err != nil {
@@ -320,6 +356,59 @@ func (d *DB) emitInterrupt(ctx context.Context, cmd EmitInterruptCmd, before fun
 	}
 	d.wakeOutbox()
 	return in, nil
+}
+
+func interruptBriefFragments(t interruptTemplate, facts map[string]string) []string {
+	fragments := make([]string, 0, len(t.facts))
+	for _, key := range t.facts {
+		if value, ok := facts[key]; ok {
+			if escaped, err := escapeBrief(value); err == nil {
+				fragments = append(fragments, key+"="+escaped)
+			}
+		}
+	}
+	sort.Strings(fragments)
+	return fragments
+}
+
+func acceptInterruptT4(in InterruptT4Input, out InterruptT4Output) (bool, string) {
+	if out.Headline != in.Headline || !containsString(in.Fragments, out.Conclusion) || len(out.KeyPoints) < 1 || len(out.KeyPoints) > 3 {
+		return false, ""
+	}
+	seen := map[string]bool{}
+	for _, point := range out.KeyPoints {
+		if !containsString(in.Fragments, point) || seen[point] {
+			return false, ""
+		}
+		seen[point] = true
+	}
+	label := ""
+	for _, option := range in.Options {
+		if option.ID == out.RecommendedOptionID {
+			label = option.Label
+			break
+		}
+	}
+	if label == "" {
+		return false, ""
+	}
+	points := make([]string, len(out.KeyPoints))
+	for i, point := range out.KeyPoints {
+		points[i] = escapeT4Text(point)
+	}
+	return true, "结论：" + escapeT4Text(out.Conclusion) + "；要点：" + strings.Join(points, "；") + "；建议：" + escapeT4Text(label) + "（" + out.RecommendedOptionID + "）"
+}
+
+func containsString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+func escapeT4Text(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "#", "\\#", "+", "\\+", "-", "\\-", "!", "\\!", ">", "\\>", "<", "\\<", "&", "\\&").Replace(value)
 }
 
 func renderComment(in Interrupt) string { return in.Headline + "\n\n" + in.Brief }

@@ -203,6 +203,9 @@ func (r *Reconciler) record(ctx context.Context, c storage.GateCandidate, in Inp
 	if err != nil {
 		return Verdict{}, storage.RecordedGateEvaluation{}, err
 	}
+	if r.Brain != nil {
+		cmd.T4 = r.Brain.CallT4
+	}
 	got, recorded, _, err := EvaluateRecordAndEmitInterrupt(ctx, r.DB, in, false, features, cmd)
 	return got, recorded, err
 }
