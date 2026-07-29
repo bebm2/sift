@@ -193,7 +193,7 @@ string:domain\x00sift.interrupt.generation\x00uint:version\x001\x00string:run_id
 
 ### 5.1 Report 子配额耗尽的 `failure_review`
 
-这是 `failure_review` 的唯一非 attempt 来源，且只允许 [`storage.md` §12.2.1](storage.md) 的 `RecordReport` 调用。它不使用上表的 attempt preimage，而是使用独立 domain，故不会与任一 `(run_id,attempt_no,generation,failure_digest)` 冲突。该对象的 immutable `interrupt_command_effect_bindings` 由本入口同时写入：`attempt_no=null` 时不得绑定 attempt-local retry；其 closed options/binding 必须明确 `retry_kind=gate_recheck` 或 `new_attempt`，二者只能择一；若该 quota 诊断版本不允许 retry，则 canonical options 移除 retry，并同步 command schema/version，不能留下无法执行的选项：
+这是 `failure_review` 的唯一非 attempt 来源，且只允许 [`storage.md` §12.2.1](storage.md) 的 `RecordReport` 调用。它不使用上表的 attempt preimage，而是使用独立 domain，故不会与任一 `(run_id,attempt_no,generation,failure_digest)` 冲突。Report quota v1 明确采用无 retry 的 closed variant：它的 canonical options（顺序固定）为 `reject` / 停止 Run / Run 停止 / 需人工重新发起；`hold` / 暂缓决定 / 保持 Interrupt 人工 held / Run 继续运行。它不复用 §3.1 attempt `failure_review` 的 `retry,reject,hold` options，也不接受 `ask` 或 `approve`。同一发射事务必须写 storage §6.4 的 `report_quota_failure_review(run_id,daily_bucket_start_ms,daily_bucket_end_ms,security_event_id)` binding；该 arm 由 exhaustion 行的复合身份验证，既无 attempt/generation 也无 `retry_kind`。因此每个呈现的 option 都有唯一 Command 事务效果：`reject` 关闭 Interrupt 并令 Run failed(`human_reject`)；`hold` 只 rotate nonce/hold Interrupt，保持 running Run。
 
 ```text
 string:domain\x00sift.interrupt.report-quota.generation\x00uint:version\x001\x00string:run_id\x00<run_id>\x00enum:reason\x00failure_review\x00uint:day_bucket_start_ms\x00<daily_bucket_start_ms>\x00sha256:failure_digest\x00<failure_digest>\x00
@@ -205,7 +205,7 @@ string:domain\x00sift.interrupt.report-quota.generation\x00uint:version\x001\x00
 {"daily_bucket_end_ms":<end>,"daily_bucket_start_ms":<start>,"failure_class":"report_interrupt_quota_exhausted","recommended_action":"hold","run_id":"<run_id>"}
 ```
 
-调用固定 `attempt_no=null`，并仅提供 `failure_class=report_interrupt_quota_exhausted`、`failure_evidence_ref=sift://event/<report_quota_exhaustions.security_event_id>`、`recommended_action=hold`。因此它命中 `failure_review` 的 canonical option，既不吸收 Agent 文本也不伪造 attempt。`report_quota_exhaustions` 的主键 `(run_id,daily_bucket_start_ms)` 是额外的直接数据库唯一约束；generation key 是第二道收敛，不得以预查询替代。
+调用固定 `attempt_no=null`，并仅提供 `failure_class=report_interrupt_quota_exhausted`、`failure_evidence_ref=sift://event/<report_quota_exhaustions.security_event_id>`、`recommended_action=hold`。因此它命中本节 quota variant 的 canonical `hold` option，既不吸收 Agent 文本也不伪造 attempt。`report_quota_exhaustions` 的主键 `(run_id,daily_bucket_start_ms)` 是额外的直接数据库唯一约束；generation key 是第二道收敛，不得以预查询替代。exhaustion/rate-token 事务先提交，随后才尝试本对象的发射；缺 publish target、binding/schema 或其他结构拒绝只产生 generation-key 幂等诊断，不能回滚该安全事实或 token。
 
 Golden vector：若 `run_id=run-01`、`start=1754000000000`、`end=1754086400000`，上述 JSON 的 `failure_digest` 为 `59da82e35758283e3501a202eb49c719527e5e4ecf9ddb73c6bde79547046509`，完整 preimage 的 SHA-256 generation key 为 `cf9ab8808bcf7660c789a0417555b0a9c9ad1216ddabf462a7ccf6bab6aaa083`。
 
