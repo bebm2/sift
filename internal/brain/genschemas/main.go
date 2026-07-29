@@ -22,7 +22,10 @@ func main() {
 		{"prompts/T1", brain.T1Output{}},
 		{"prompts/T2", brain.T2Output{}},
 		{"prompts/T3", brain.T3Output{}},
+		{"prompts/T4", brain.T4Output{}},
 		{"prompts/T5", brain.T5Output{}},
+		{"prompts/T6", brain.T6Output{}},
+		{"prompts/T7", brain.T7Output{}},
 	}
 	for _, t := range targets {
 		tgt, err := schemagen.TargetFor(t.value)

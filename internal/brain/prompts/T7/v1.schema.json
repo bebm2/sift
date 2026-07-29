@@ -1,0 +1,58 @@
+{
+  "$id": "https://sift.dev/decode/t7_output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "body": {
+      "type": "string",
+      "x-sift:maxBytes": 8192,
+      "x-sift:minBytes": 1
+    },
+    "evidence_entry_ids": {
+      "items": {
+        "type": "string",
+        "x-sift:maxBytes": 256,
+        "x-sift:minBytes": 1
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "type": "array"
+    },
+    "proposal_kind": {
+      "enum": [
+        "policy",
+        "context"
+      ],
+      "type": "string"
+    },
+    "requires_human_approval": {
+      "type": "boolean"
+    },
+    "target_scope": {
+      "enum": [
+        "project",
+        "global"
+      ],
+      "type": "string"
+    },
+    "title": {
+      "type": "string",
+      "x-sift:maxBytes": 160,
+      "x-sift:minBytes": 1
+    }
+  },
+  "required": [
+    "body",
+    "evidence_entry_ids",
+    "proposal_kind",
+    "requires_human_approval",
+    "target_scope",
+    "title"
+  ],
+  "title": "T7Output",
+  "type": "object",
+  "x-sift": {
+    "decodeMode": "closed",
+    "sourceType": "brain.T7Output"
+  }
+}

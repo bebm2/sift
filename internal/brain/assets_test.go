@@ -8,11 +8,11 @@ import (
 )
 
 func TestPromptAssetsVersioning(t *testing.T) {
-	for _, asset := range []PromptAsset{T1Asset(), T2Asset(), T3Asset(), T5Asset()} {
+	for _, asset := range []PromptAsset{T1Asset(), T2Asset(), T3Asset(), T4Asset(), T5Asset(), T6Asset(), T7Asset()} {
 		if len(asset.Prompt) == 0 || len(asset.Schema) == 0 {
 			t.Fatalf("%s: embedded assets empty", asset.Touchpoint)
 		}
-		pat := regexp.MustCompile(`^T[1235]/v1/[0-9a-f]{12}$`)
+		pat := regexp.MustCompile(`^T[1-7]/v1/[0-9a-f]{12}$`)
 		if !pat.MatchString(asset.PromptVersion) {
 			t.Fatalf("%s: prompt_version %q malformed", asset.Touchpoint, asset.PromptVersion)
 		}
@@ -36,7 +36,10 @@ func TestSchemaDrift(t *testing.T) {
 		{T1Asset(), T1Output{}},
 		{T2Asset(), T2Output{}},
 		{T3Asset(), T3Output{}},
+		{T4Asset(), T4Output{}},
 		{T5Asset(), T5Output{}},
+		{T6Asset(), T6Output{}},
+		{T7Asset(), T7Output{}},
 	}
 	for _, tc := range cases {
 		tgt, err := schemagen.TargetFor(tc.typ)
