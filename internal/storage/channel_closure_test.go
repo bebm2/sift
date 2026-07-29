@@ -86,6 +86,9 @@ func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batch_members SET channel_id='other' WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("member retarget error = %v", err)
 	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE attention_batch_members SET nonce='other' WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("member nonce update error = %v", err)
+	}
 	var authorityCount int
 	if err := db.db.QueryRowContext(ctx, `SELECT count(*) FROM attention_batch_member_authority WHERE batch_id=? AND interrupt_id=?`, batch, in.ID).Scan(&authorityCount); err != nil {
 		t.Fatal(err)
