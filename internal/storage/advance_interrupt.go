@@ -38,9 +38,10 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 	defer tx.Rollback()
 	var status, state, held, nonce, reason, base, onExpire, onMax, channel, snapshot, zone, summary, delivery string
 	var version, expiresAt, expiresAfter, window int64
+	var nextDispatch sql.NullInt64
 	var escalation, max, total, perRun int
 	var downgraded bool
-	err = tx.QueryRowContext(ctx, `SELECT status,dispatch_state,COALESCE(held_reason,''),nonce,reason,base_severity,on_expire,on_max_escalations,COALESCE(channel_id,''),COALESCE(channel_snapshot_json,''),delivery,day_timezone,daily_summary_at,version,expires_at_ms,expires_after_ms,escalation_count,max_escalations,suggested_downgrade,critical_window_ms,critical_total_limit,critical_per_run_limit FROM interrupts WHERE id=?`, cmd.InterruptID).Scan(&status, &state, &held, &nonce, &reason, &base, &onExpire, &onMax, &channel, &snapshot, &delivery, &zone, &summary, &version, &expiresAt, &expiresAfter, &escalation, &max, &downgraded, &window, &total, &perRun)
+	err = tx.QueryRowContext(ctx, `SELECT status,dispatch_state,COALESCE(held_reason,''),nonce,reason,base_severity,on_expire,on_max_escalations,COALESCE(channel_id,''),COALESCE(channel_snapshot_json,''),delivery,day_timezone,daily_summary_at,version,expires_at_ms,expires_after_ms,escalation_count,max_escalations,suggested_downgrade,critical_window_ms,critical_total_limit,critical_per_run_limit,next_dispatch_at_ms FROM interrupts WHERE id=?`, cmd.InterruptID).Scan(&status, &state, &held, &nonce, &reason, &base, &onExpire, &onMax, &channel, &snapshot, &delivery, &zone, &summary, &version, &expiresAt, &expiresAfter, &escalation, &max, &downgraded, &window, &total, &perRun, &nextDispatch)
 	if err == sql.ErrNoRows || status != "open" || version != cmd.ExpectedVersion || nonce != cmd.ExpectedNonce {
 		return false, ErrRejectedStale
 	}
@@ -66,7 +67,9 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 			if err := enqueueInterruptChannelTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, escalation, priority, cmd.NowMS); err != nil {
 				return false, err
 			}
-		} else if err := addDailyBatchMemberTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, cmd.NowMS, channel, snapshot, zone, summary); err != nil {
+		} else if !nextDispatch.Valid {
+			return false, fmt.Errorf("%w: batched interrupt lacks frozen summary due", ErrInterruptRejected)
+		} else if err := addDailyBatchMemberAtTx(ctx, tx, cmd.InterruptID, cmd.ExpectedVersion+1, nonce, nextDispatch.Int64, cmd.NowMS, channel, snapshot); err != nil {
 			return false, err
 		}
 		return finishAdvance(ctx, tx, res, cmd, "interrupt.dispatched")
@@ -478,11 +481,21 @@ func nextSummary(now int64, zone, clock string) (int64, bool) {
 }
 
 func addDailyBatchMemberTx(ctx context.Context, tx *sql.Tx, id string, version int64, nonce string, now int64, channel, snapshot, zone, summary string) error {
+	at, ok := nextSummary(now, zone, summary)
+	if !ok {
+		return fmt.Errorf("%w: invalid frozen summary", ErrInterruptRejected)
+	}
+	return addDailyBatchMemberAtTx(ctx, tx, id, version, nonce, at, now, channel, snapshot)
+}
+
+// addDailyBatchMemberAtTx joins the already-frozen summary occurrence. The
+// dispatch path must not recalculate it at the later tick: doing so would move
+// a member into the following day's batch when the tick lands exactly at due.
+func addDailyBatchMemberAtTx(ctx context.Context, tx *sql.Tx, id string, version int64, nonce string, at, now int64, channel, snapshot string) error {
 	if channel == "" || snapshot == "" {
 		return fmt.Errorf("%w: batched interrupt lacks channel snapshot", ErrInterruptRejected)
 	}
-	at, ok := nextSummary(now, zone, summary)
-	if !ok {
+	if at <= 0 {
 		return fmt.Errorf("%w: invalid frozen summary", ErrInterruptRejected)
 	}
 	var admission string
