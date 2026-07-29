@@ -450,11 +450,12 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.1 Brain T4/T6/T7 与 A7 防火墙
 
+- [x] T4/T6/T7 调用壳与验收矩阵已由 [rereview-6 PASS](reviews/2026-07-29-m5-brain-t4-t6-t7-impl-406-rereview-6-pi-gpt-5.6-sol.md) 核销；这不表示生产接线或 M5 已实现
 - [ ] T4 生成 headline/brief/options；失败兜底为裸链接 + 原始状态
 - [ ] T6 只建议时机/通道，失败按 severity 确定性阈值；任何结果仍经过发射器配额
 - [ ] T7 只生成 policy 提案或 context 草稿，二者都不自动生效
 - [ ] 测试 T7/历史数据不能放松单条 Gate、不能抑制单条 HITL
-- [ ] 三触点复用统一调用壳并写 trace；增补 `specs/brain.md`
+- [ ] 三触点在生产路径复用统一调用壳并写 trace
 
 #### 5.2 Interrupt 全功能与 Channel
 
