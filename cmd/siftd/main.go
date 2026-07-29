@@ -55,7 +55,7 @@ func main() {
 	termination := &daemon.TerminationCoordinator{
 		DB: db, Terminator: runtime.Terminator{Inspector: runtime.PlatformProcessInspector{}, Signaler: runtime.UnixProcessSignaler{}}, Runtime: snapshot.Config.Runtime,
 		ControlRoot:         home.Path,
-		AttentionDailyQuota: attentionQuota(snapshot.Config.Attention.DailyQuota), DayTimezone: snapshot.Config.Attention.DayTimezone, Now: time.Now,
+		AttentionDailyQuota: attentionQuota(snapshot.Config.Attention.DailyQuota), DayTimezone: snapshot.Config.Attention.DayTimezone, DailySummaryAt: snapshot.Config.Attention.DailySummaryAt, CriticalWindowMS: snapshot.Config.Attention.CriticalFuse.Window.Milliseconds(), CriticalTotalLimit: snapshot.Config.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: snapshot.Config.Attention.CriticalFuse.PerRunLimit, Now: time.Now,
 	}
 	// Recovery runs before Assemble starts any worker. Incomplete process
 	// evidence deliberately fails closed and becomes a visible startup_stall

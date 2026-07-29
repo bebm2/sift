@@ -89,8 +89,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if version != 14 {
-		t.Fatalf("SchemaVersion = %d, want 14", version)
+	if version != 16 {
+		t.Fatalf("SchemaVersion = %d, want 16", version)
 	}
 
 	embedded, err := loadEmbeddedMigrations()
@@ -133,8 +133,8 @@ func TestMigrationRecordedAndIdempotent(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 14 {
-		t.Fatalf("schema_migrations rows = %d, want 14 after reopen", count)
+	if count != 16 {
+		t.Fatalf("schema_migrations rows = %d, want 16 after reopen", count)
 	}
 }
 
