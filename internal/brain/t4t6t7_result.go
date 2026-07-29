@@ -134,6 +134,28 @@ type T7CallResult struct {
 	NoDraft  bool
 }
 
+// PersistT7ProposalDraft validates a terminal T7 result and persists only its
+// inert, pending-human-approval draft. Fallbacks deliberately produce no row.
+func PersistT7ProposalDraft(ctx context.Context, db *storage.DB, result CallResult, aggregateKey string, evidenceIDs []string, createdAtMS int64) (storage.ProposalDraft, BrainSource, error) {
+	converted, source, err := T7ResultFromCall(result, aggregateKey, evidenceIDs)
+	if err != nil {
+		return storage.ProposalDraft{}, BrainSource{}, err
+	}
+	if converted.NoDraft {
+		return storage.ProposalDraft{}, source, nil
+	}
+	out := converted.Proposal
+	draft, err := db.SaveProposalDraft(ctx, storage.SaveProposalDraftCmd{
+		LogicalCallID: result.CallID, PromptVersion: result.PromptVersion, OutputSchemaVersion: result.OutputSchemaVersion,
+		AggregateKey: aggregateKey, ProposalKind: string(*out.ProposalKind), TargetScope: string(*out.TargetScope),
+		Title: *out.Title, Body: *out.Body, EvidenceEntryIDs: *out.EvidenceEntryIDs, CreatedAtMS: createdAtMS,
+	})
+	if err != nil {
+		return storage.ProposalDraft{}, BrainSource{}, err
+	}
+	return draft, source, nil
+}
+
 func T7ResultFromCall(result CallResult, aggregateKey string, evidenceIDs []string) (T7CallResult, BrainSource, error) {
 	if result.Status == "valid" {
 		var out T7Output
