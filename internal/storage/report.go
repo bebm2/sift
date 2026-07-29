@@ -306,13 +306,13 @@ func (d *DB) commitReportQuotaExhaustion(ctx context.Context, cmd ReportSubmitCm
 		return err
 	}
 	eventID := newID()
-	payload, _ := json.Marshal(map[string]any{"daily_bucket_start_ms": start, "daily_bucket_end_ms": end, "failure_class": "report_interrupt_quota_exhausted"})
-	if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?,?,'security.report_quota_exhausted','system',1,?,?,?)`, eventID, cmd.RunID, projectID, string(payload), cmd.NowMS, cmd.NowMS); err != nil {
-		return err
-	}
 	digest := reportQuotaFailureDigest(cmd.RunID, start, end)
 	key, err := interruptGenerationKey(cmd.RunID, InterruptFailureReview, InterruptGeneration{ReportDailyBucketStartMS: start, ReportDailyBucketEndMS: end, FailureDigest: digest})
 	if err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]any{"daily_bucket_end_ms": end, "daily_bucket_start_ms": start, "failure_class": "report_interrupt_quota_exhausted", "failure_digest": digest, "generation_key": key})
+	if _, err = tx.ExecContext(ctx, `INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?,?,'security.report_quota_exhausted','system',1,?,?,?)`, eventID, cmd.RunID, projectID, string(payload), cmd.NowMS, cmd.NowMS); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO report_quota_exhaustions(run_id,daily_bucket_start_ms,daily_bucket_end_ms,security_event_id,failure_digest,generation_key,created_at_ms) VALUES(?,?,?,?,?,?,?)`, cmd.RunID, start, end, eventID, digest, key, cmd.NowMS); err != nil {
