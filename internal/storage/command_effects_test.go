@@ -329,6 +329,114 @@ func TestApplyCommandAgentBlockedRetrySpawnsNextAttempt(t *testing.T) {
 	}
 }
 
+// TestApplyCommandAgentBlockedAskFullContract proves the agent_blocked|ask row
+// (command.md §4): the command-event-sourced Task Spec snapshot, Interrupt
+// close, bound-attempt terminalization, next attempt/claim/launch, Ledger
+// semantic material and Run queue — all in one transaction, with the
+// clarification kept task-layer only (no project/global Context promotion) and
+// the historical snapshot left untouched.
+func TestApplyCommandAgentBlockedAskFullContract(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	f := seedAgentBlockedInterrupt(t, db, ctx)
+
+	body := "/sift ask " + cmdRun + " " + f.nonce + " use the cached token"
+	env := commentEnv(t, "project", "c1", body)
+	res, err := db.ApplyCommandEvent(ctx, ApplyCommandEventCmd{Envelope: env, Allowlist: []string{"alice"}, NowMS: testNow + 5})
+	if err != nil {
+		t.Fatalf("ApplyCommandEvent: %v", err)
+	}
+	if res.Outcome != command.OutcomeApplied {
+		t.Fatalf("outcome = %s, want applied", res.Outcome)
+	}
+
+	// Ledger: one ask human_decision + the unmodified ask_text semantic material.
+	assertCount(t, db, "ledger_entries WHERE entry_kind='human_decision'", 1)
+	assertCount(t, db, "ledger_entries WHERE entry_kind='semantic_material'", 1)
+	var nl string
+	db.db.QueryRow(`SELECT natural_language FROM ledger_entries WHERE entry_kind='semantic_material'`).Scan(&nl)
+	if nl != "use the cached token" {
+		t.Fatalf("ask semantic material = %q, want unmodified text", nl)
+	}
+
+	// Append-only Task Spec snapshot sourced by the command event; the Run's
+	// current pointer moves without overwriting the historical snapshot.
+	var snapCount int
+	db.db.QueryRow(`SELECT count(*) FROM task_spec_snapshots WHERE run_id=?`, cmdRun).Scan(&snapCount)
+	if snapCount != 2 {
+		t.Fatalf("task_spec_snapshots = %d, want 2 (initial + clarification)", snapCount)
+	}
+	var newSpec, srcEvent, canon string
+	db.db.QueryRow(`SELECT id,source_event_id,canonical_json FROM task_spec_snapshots WHERE run_id=? AND version=2`, cmdRun).Scan(&newSpec, &srcEvent, &canon)
+	if srcEvent != res.FinalEventID {
+		t.Fatalf("clarification snapshot source_event_id = %q, want command event %q", srcEvent, res.FinalEventID)
+	}
+	if !strings.Contains(canon, "use the cached token") {
+		t.Fatalf("clarification snapshot canonical_json = %s", canon)
+	}
+	var currentSpec string
+	db.db.QueryRow(`SELECT current_task_spec_id FROM runs WHERE id=?`, cmdRun).Scan(&currentSpec)
+	if currentSpec != newSpec {
+		t.Fatalf("runs.current_task_spec_id = %q, want clarification snapshot %q", currentSpec, newSpec)
+	}
+
+	// Interrupt closed responded; bound blocked attempt terminalized; next
+	// pending attempt/claim/launch spawned from the clarification snapshot.
+	var closeReason string
+	db.db.QueryRow(`SELECT close_reason FROM interrupts WHERE id=?`, f.interruptID).Scan(&closeReason)
+	if closeReason != "responded" {
+		t.Fatalf("close_reason = %s", closeReason)
+	}
+	var boundPhase string
+	db.db.QueryRow(`SELECT phase FROM attempts WHERE run_id=? AND attempt_no=1`, cmdRun).Scan(&boundPhase)
+	if boundPhase != "orphaned" {
+		t.Fatalf("bound attempt phase = %s, want orphaned", boundPhase)
+	}
+	assertCount(t, db, "attempts WHERE run_id='"+cmdRun+"' AND attempt_no=2 AND phase='pending'", 1)
+	assertCount(t, db, "attempt_claims WHERE run_id='"+cmdRun+"' AND attempt_no=2", 1)
+	assertCount(t, db, "outbox_operations WHERE kind='launch_agent'", 1)
+	// The new attempt references the clarification snapshot; the historical
+	// attempt keeps the snapshot it started from (no overwrite).
+	var spec1, spec2 string
+	db.db.QueryRow(`SELECT task_spec_snapshot_id FROM attempts WHERE run_id=? AND attempt_no=1`, cmdRun).Scan(&spec1)
+	db.db.QueryRow(`SELECT task_spec_snapshot_id FROM attempts WHERE run_id=? AND attempt_no=2`, cmdRun).Scan(&spec2)
+	if spec1 != "task-01" {
+		t.Fatalf("historical attempt task_spec_snapshot_id = %q, want task-01", spec1)
+	}
+	if spec2 != newSpec || spec2 == spec1 {
+		t.Fatalf("new attempt task_spec_snapshot_id = %q, want clarification %q", spec2, newSpec)
+	}
+
+	// Run queued for launch.
+	if status := runStatus(t, db); status != "queued" {
+		t.Fatalf("run = %s, want queued", status)
+	}
+
+	// Task-layer clarification only: no project/global Context promotion. The
+	// ask never creates a context proposal_draft (the T7 promotion path).
+	assertCount(t, db, "proposal_drafts WHERE proposal_kind='context'", 0)
+
+	// Exactly one command event + ack + accepted receipt.
+	assertCount(t, db, "outbox_operations WHERE kind='command_ack'", 1)
+	assertCount(t, db, "command_receipts WHERE disposition='accepted'", 1)
+
+	// Crash/replay atomicity: replaying the same candidate returns the stored
+	// outcome and writes no second snapshot, attempt, claim, launch or Ledger
+	// entry (command.md §7 — all-or-nothing).
+	replay, err := db.ApplyCommandEvent(ctx, ApplyCommandEventCmd{Envelope: env, Allowlist: []string{"alice"}, NowMS: testNow + 999})
+	if err != nil {
+		t.Fatalf("replay ApplyCommandEvent: %v", err)
+	}
+	if replay.Outcome != command.OutcomeApplied || replay.FinalEventID != res.FinalEventID {
+		t.Fatalf("replay = %s/%s, want stored %s/%s", replay.Outcome, replay.FinalEventID, command.OutcomeApplied, res.FinalEventID)
+	}
+	assertCount(t, db, "task_spec_snapshots WHERE run_id='"+cmdRun+"'", 2)
+	assertCount(t, db, "attempts WHERE run_id='"+cmdRun+"'", 2)
+	assertCount(t, db, "outbox_operations WHERE kind='launch_agent'", 1)
+	assertCount(t, db, "ledger_entries WHERE entry_kind='semantic_material'", 1)
+	assertCount(t, db, "command_receipts WHERE disposition='accepted'", 1)
+}
+
 // TestApplyCommandReasonActionMatrix is the table-driven reason×action proof
 // that the canonical newly-wired rows apply and persist their successors.
 func TestApplyCommandReasonActionMatrix(t *testing.T) {
