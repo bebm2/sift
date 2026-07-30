@@ -451,7 +451,7 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 #### 5.1 Brain T4/T6/T7 与 A7 防火墙
 
 - [x] T4/T6/T7 调用壳与验收矩阵已由 [rereview-6 PASS](reviews/2026-07-29-m5-brain-t4-t6-t7-impl-406-rereview-6-pi-gpt-5.6-sol.md) 核销；这不表示生产接线或 M5 已实现
-- [ ] T4 生成 headline/brief/options；失败兜底为裸链接 + 原始状态
+- [x] T4 生成 headline/brief/options；失败兜底为裸链接 + 原始状态（生产接纳已由 [#706 PASS WITH NOTES](reviews/2026-07-30-m5-t4-emit-interrupt-706-rereview-pi-deepseek-v4-pro.md) 核销：T4 canonical trace 与 fallback renderer 逐字节持久化、`invalid_output` 兜底写原始 trace envelope；注记仅涉 Report 配额路径覆盖完整性，不表示 T6/T7 接线或 M5 已实现）
 - [ ] T6 只建议时机/通道，失败按 severity 确定性阈值；任何结果仍经过发射器配额
 - [ ] T7 只生成 policy 提案或 context 草稿，二者都不自动生效
 - [ ] 测试 T7/历史数据不能放松单条 Gate、不能抑制单条 HITL
@@ -460,12 +460,14 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 #### 5.2 Interrupt 全功能与 Channel
 
 - [x] 先写 [`specs/channel.md`](specs/channel.md)：冻结首个 webhook Channel、delivery/operation key、Attention sealed payload 接缝与 Forge 失败兜底（[字段评审 PASS WITH NOTES](reviews/2026-07-29-m5-channel-field-rereview-3-pi-gpt-5.6-sol.md)；`active` 不表示 Channel 已实现；outbox ASCII 图缺 terminal reclaim 分支属非阻断注记）；实现项保持未勾
-- [ ] 复用 M3 已支持全部 reason 的唯一发射器，接入 T4/T6、Channel、调度与 critical 熔断；不得新增 reason 专用旁路
+- [ ] 复用 M3 已支持全部 reason 的唯一发射器，接入 T4/T6、Channel、调度与 critical 熔断；不得新增 reason 专用旁路（T4 经 [#706](reviews/2026-07-30-m5-t4-emit-interrupt-706-rereview-pi-deepseek-v4-pro.md)、Channel 经 [#715](reviews/2026-07-30-m5-channel-webhook-worker-715-rereview-pi-kimi-k3-sol.md) 已接入唯一发射器且无 reason 旁路；T6 接线与 critical 熔断仍未闭合）
 - [ ] LLM 只能建议 severity 降级；`min_modality: visual` renderer 拒绝语音路径
-- [ ] 实现首个 Channel；连续失败 N 次转 forge 告警评论，并在 ps/doctor 显示
-- [ ] 一次 Interrupt 只收费一次；升级重推不重复收费
+- [ ] 实现首个 Channel；连续失败 N 次转 forge 告警评论，并在 ps/doctor 显示（[#715 PASS WITH NOTES](reviews/2026-07-30-m5-channel-webhook-worker-715-rereview-pi-kimi-k3-sol.md) 已闭合 production sealer exact 向量、阈值 `forge_alert(channel_failure)` 与同 key/bytes response-loss replay；但 `ops.ps`/`ops.doctor` 仅投影层有据、端点级跨重启验收仍缺，wave-1 Channel scope 未全关闭）
+- [ ] 一次 Interrupt 只收费一次；升级重推不重复收费（[#711 PASS WITH NOTES](reviews/2026-07-30-m5-advance-interrupt-711-rereview-pi-deepseek-v4-pro.md) 在 storage 层证实升级各步保持单笔 admission/charge、不新增 member/authority/channel operation；全生命周期计费纪律仍待 Command/Channel redelivery 证据闭合）
 
 #### 5.3 超时与升级
+
+> [#711 PASS WITH NOTES](reviews/2026-07-30-m5-advance-interrupt-711-rereview-pi-deepseek-v4-pro.md) 在 storage 端口闭合了升级行为矩阵：severity 封顶（升级复用冻结 downgrade、从不达 critical）、reason 确定性映射（`startup_stall` 强制 hold 且不可 `auto_reject`）、两类上限结局状态机测试与每次升级轮换 nonce。但这是 `AdvanceInterrupt`/`AdvanceExpiry` 端口测试，Supervisor tick（首项）与 critical 熔断（末项）未接线，下列各项保持未勾。
 
 - [ ] Supervisor tick 扫描 `expires_at/on_expire`
 - [ ] 达 `max_escalations` 后 severity 封顶，并按 reason 的确定性映射进入 `auto_reject` 或 `hold`
