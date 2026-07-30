@@ -162,31 +162,53 @@ func (d *DB) BindExternalDecision(ctx context.Context, forgeFactEventID, calibra
 // RecordHumanDecision is the only Ledger settlement port for commands and
 // externally observed manual merge/close facts. It never guesses a calibration.
 func (d *DB) RecordHumanDecision(ctx context.Context, cmd RecordHumanDecisionCmd) (HumanDecisionResult, error) {
-	if cmd.NowMS <= 0 || !validHumanAction(cmd.Action) {
-		return HumanDecisionResult{}, errors.New("storage: invalid human decision")
-	}
-	isExternal := cmd.Action == DecisionManualMerge || cmd.Action == DecisionManualClose
-	if isExternal != (cmd.ForgeFactEventID != "") || (!isExternal && (cmd.CommandEventID == "" || cmd.InterruptID == "")) {
-		return HumanDecisionResult{}, errors.New("storage: invalid human decision identity")
-	}
-	if cmd.SemanticMaterial != "" && cmd.Action != DecisionReject && cmd.Action != DecisionAsk {
-		return HumanDecisionResult{}, errors.New("storage: semantic material is only valid for reject or ask")
-	}
-	idempotency := cmd.CommandEventID
-	if isExternal {
-		idempotency = cmd.ForgeFactEventID
+	if err := validateHumanDecision(cmd); err != nil {
+		return HumanDecisionResult{}, err
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return HumanDecisionResult{}, err
 	}
 	defer tx.Rollback()
+	result, err := recordHumanDecisionTx(ctx, tx, cmd)
+	if err != nil {
+		return HumanDecisionResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return HumanDecisionResult{}, err
+	}
+	return result, nil
+}
+
+// validateHumanDecision enforces the closed input contract shared by the
+// public port and the in-transaction command path.
+func validateHumanDecision(cmd RecordHumanDecisionCmd) error {
+	if cmd.NowMS <= 0 || !validHumanAction(cmd.Action) {
+		return errors.New("storage: invalid human decision")
+	}
+	isExternal := cmd.Action == DecisionManualMerge || cmd.Action == DecisionManualClose
+	if isExternal != (cmd.ForgeFactEventID != "") || (!isExternal && (cmd.CommandEventID == "" || cmd.InterruptID == "")) {
+		return errors.New("storage: invalid human decision identity")
+	}
+	if cmd.SemanticMaterial != "" && cmd.Action != DecisionReject && cmd.Action != DecisionAsk {
+		return errors.New("storage: semantic material is only valid for reject or ask")
+	}
+	return nil
+}
+
+// recordHumanDecisionTx is the single in-transaction Ledger settlement core.
+// ApplyCommandEvent calls it inside its own transaction so command, Run
+// transition, outbox and Ledger remain all-or-nothing; there is no second
+// Ledger path. The caller owns the transaction (begin/commit/rollback).
+func recordHumanDecisionTx(ctx context.Context, tx *sql.Tx, cmd RecordHumanDecisionCmd) (HumanDecisionResult, error) {
+	isExternal := cmd.Action == DecisionManualMerge || cmd.Action == DecisionManualClose
+	idempotency := cmd.CommandEventID
+	if isExternal {
+		idempotency = cmd.ForgeFactEventID
+	}
 	var existing HumanDecisionResult
-	err = tx.QueryRowContext(ctx, `SELECT r.ledger_entry_id,COALESCE(r.calibration_id,'') FROM human_decision_receipts r WHERE r.idempotency_id=?`, idempotency).Scan(&existing.LedgerEntryID, &existing.CalibrationID)
+	err := tx.QueryRowContext(ctx, `SELECT r.ledger_entry_id,COALESCE(r.calibration_id,'') FROM human_decision_receipts r WHERE r.idempotency_id=?`, idempotency).Scan(&existing.LedgerEntryID, &existing.CalibrationID)
 	if err == nil {
-		if err := tx.Commit(); err != nil {
-			return HumanDecisionResult{}, err
-		}
 		return existing, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -203,13 +225,22 @@ func (d *DB) RecordHumanDecision(ctx context.Context, cmd RecordHumanDecisionCmd
 		// An unbound external fact is still audit evidence. Its event supplies
 		// the Run identity, but cannot settle (or fabricate) a calibration.
 		if !isExternal {
-			return HumanDecisionResult{}, errors.New("storage: interrupt has no calibration binding")
+			// A command interrupt without a Gate calibration (for example a
+			// pre-start design_approval or a startup_stall) still records its
+			// human decision: it settles no calibration, but the Ledger entry,
+			// semantic material and receipt are written in this transaction.
+			var nullableCal sql.NullString
+			if calErr := tx.QueryRowContext(ctx, `SELECT COALESCE(calibration_id,''),run_id FROM interrupts WHERE id=?`, cmd.InterruptID).Scan(&nullableCal, &runID); calErr != nil {
+				return HumanDecisionResult{}, errors.New("storage: interrupt has no calibration binding")
+			}
+			calibrationID, shadow = "", "inconclusive"
+		} else {
+			var nullableRun sql.NullString
+			if eventErr := tx.QueryRowContext(ctx, `SELECT run_id FROM events WHERE id=?`, cmd.ForgeFactEventID).Scan(&nullableRun); eventErr != nil || !nullableRun.Valid {
+				return HumanDecisionResult{}, errors.New("storage: external fact has no run identity")
+			}
+			calibrationID, shadow, runID = "", "inconclusive", nullableRun.String
 		}
-		var nullableRun sql.NullString
-		if eventErr := tx.QueryRowContext(ctx, `SELECT run_id FROM events WHERE id=?`, cmd.ForgeFactEventID).Scan(&nullableRun); eventErr != nil || !nullableRun.Valid {
-			return HumanDecisionResult{}, errors.New("storage: external fact has no run identity")
-		}
-		calibrationID, shadow, runID = "", "inconclusive", nullableRun.String
 	} else if err != nil {
 		return HumanDecisionResult{}, err
 	}
@@ -253,9 +284,6 @@ func (d *DB) RecordHumanDecision(ctx context.Context, cmd RecordHumanDecisionCmd
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO human_decision_receipts (idempotency_id,ledger_entry_id,calibration_id) VALUES (?,?,?)`, idempotency, entryID, nullable(calibrationID)); err != nil {
-		return HumanDecisionResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return HumanDecisionResult{}, err
 	}
 	return result, nil

@@ -725,6 +725,16 @@ func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, befor
 	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupt_deliveries (id,interrupt_id,surface,priority,operation_key,state,attempt_count,created_at_ms) VALUES (?,?,'forge_comment','normal',?,'pending',0,?)`, newID(), in.ID, opKey, cmd.NowMS); err != nil {
 		return Interrupt{}, err
 	}
+	// Immutable command target binding (command.md §2.3): the same verified
+	// target used in the forge_comment payload, bound to this Interrupt's
+	// initial publish operation. Command compares envelope targets only here.
+	var publishOpID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM outbox_operations WHERE operation_key=?`, opKey).Scan(&publishOpID); err != nil {
+		return Interrupt{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO interrupt_command_targets (interrupt_id,publish_operation_id,target_kind,target_id,created_at_ms) VALUES (?,?,?,?,?)`, in.ID, publishOpID, kind, id, cmd.NowMS); err != nil {
+		return Interrupt{}, err
+	}
 	if dispatch.delivery == "immediate" {
 		if err := enqueueInterruptChannelTx(ctx, tx, in.ID, 1, nonce, 0, "normal", cmd.NowMS); err != nil {
 			return Interrupt{}, err
