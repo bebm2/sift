@@ -59,6 +59,13 @@ func main() {
 		ControlRoot:         home.Path,
 		AttentionDailyQuota: attentionQuota(snapshot.Config.Attention.DailyQuota), DayTimezone: snapshot.Config.Attention.DayTimezone, DailySummaryAt: snapshot.Config.Attention.DailySummaryAt, CriticalWindowMS: snapshot.Config.Attention.CriticalFuse.Window.Milliseconds(), CriticalTotalLimit: snapshot.Config.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: snapshot.Config.Attention.CriticalFuse.PerRunLimit, Channels: interruptChannels(snapshot.Config.Attention), Now: time.Now,
 	}
+	// startup_stall retry probe process-check shares the same process inspector
+	// and control root as termination. It runs on the supervisor tick and drives
+	// pending|running probes to the unique ApplyRetryProbeResult finalizer; it is
+	// not an outbox worker and never signals a process (specs/storage.md §5.5).
+	probeCheck := &daemon.ProbeProcessCheckCoordinator{
+		DB: db, Inspector: runtime.PlatformProcessInspector{}, Runtime: snapshot.Config.Runtime, ControlRoot: home.Path, Now: time.Now,
+	}
 	// Recovery runs before Assemble starts any worker. Incomplete process
 	// evidence deliberately fails closed and becomes a visible startup_stall
 	// instead of allowing a launch lease to be reclaimed.
@@ -90,7 +97,7 @@ func main() {
 		return termination.Operator(ctx, runID, version, method == "ops.retry")
 	})
 	s.SetAttentionQuota(attentionQuotaStrings(snapshot.Config.Attention.DailyQuota))
-	if err := startSchedulers(ctx, db, workers, termination, snapshot.Config.Scheduler); err != nil {
+	if err := startSchedulers(ctx, db, workers, termination, probeCheck, snapshot.Config.Scheduler); err != nil {
 		fatal(err)
 	}
 	defer db.SetOutboxWakeup(nil)
@@ -131,8 +138,8 @@ func interruptChannels(attention config.Attention) []storage.InterruptChannel {
 	return channels
 }
 
-func startSchedulers(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, cfg config.Scheduler) error {
-	return startSchedulersWithFactory(ctx, db, workers, termination, cfg, productionSchedulerFactory{}, schedulerHooks{})
+func startSchedulers(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, probeCheck *daemon.ProbeProcessCheckCoordinator, cfg config.Scheduler) error {
+	return startSchedulersWithFactory(ctx, db, workers, termination, probeCheck, cfg, productionSchedulerFactory{}, schedulerHooks{})
 }
 
 type wakeScheduler interface {
@@ -165,7 +172,7 @@ type schedulerHooks struct {
 	Intake, Supervisor, Outbox func()
 }
 
-func startSchedulersWithFactory(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, cfg config.Scheduler, factory schedulerFactory, hooks schedulerHooks) error {
+func startSchedulersWithFactory(ctx context.Context, db *storage.DB, workers *daemon.Daemon, termination *daemon.TerminationCoordinator, probeCheck *daemon.ProbeProcessCheckCoordinator, cfg config.Scheduler, factory schedulerFactory, hooks schedulerHooks) error {
 	intake := factory.Intake(reportSchedulerError("intake", func(ctx context.Context) error {
 		if hooks.Intake != nil {
 			hooks.Intake()
@@ -178,6 +185,16 @@ func startSchedulersWithFactory(ctx context.Context, db *storage.DB, workers *da
 		}
 		if err := termination.Timeout(ctx); err != nil {
 			return err
+		}
+		// startup_stall retry probes are driven on the supervisor domain, never
+		// the outbox: process observation and idempotent finalization stay out
+		// of the outbox and resume from pending|running after a crash. Probes
+		// finalize before SupervisorInterruptTick so a failed probe's reverted
+		// batched state can be escalated in the same tick.
+		if probeCheck != nil {
+			if err := probeCheck.Tick(ctx); err != nil {
+				return err
+			}
 		}
 		return db.SupervisorInterruptTick(ctx, time.Now().UnixMilli())
 	}))

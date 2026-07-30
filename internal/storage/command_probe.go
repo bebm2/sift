@@ -242,3 +242,64 @@ func writeProbeAckOpTx(ctx context.Context, tx *sql.Tx, eventKey string, outcome
 	op := Operation{Key: ackKey, Kind: OperationCommandAck, Payload: body, InterruptID: interruptID, RunID: runID}
 	return insertOperation(ctx, tx, op, runID, interruptID, nowMS)
 }
+
+// RetryProbeCandidate is the immutable snapshot a probe process-check
+// coordinator needs before it performs process IO outside any transaction. It
+// joins attempt_probes with the bound attempt's recorded wrapper identity
+// (specs/storage.md §5.5). ControlPath is not persisted; the coordinator
+// derives it from its control root.
+type RetryProbeCandidate struct {
+	ProbeID            string
+	RunID              string
+	AttemptNo          int
+	InterruptID        string
+	ExpectedRunVersion int64
+	ExpectedGeneration int
+	AgentID            string
+	WrapperPID         int
+	WrapperStartedAtMS int64
+	WrapperExecutable  string
+	WrapperPGID        int
+	ControlNonceHash   string
+}
+
+// PendingRetryProbes returns attempt_probes still in pending or running state,
+// joined with the bound attempt's recorded wrapper identity. The probe
+// process-check worker drives each to the unique ApplyRetryProbeResult
+// finalizer (specs/command.md §5, specs/storage.md §5.5). Process observation
+// and idempotent finalization happen outside this read; a probe superseded by a
+// late fact or already finalized is excluded by its state.
+func (d *DB) PendingRetryProbes(ctx context.Context) ([]RetryProbeCandidate, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT p.id,p.run_id,p.attempt_no,p.interrupt_id,p.expected_run_version,p.expected_generation,
+		COALESCE(a.agent_id,''),COALESCE(a.wrapper_pid,0),COALESCE(a.wrapper_started_at_ms,0),COALESCE(a.wrapper_executable,''),COALESCE(a.wrapper_pgid,0),COALESCE(a.control_nonce_hash,'')
+		FROM attempt_probes p JOIN attempts a ON a.run_id=p.run_id AND a.attempt_no=p.attempt_no
+		WHERE p.state IN ('pending','running') ORDER BY p.created_at_ms, p.id`)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list pending retry probes: %w", err)
+	}
+	defer rows.Close()
+	var out []RetryProbeCandidate
+	for rows.Next() {
+		var c RetryProbeCandidate
+		if err := rows.Scan(&c.ProbeID, &c.RunID, &c.AttemptNo, &c.InterruptID, &c.ExpectedRunVersion, &c.ExpectedGeneration, &c.AgentID, &c.WrapperPID, &c.WrapperStartedAtMS, &c.WrapperExecutable, &c.WrapperPGID, &c.ControlNonceHash); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ClaimRetryProbe performs the pending->running CAS so a crashed tick can be
+// resumed (specs/storage.md §5.5: "崩溃后从 pending/running 继续"). started_at_ms
+// is set once and preserved across replay. This is best-effort progress
+// tracking; the unique ApplyRetryProbeResult finalizer's own pending|running CAS
+// is the real at-most-once guard, so a failed/empty claim (an already-running
+// probe, or one finalized by a concurrent tick/fact) is not an error.
+func (d *DB) ClaimRetryProbe(ctx context.Context, probeID string, nowMS int64) (bool, error) {
+	res, err := d.db.ExecContext(ctx, `UPDATE attempt_probes SET state='running',started_at_ms=COALESCE(started_at_ms,?) WHERE id=? AND state='pending'`, nowMS, probeID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}

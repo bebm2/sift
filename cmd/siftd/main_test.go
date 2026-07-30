@@ -103,7 +103,7 @@ func testProductionWake(t *testing.T, commitWakeup bool, enqueue func(context.Co
 		},
 	}}}
 	termination := &daemon.TerminationCoordinator{DB: db, Terminator: runtime.Terminator{}, Runtime: config.Runtime{}, Now: func() time.Time { return now }}
-	if err := startSchedulers(ctx, db, workers, termination, schedulerWithLongIntervals()); err != nil {
+	if err := startSchedulers(ctx, db, workers, termination, nil, schedulerWithLongIntervals()); err != nil {
 		t.Fatal(err)
 	}
 	// startSchedulers returns only after the outbox startup sweep observed an
@@ -151,7 +151,7 @@ func TestStartSchedulersKeepsProductionEdgesIndependent(t *testing.T) {
 	termination := &daemon.TerminationCoordinator{DB: db, Runtime: config.Runtime{}, Now: func() time.Time { return now }}
 	factory := &manualSchedulerFactory{}
 	var intakeEdges, supervisorEdges, outboxEdges int
-	if err := startSchedulersWithFactory(ctx, db, workers, termination, schedulerWithLongIntervals(), factory, schedulerHooks{
+	if err := startSchedulersWithFactory(ctx, db, workers, termination, nil, schedulerWithLongIntervals(), factory, schedulerHooks{
 		Intake: func() { intakeEdges++ }, Supervisor: func() { supervisorEdges++ }, Outbox: func() { outboxEdges++ },
 	}); err != nil {
 		t.Fatal(err)
