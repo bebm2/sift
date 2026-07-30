@@ -339,10 +339,9 @@ func admitInterruptT6(ctx context.Context, cmd EmitInterruptCmd, modality string
 			out = advised
 		}
 	}
-	severity := base
-	if out.SuggestedDowngrade {
-		severity = downgradeInterruptSeverity(severity)
-	}
+	// Final severity is the single Severity(...) entry: T6 advice can only
+	// suggest a one-level downgrade, never set or upgrade the base.
+	severity := Severity(base, out.SuggestedDowngrade)
 	if severity == SeverityHigh || severity == SeverityCritical {
 		out.Delivery = "immediate"
 	}
@@ -379,24 +378,32 @@ func validT6Advice(out InterruptT6Output, in InterruptT6Input) bool {
 	if !containsString(in.ChannelCandidates, out.ChannelID) || (out.Delivery != "immediate" && out.Delivery != "batch" && out.Delivery != "next_window") {
 		return false
 	}
-	severity := in.Severity
-	if out.SuggestedDowngrade {
-		severity = downgradeInterruptSeverity(severity)
-	}
+	severity := Severity(in.Severity, out.SuggestedDowngrade)
 	if (severity == SeverityHigh || severity == SeverityCritical) && out.Delivery != "immediate" {
 		return false
 	}
 	return out.Delivery != "next_window" || in.NextWindowAtMS != nil && *in.NextWindowAtMS > in.FrozenAtMS && *in.NextWindowAtMS < in.ExpiresAtMS
 }
 
-func downgradeInterruptSeverity(s InterruptSeverity) InterruptSeverity {
-	switch s {
+// Severity is the sole deterministic final-severity algorithm (interrupt.md
+// §4.2). It takes the already-promoted base and the accepted T6
+// suggested_downgrade advice, and lowers severity by at most one level
+// (clamped at low), never upgrading. It is the only path by which an LLM/T6
+// suggestion can move severity off the promoted BaseSeverity result.
+// EmitInterruptCmd carries no severity field, so callers cannot manufacture a
+// more urgent Interrupt; InterruptT4Output has no severity field, and T6's
+// output only carries suggested_downgrade. The emitter applies this once to
+// the frozen base and persists the decision, so replay and escalation reuse it
+// rather than lowering again.
+func Severity(base InterruptSeverity, suggestedDowngrade bool) InterruptSeverity {
+	if !suggestedDowngrade {
+		return base
+	}
+	switch base {
 	case SeverityCritical:
 		return SeverityHigh
 	case SeverityHigh:
 		return SeverityNormal
-	case SeverityNormal:
-		return SeverityLow
 	default:
 		return SeverityLow
 	}
