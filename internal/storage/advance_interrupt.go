@@ -93,9 +93,9 @@ func (d *DB) AdvanceInterrupt(ctx context.Context, cmd AdvanceInterruptCmd) (boo
 	for i := 0; i <= escalation; i++ {
 		next = promoteSeverity(next)
 	}
-	if downgraded {
-		next = downgradeInterruptSeverity(next)
-	}
+	// Escalation reuses the frozen downgrade decision through the same
+	// Severity(...) entry; it is applied once, never re-derived from T6.
+	next = Severity(next, downgraded)
 	newNonce := newID()
 	nextState, delivery, heldReason := "ready", "batch", ""
 	var due any
