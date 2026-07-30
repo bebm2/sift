@@ -33,6 +33,7 @@ type Daemon struct {
 	Merges      []*forgeworker.MergeWorker
 	Channels    []*channelworker.Worker
 	Alerts      *forgeworker.AlertWorker
+	CommandAcks *forgeworker.CommandAckWorker
 	Successes   []*gate.SuccessReconciler
 	Gates       []*gate.Reconciler
 	Replies     []*intake.ReplyConsumer
@@ -69,7 +70,11 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 		now = time.Now
 	}
 	d := &Daemon{DB: db, Now: now}
-	alertClients := make(map[string]forge.Client)
+	// One per-project adapter map is shared by the cross-project consumers
+	// (forge_alert and command_ack): their payloads do not carry project
+	// routing, so each worker resolves the frozen target and selects the
+	// matching adapter by forge_kind|host|project_key.
+	forgeClients := make(map[string]forge.Client)
 	db.SetChannelPolicy(cfg.Attention.ChannelFailureAlertAfter, cfg.Outbox.MaxAttempts)
 	// Channel payloads are already sealed by storage. The production consumer
 	// owns the only resolver and HTTP side effect; it is not project-scoped.
@@ -89,7 +94,7 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 			return nil, fmt.Errorf("project %s: %w", p.ID, err)
 		}
 		adapter.WithAutoMergeCapabilityReader(db)
-		alertClients[string(ref.Kind)+"|"+ref.Host+"|"+ref.ProjectKey] = adapter
+		forgeClients[string(ref.Kind)+"|"+ref.Host+"|"+ref.ProjectKey] = adapter
 		probeCtx := context.Background()
 		if cfg.Forge.CommandTimeout > 0 {
 			var cancel context.CancelFunc
@@ -118,8 +123,12 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 		}
 		d.Replies = append(d.Replies, &intake.ReplyConsumer{DB: db, Forge: adapter, Projects: []intake.Project{project}, Now: now})
 	}
-	if len(alertClients) > 0 {
-		d.Alerts = &forgeworker.AlertWorker{DB: db, Clients: alertClients, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:forge-alert"}
+	if len(forgeClients) > 0 {
+		d.Alerts = &forgeworker.AlertWorker{DB: db, Clients: forgeClients, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:forge-alert"}
+		// command_ack shares the per-project adapter map. Its operation payload
+		// (CommandAckV1) carries no forge routing; the worker resolves the
+		// immutable target from the append-only command receipt.
+		d.CommandAcks = &forgeworker.CommandAckWorker{DB: db, Clients: forgeClients, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:command_ack"}
 	}
 	return d, nil
 }
@@ -218,6 +227,11 @@ func (d *Daemon) OutboxTick(ctx context.Context) error {
 	if d.Alerts != nil {
 		if err := d.Alerts.RunOnce(ctx); err != nil {
 			return fmt.Errorf("forge_alert: %w", err)
+		}
+	}
+	if d.CommandAcks != nil {
+		if err := d.CommandAcks.RunOnce(ctx); err != nil {
+			return fmt.Errorf("command_ack: %w", err)
 		}
 	}
 	if d.Launch != nil {
