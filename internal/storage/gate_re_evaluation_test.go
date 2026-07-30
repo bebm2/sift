@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -261,6 +262,131 @@ func TestCompleteGateReEvaluationSucceededReady(t *testing.T) {
 	}
 	if evType != "gate.reevaluation.ready.no_auto_merge" {
 		t.Fatalf("event type = %s", evType)
+	}
+}
+
+// TestCompleteGateReEvaluationSucceededReadyMerge verifies the ready/merge arm
+// (storage.md §8.1): Run -> running(gate_merge_requested), one terminal event,
+// and exactly one merge_change successor enqueued in the same transaction with
+// the closed payload fields and created_from_event_id byte-for-byte event:<K>.
+// A replayed Complete cannot double-enqueue, and the successor is claimable by
+// the wired MergeWorker's per-project claim path.
+func TestCompleteGateReEvaluationSucceededReadyMerge(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	head := "0123456789012345678901234567890123456789"
+	inputJSON := mustCanon(t, map[string]any{
+		"schema_version":        1,
+		"effective_policy_hash": strings.Repeat("c", 64),
+		"certification_version": strings.Repeat("d", 64),
+		"change":                map[string]any{"head_sha": head},
+		"identity":              map[string]any{"change_id": "change-01", "run_id": cmdRun, "project_id": "project", "task_kind": "bug"},
+		"risk": map[string]any{
+			"source": map[string]any{"version": "T3/fallback/v1"},
+		},
+	})
+	inputHash := SHA256Hex([]byte(inputJSON))
+	verdictJSON := mustCanon(t, map[string]any{"schema_version": 1, "kind": "ready", "code": "merge", "head_sha": head})
+	verdictDigest := SHA256Hex([]byte(verdictJSON))
+	claim, _ := seedClaimedGateReEval(t, db, ctx, InterruptGuardrailViolation, inputJSON, inputHash, "", "")
+
+	var runVersionBefore int64
+	if err := db.db.QueryRow(`SELECT version FROM runs WHERE id=?`, cmdRun).Scan(&runVersionBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	result := canonicalResult(t, "succeeded", map[string]any{
+		"gate_input_json": inputJSON,
+		"gate_input_hash": inputHash,
+		"gate_version":    "gate/v1",
+		"verdict_json":    verdictJSON,
+		"verdict_digest":  verdictDigest,
+	})
+	if err := db.CompleteGateReEvaluation(ctx, claim, result, testNow+20); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// Run -> running, version bumped; no completion timestamp.
+	var runStatus string
+	var runVersion int64
+	var completedAt sql.NullInt64
+	if err := db.db.QueryRow(`SELECT status, version, completed_at_ms FROM runs WHERE id=?`, cmdRun).Scan(&runStatus, &runVersion, &completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "running" || runVersion != runVersionBefore+1 {
+		t.Fatalf("run = %s v%d, want running v%d", runStatus, runVersion, runVersionBefore+1)
+	}
+	if completedAt.Valid {
+		t.Fatalf("run completed_at_ms = %d, want unset", completedAt.Int64)
+	}
+
+	// Terminal event: type gate.reevaluation.ready.merge at key O:verdict:ready:merge.
+	evKey := claim.Key + ":verdict:ready:merge"
+	var evType, evID string
+	if err := db.db.QueryRow(`SELECT type, id FROM events WHERE idempotency_key=?`, evKey).Scan(&evType, &evID); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if evType != "gate.reevaluation.ready.merge" || evID != "event:"+evKey {
+		t.Fatalf("event type/id = %s / %s", evType, evID)
+	}
+
+	// Exactly one merge_change successor with the closed payload fields and
+	// created_from_event_id == the terminal event id.
+	mergeKey := MergeChangeOperationKey(cmdRun, head)
+	var mergeCount int
+	if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='merge_change'`).Scan(&mergeCount); err != nil {
+		t.Fatal(err)
+	}
+	if mergeCount != 1 {
+		t.Fatalf("merge_change count = %d, want 1", mergeCount)
+	}
+	var mergePayload, mergeKind string
+	if err := db.db.QueryRow(`SELECT payload_json, kind FROM outbox_operations WHERE operation_key=?`, mergeKey).Scan(&mergePayload, &mergeKind); err != nil {
+		t.Fatalf("successor merge_change: %v", err)
+	}
+	if mergeKind != "merge_change" {
+		t.Fatalf("successor kind = %s", mergeKind)
+	}
+	var merge map[string]string
+	if err := json.Unmarshal([]byte(mergePayload), &merge); err != nil {
+		t.Fatal(err)
+	}
+	// The §8.1 Gate-provenance closed fields plus routing/method fields.
+	want := map[string]string{
+		"project_id": "project", "run_id": cmdRun, "change_id": "change-01",
+		"expected_head_sha": head, "method": "merge",
+		"verdict_digest":        verdictDigest,
+		"created_from_event_id": "event:" + evKey,
+	}
+	for k, v := range want {
+		if merge[k] != v {
+			t.Fatalf("merge_change %s = %q, want %q (payload=%s)", k, merge[k], v, mergePayload)
+		}
+	}
+	if merge["gate_evaluation_id"] == "" || merge["gate_input_snapshot_id"] == "" {
+		t.Fatalf("merge_change missing E/S (payload=%s)", mergePayload)
+	}
+
+	// at-most-one: a second Complete under the now-cleared lease cannot
+	// double-enqueue the merge_change successor.
+	if err := db.CompleteGateReEvaluation(ctx, claim, result, testNow+30); !errors.Is(err, ErrRejectedStaleWorker) {
+		t.Fatalf("second Complete err = %v, want ErrRejectedStaleWorker", err)
+	}
+	if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='merge_change'`).Scan(&mergeCount); err != nil {
+		t.Fatal(err)
+	}
+	if mergeCount != 1 {
+		t.Fatalf("merge_change count after replay = %d, want 1", mergeCount)
+	}
+
+	// The successor is claimable by the wired MergeWorker's per-project claim
+	// path (storage.md §8.1: merge_change can be claimed).
+	c, err := db.ClaimOutboxOperationKindProject(ctx, "siftd:merge:project", OperationMergeChange, "project", testNow+40, 60_000)
+	if err != nil || c == nil {
+		t.Fatalf("claim merge_change: %v claim=%v", err, c)
+	}
+	if c.Key != mergeKey {
+		t.Fatalf("claimed key = %s, want %s", c.Key, mergeKey)
 	}
 }
 
