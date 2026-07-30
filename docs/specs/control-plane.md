@@ -344,6 +344,8 @@ V10a wrapper 段至少逐行覆盖上表，并额外断言：同 acquire 请求�
 | `ops.logs` | read | 日志文件定位及有界读取结果 |
 | `ops.worktree` | read | Run worktree 路径与隔离状态 |
 | `ops.doctor` | read | 健康项、warning/error、`unsafe-local` 暴露面 |
+| `ops.metrics` | read | PRD §10.2 九项指标与触发→启动延迟分布（[`metrics.md`](metrics.md)） |
+| `ops.timeline` | read | append-only 事件流的有界 keyset 查询（[`metrics.md`](metrics.md) §3/§4） |
 | `ops.kill` | write | 立即收敛或 accepted/in_progress |
 | `ops.retry` | write | 立即收敛或 accepted/in_progress |
 
@@ -401,6 +403,10 @@ attempt 为空时选择最大 attempt_no；`offset>=0`，`limit=1..262144`。res
 ```
 
 `exit_code=0|1|2` 与 [`config.md`](config.md) §7 一致；`level=ok|warning|error`，checks 按 id 升序。details 是按 check id 绑定的 closed schema，不得成为任意 JSON 逃生口。
+
+`ops.metrics` params 为 `{"project_id":null}`（空表示全局）。result 为 `{"metrics": <MetricsReport>, "trigger_started_latency": <LatencyDistribution>}`，二者均为失败闭合的只读派生，口径与诚实边界见 [`metrics.md`](metrics.md) §2/§4。`MetricsReport` 的每个序列是 `{"numerator":N,"denominator":D,"rate":R,"coverage":"..."}`；缺数据时 `coverage` 必填、分子为零。
+
+`ops.timeline` params 为 `{"run_id":null,"project_id":null,"type":null,"after_seq":0,"limit":100}`。result 为 `{"events":[<Event>],"next_seq":S,"has_more":bool}`，按 `seq` 升序 keyset 分页，`limit=1..1000`。Event 结构与 `storage.md` §7.1 的只读模型一致；不返回 token/hash。
 
 ### 6.3 `ops.kill` / `ops.retry`
 
@@ -529,7 +535,7 @@ wrapper 原样追加 Agent PTY 字节流并按 config 轮转。日志不是 JSON
 ## 8. CLI 行为
 
 - `sift report` 只读 `$SIFT_RUN_DIR/control.json` 的 run token并连接 `run.sock`；缺目录、文件不安全或 token 不合法时本地失败，不回退运维 socket。
-- `sift ps/logs/worktree/doctor/kill/retry` 只连接 `siftd.sock` 并读 operator token；不得把 operator token发送到 `run.sock`。
+- `sift ps/logs/worktree/doctor/kill/retry/metrics/timeline` 只连接 `siftd.sock` 并读 operator token；不得把 operator token发送到 `run.sock`。`metrics`/`timeline` 是只读派生（[`metrics.md`](metrics.md)）。
 - daemon 不可用时，写命令一律失败且不改 DB/文件。V0 只有显式 `sift doctor --offline` 可走离线只读诊断；输出必须含 `offline:true`，不得迁移、创建 token、清理 socket或修正权限。
 - `sift report` 只使用首次 `not_ready` response 的 closed `retry_policy` 和单调时钟计算指数退避；不得读 `config.yaml`。第 n 次等待为 `min(max_delay_ms, floor(initial_delay_ms × multiplier_micros^n / 1,000,000^n))`；中间整数溢出、`initial <= max <= total` 不成立，或累计等待超过 total timeout 均 fail closed。示例 policy 的等待为 `100,200,400,800,1000×8` ms（累计 9500ms）；下一次 1000ms 拒绝。`multiplier_micros=1000000` 的长序列保持 100ms，不得漂移。`10.5ms`、`1.0000001` 等配置在加载时拒绝；同一次序列中 policy 变化或 schema 非法时本地失败；其他 auth/stale/conflict 错误不重试。
 

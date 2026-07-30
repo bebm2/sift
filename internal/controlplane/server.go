@@ -34,14 +34,15 @@ type reportParams struct {
 }
 
 type Server struct {
-	Home          config.Home
-	operatorToken string
-	lock          *os.File
-	operator      *net.UnixListener
-	run           *net.UnixListener
-	wg            sync.WaitGroup
-	db            *storage.DB
-	operations    func(context.Context, string, string, int64) error
+	Home            config.Home
+	operatorToken   string
+	lock            *os.File
+	operator        *net.UnixListener
+	run             *net.UnixListener
+	wg              sync.WaitGroup
+	db              *storage.DB
+	operations      func(context.Context, string, string, int64) error
+	configuredQuota map[string]int
 }
 
 // Start obtains the process-lifetime mutex, creates the capability token when
@@ -245,6 +246,13 @@ func (s *Server) SetOperatorAction(action func(context.Context, string, string, 
 	s.operations = action
 }
 
+// SetAttentionQuota installs the live per-severity daily attention ceilings the
+// daemon resolved from config; ops.ps reports remaining = ceiling − persisted
+// consumption. Without it the server reports only persisted ceilings.
+func (s *Server) SetAttentionQuota(quota map[string]int) {
+	s.configuredQuota = quota
+}
+
 func (s *Server) operatorRequest(req Request) Response {
 	if !strings.HasPrefix(req.Method, "ops.") {
 		return failure(req.RequestID, "unknown_method", "method is not registered on this socket", false)
@@ -254,28 +262,18 @@ func (s *Server) operatorRequest(req Request) Response {
 	}
 	switch req.Method {
 	case "ops.ps":
-		if !onlyKeys(req.Params, "run_id", "project_id", "status", "limit", "after_run_id") {
-			return failure(req.RequestID, "invalid_request", "invalid params", false)
-		}
-		result := map[string]any{"runs": []any{}, "next_after_run_id": nil, "attention_remaining": map[string]int{"low": 3, "normal": 5, "high": 5}, "channel_deliveries": []any{}}
-		if s.db != nil {
-			projections, err := s.db.ChannelDiagnostics(context.Background())
-			if err != nil {
-				return failure(req.RequestID, "storage", "channel projections unavailable", true)
-			}
-			result["channel_deliveries"] = projections
-		}
-		return success(req.RequestID, result)
+		return s.handleOpsPs(req)
 	case "ops.logs":
-		if !onlyKeys(req.Params, "run_id", "attempt_no", "offset", "limit") {
-			return failure(req.RequestID, "invalid_request", "invalid params", false)
-		}
-		return failure(req.RequestID, "not_found", "run not found", false)
+		return s.handleOpsLogs(req)
 	case "ops.worktree":
 		if !onlyKeys(req.Params, "run_id") {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)
 		}
 		return failure(req.RequestID, "not_found", "run not found", false)
+	case "ops.metrics":
+		return s.handleOpsMetrics(req)
+	case "ops.timeline":
+		return s.handleOpsTimeline(req)
 	case "ops.doctor":
 		if !onlyKeys(req.Params) {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)
