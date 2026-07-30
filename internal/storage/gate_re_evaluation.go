@@ -662,7 +662,7 @@ func (d *DB) emitGateReEvalHITLSuccessorTx(ctx context.Context, tx *sql.Tx, row 
 		return Interrupt{}, errors.New("storage: gate re-eval interrupt emission not configured")
 	}
 	eventRef := "sift://event/event:" + eventKey
-	changeRef := "https://sift.invalid/change/" + row.op.ChangeID
+	changeRef := "sift://change/" + row.op.ChangeID
 	attemptNo := row.op.AttemptNo
 	cmd := EmitInterruptCmd{
 		RunID:               row.op.RunID,
@@ -816,7 +816,81 @@ func (d *DB) emitGateReEvalHITLSuccessorTx(ctx context.Context, tx *sql.Tx, row 
 	if err := validateGateReEvalInterruptV1(seam, cmd); err != nil {
 		return Interrupt{}, err
 	}
-	return d.emitInterruptInExistingTx(ctx, tx, cmd, false)
+	if in, err := gateReEvalReplayOrRejectInterruptTx(ctx, tx, seam); err != nil {
+		return Interrupt{}, err
+	} else if in.ID != "" {
+		return in, nil
+	}
+	in, err := d.emitInterruptInExistingTx(ctx, tx, cmd, false)
+	if err != nil {
+		return Interrupt{}, err
+	}
+	if err := gateReEvalPersistInterruptSeamTx(ctx, tx, in.ID, seam, nowMS); err != nil {
+		return Interrupt{}, err
+	}
+	return in, nil
+}
+
+// gateReEvalPersistInterruptSeamTx records the closed GateReEvaluationInterruptV1
+// seam so generation-key replay can verify full-field provenance closure.
+func gateReEvalPersistInterruptSeamTx(ctx context.Context, tx *sql.Tx, interruptID string, seam GateReEvaluationInterruptV1, nowMS int64) error {
+	if seam.SourceInterruptID == "" || seam.CreatedFromEventID == "" || len(seam.Facts) == 0 {
+		return fmt.Errorf("%w: incomplete gate re-eval interrupt seam", ErrGateReEvaluationContract)
+	}
+	factsJSON, err := canonicalJSON(seam.Facts)
+	if err != nil {
+		return err
+	}
+	factsDigest := sha256Hex(factsJSON)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO gate_re_eval_interrupt_seams (interrupt_id,source_interrupt_id,created_from_event_id,facts_canonical_json,facts_digest,created_at_ms) VALUES (?,?,?,?,?,?)`,
+		interruptID, seam.SourceInterruptID, seam.CreatedFromEventID, string(factsJSON), factsDigest, nowMS); err != nil {
+		return fmt.Errorf("%w: persist gate re-eval interrupt seam: %v", ErrGateReEvaluationContract, err)
+	}
+	return nil
+}
+
+// gateReEvalReplayOrRejectInterruptTx enforces closed GateReEvaluationInterruptV1
+// replay: an existing generation key is idempotent only when reason, binding,
+// source_interrupt_id, created_from_event_id, and facts are byte-identical;
+// otherwise the transaction must roll back.
+func gateReEvalReplayOrRejectInterruptTx(ctx context.Context, tx *sql.Tx, seam GateReEvaluationInterruptV1) (Interrupt, error) {
+	existing, found, err := interruptByKeyTx(ctx, tx, seam.GenerationKey)
+	if err != nil {
+		return Interrupt{}, err
+	}
+	if !found {
+		return Interrupt{}, nil
+	}
+	var storedBinding, storedReason string
+	if err := tx.QueryRowContext(ctx, `SELECT b.binding_json, i.reason FROM interrupt_command_effect_bindings b JOIN interrupts i ON i.id=b.interrupt_id WHERE i.id=?`, existing.ID).Scan(&storedBinding, &storedReason); err != nil {
+		return Interrupt{}, fmt.Errorf("%w: generation key collision without binding: %v", ErrGateReEvaluationContract, err)
+	}
+	if storedReason != string(seam.Reason) || storedBinding != string(seam.BindingJSON) {
+		return Interrupt{}, fmt.Errorf("%w: generation key collision with divergent seam", ErrGateReEvaluationContract)
+	}
+	wantFactsJSON, err := canonicalJSON(seam.Facts)
+	if err != nil {
+		return Interrupt{}, err
+	}
+	wantFactsDigest := sha256Hex(wantFactsJSON)
+	var storedSource, storedEvent, storedFacts, storedFactsDigest string
+	err = tx.QueryRowContext(ctx, `SELECT source_interrupt_id,created_from_event_id,facts_canonical_json,facts_digest FROM gate_re_eval_interrupt_seams WHERE interrupt_id=?`, existing.ID).Scan(&storedSource, &storedEvent, &storedFacts, &storedFactsDigest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Interrupt{}, fmt.Errorf("%w: generation key collision without seam provenance", ErrGateReEvaluationContract)
+	}
+	if err != nil {
+		return Interrupt{}, fmt.Errorf("%w: seam provenance lookup: %v", ErrGateReEvaluationContract, err)
+	}
+	if storedSource != seam.SourceInterruptID {
+		return Interrupt{}, fmt.Errorf("%w: generation key collision with divergent source_interrupt_id", ErrGateReEvaluationContract)
+	}
+	if storedEvent != seam.CreatedFromEventID {
+		return Interrupt{}, fmt.Errorf("%w: generation key collision with divergent created_from_event_id", ErrGateReEvaluationContract)
+	}
+	if storedFacts != string(wantFactsJSON) || storedFactsDigest != wantFactsDigest {
+		return Interrupt{}, fmt.Errorf("%w: generation key collision with divergent facts", ErrGateReEvaluationContract)
+	}
+	return existing, nil
 }
 
 func validateGateReEvalFailure(class string, evidence json.RawMessage) error {
