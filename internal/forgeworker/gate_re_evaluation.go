@@ -25,11 +25,13 @@ type GateReEvaluationResultProducer func(ctx context.Context, payload storage.Ga
 // owns the lease CAS, Run/Interrupt assertions, terminal event, Run CAS and
 // successor.
 //
-// The worker never calls EmitInterrupt or RecordGateEvaluation. A verdict whose
-// successor is not yet wired in this slice is surfaced by storage as
-// ErrGateReEvaluationSuccessorNotWired (HITL verdict successors and
-// rerun_checks); the failed-arm failure_review successor is wired in storage.
-// The worker then terminates unwired operations so they are not permanently pending.
+// The worker never calls EmitInterrupt or RecordGateEvaluation. Every §8.1
+// verdict successor is wired in storage (HITL Interrupt successors, the
+// ready/merge merge_change operation and the retry_checks/flaky_retry
+// rerun_checks operation); the failed-arm failure_review successor is wired
+// too. ErrGateReEvaluationSuccessorNotWired now only fires for a genuinely
+// unknown verdict kind/code, in which case the worker terminates the operation
+// so it is not permanently pending.
 type GateReEvaluationWorker struct {
 	DB       *storage.DB
 	Produce  GateReEvaluationResultProducer

@@ -31,6 +31,10 @@ import (
 //   - succeeded ready/merge: Run -> running(gate_merge_requested) plus the
 //     sole merge_change successor operation enqueued in the same transaction
 //     (Run CAS + terminal gate.reevaluation.ready.merge event).
+//   - succeeded retry_checks/flaky_retry: Run -> running(gate_retry_checks) plus
+//     the sole rerun_checks successor operation and one check_rerun_consumptions
+//     row enqueued in the same transaction (Run CAS + terminal
+//     gate.reevaluation.retry_checks.flaky_retry event).
 //   - failed result union (forge_read_failed | gate_input_assembly_failed |
 //     gate_contract_failed): terminal gate.reevaluation.failed event + Run CAS
 //     (waiting_human, version+1) + failure_review Interrupt successor.
@@ -38,8 +42,10 @@ import (
 //     gate.reevaluation.conflict event.
 //
 // Deferred to a follow-up slice (returned as ErrGateReEvaluationSuccessorNotWired
-// so the worker can terminate the operation rather than leave it pending):
-//   - retry_checks/flaky_retry (rerun_checks successor operation).
+// so the worker can terminate the operation rather than leave it pending): none.
+// The retry_checks/flaky_retry -> rerun_checks successor is wired below; the
+// Forge RerunCheck worker / §8.5 request-start execution path remains a later
+// slice and is out of scope here.
 //
 // This slice wires all seven HITL verdict successors via closed
 // GateReEvaluationInterruptV1 -> EmitInterrupt inside CompleteGateReEvaluation.
@@ -54,9 +60,10 @@ import (
 var ErrGateReEvaluationContract = errors.New("storage: gate re-evaluation contract violation")
 
 // ErrGateReEvaluationSuccessorNotWired signals that the submitted result
-// requires a successor whose emission is not yet wired in this slice. All HITL
-// verdict and failed-arm failure_review successors are wired; this error
-// remains for retry_checks/flaky_retry (rerun_checks operation).
+// requires a successor whose emission is not yet wired in this slice. All
+// §8.1 verdict and failed-arm successors are wired, including the
+// retry_checks/flaky_retry -> rerun_checks successor; this error now only fires
+// for a genuinely unknown verdict kind/code.
 var ErrGateReEvaluationSuccessorNotWired = errors.New("storage: gate re-evaluation successor not wired")
 
 // ErrGateReEvaluationAssertion signals that the frozen lease/Run/Interrupt/
@@ -228,9 +235,11 @@ type gateReEvalSucceededPayload struct {
 }
 
 type gateReEvalVerdictProjection struct {
-	Kind    string `json:"kind"`
-	Code    string `json:"code"`
-	HeadSHA string `json:"head_sha"`
+	Kind       string `json:"kind"`
+	Code       string `json:"code"`
+	HeadSHA    string `json:"head_sha"`
+	CheckRunID string `json:"check_run_id"`
+	RetryNo    int    `json:"retry_no"`
 }
 
 // gateReEvalVerdictFields carries the closed HITL verdict payload fields
@@ -287,13 +296,23 @@ func (d *DB) completeGateReEvalSucceededTx(ctx context.Context, tx *sql.Tx, clai
 		}
 	}
 	// The wired succeeded matrix: no-successor verdicts, all HITL arms, plus
-	// ready/merge whose merge_change successor is enqueued below.
+	// ready/merge whose merge_change successor and retry_checks/flaky_retry whose
+	// rerun_checks successor are enqueued below.
 	switch v.Kind + "/" + v.Code {
-	case "failed/change_not_open", "failed/hard_guardrail", "wait_checks/checks_pending", "ready/no_auto_merge", "ready/merge",
+	case "failed/change_not_open", "failed/hard_guardrail", "wait_checks/checks_pending", "ready/no_auto_merge", "ready/merge", "retry_checks/flaky_retry",
 		"hitl/checks_timeout", "hitl/failure_review", "hitl/guardrail_violation", "hitl/code_review",
 		"hitl/merge_conflict", "hitl/mergeability_unknown", "hitl/input_unknown":
 	default:
 		return fmt.Errorf("%w: succeeded verdict %s/%s successor not wired", ErrGateReEvaluationSuccessorNotWired, v.Kind, v.Code)
+	}
+	// retry_checks/flaky_retry carries the closed check_run_id and 1-based
+	// retry_no that identify the rerun_checks successor operation (storage.md
+	// §8.1). Both must be non-empty / >= 1; the verdict head already matched
+	// the frozen operation head above.
+	if v.Kind == "retry_checks" && v.Code == "flaky_retry" {
+		if v.CheckRunID == "" || v.RetryNo < 1 {
+			return fmt.Errorf("%w: retry_checks verdict missing check_run_id/retry_no", ErrGateReEvaluationContract)
+		}
 	}
 	// Record the evaluation inside this transaction: insert-or-return snapshot
 	// and cache, allocate one evaluation (E), calibration and gate_sample. The
@@ -346,6 +365,15 @@ func (d *DB) completeGateReEvalSucceededTx(ctx context.Context, tx *sql.Tx, clai
 	// dedupes by key, so a replayed transaction cannot double-enqueue.
 	if v.Kind == "ready" && v.Code == "merge" {
 		if err := insertGateReEvalMergeSuccessorTx(ctx, tx, row, recorded, p, eventKey, nowMS); err != nil {
+			return err
+		}
+	}
+	// retry_checks/flaky_retry successor: enqueue the sole rerun_checks operation
+	// and one check_rerun_consumptions row in the same transaction as the terminal
+	// event and Run CAS (storage.md §8.1, §8.2). Mirrors the merge successor write;
+	// the consumption row is at-most-one per (run, head, check, retry_no).
+	if v.Kind == "retry_checks" && v.Code == "flaky_retry" {
+		if err := insertGateReEvalRerunChecksSuccessorTx(ctx, tx, row, p, v, eventKey, nowMS); err != nil {
 			return err
 		}
 	}
@@ -514,7 +542,7 @@ func gateReEvalRunCASTx(ctx context.Context, tx *sql.Tx, op GateReEvaluationPayl
 	case "failed/change_not_open", "failed/hard_guardrail":
 		base += `, status='failed', failure_reason='gate_verdict', completed_at_ms=?`
 		args = append(args, nowMS)
-	case "wait_checks/checks_pending", "ready/merge":
+	case "wait_checks/checks_pending", "ready/merge", "retry_checks/flaky_retry":
 		base += `, status='running'`
 	case "ready/no_auto_merge":
 		base += `, status='done', change_id=COALESCE(?, change_id), change_head_sha=COALESCE(?, change_head_sha), completed_at_ms=?`
@@ -1068,6 +1096,82 @@ func insertGateReEvalMergeSuccessorTx(ctx context.Context, tx *sql.Tx, row gateR
 	return insertOperation(ctx, tx, Operation{
 		Key: key, Kind: OperationMergeChange, Payload: payload, RunID: row.op.RunID,
 	}, row.op.RunID, "", nowMS)
+}
+
+// insertGateReEvalRerunChecksSuccessorTx enqueues the retry_checks/flaky_retry
+// successor rerun_checks operation plus one check_rerun_consumptions row in the
+// same transaction as the terminal event and Run CAS (storage.md §8.1, §8.2).
+// It mirrors the merge successor write. The successor payload carries only the
+// §8.1 closed fields; created_from_event_id is byte-for-byte the terminal event
+// id event:<K>. The operation key is frozen by (run_id, head_sha, check_run_id,
+// retry_no) so a replayed transaction cannot create a second successor
+// (insertOperation dedupes by key); the consumption row PK is the same
+// (run, head, check, retry) quadruple and operation_id is UNIQUE, so it is
+// at-most-one too. The successor is claimable by a future RerunCheck worker via
+// ClaimOutboxOperationKind(..., OperationRerunChecks); the §8.5 request-start
+// execution path is out of scope for this slice.
+func insertGateReEvalRerunChecksSuccessorTx(ctx context.Context, tx *sql.Tx, row gateReEvalAttemptRow, p gateReEvalSucceededPayload, v gateReEvalVerdictProjection, eventKey string, nowMS int64) error {
+	triageDigest, err := gateReEvalTriageSourceDigest(p.GateInputJSON)
+	if err != nil {
+		return err
+	}
+	key := RerunChecksOperationKey(row.op.RunID, row.op.HeadSHA, v.CheckRunID, v.RetryNo)
+	payload, err := canonicalJSON(map[string]any{
+		"run_id":               row.op.RunID,
+		"change_id":            row.op.ChangeID,
+		"head_sha":             row.op.HeadSHA,
+		"check_run_id":         v.CheckRunID,
+		"retry_no":             v.RetryNo,
+		"triage_source_digest": triageDigest,
+		"created_from_event_id": "event:" + eventKey,
+	})
+	if err != nil {
+		return err
+	}
+	if err := insertOperation(ctx, tx, Operation{
+		Key: key, Kind: OperationRerunChecks, Payload: payload, RunID: row.op.RunID,
+	}, row.op.RunID, "", nowMS); err != nil {
+		return err
+	}
+	// The operation id is the durable link to the consumption row. It is read
+	// back by key (the row was just inserted or deduped by insertOperation) so
+	// both the fresh and the contract-stable replay path resolve the same id.
+	var opID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM outbox_operations WHERE operation_key=?`, key).Scan(&opID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO check_rerun_consumptions (run_id, head_sha, check_run_id, retry_no, operation_id, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)`,
+		row.op.RunID, row.op.HeadSHA, v.CheckRunID, v.RetryNo, opID, nowMS)
+	return err
+}
+
+// gateReEvalTriageSourceDigest returns SHA-256(canonical_json(GateInputV1.checks.triage.source))
+// (storage.md §8.1). A retry_checks/flaky_retry successor requires a non-empty
+// frozen triage source; a missing source is a contract violation, never a
+// field reconstructed from current Change or checks state.
+func gateReEvalTriageSourceDigest(gateInputJSON string) (string, error) {
+	var src struct {
+		Checks struct {
+			Triage *struct {
+				Source json.RawMessage `json:"source"`
+			} `json:"triage"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(gateInputJSON), &src); err != nil {
+		return "", fmt.Errorf("%w: gate input decode for triage source: %v", ErrGateReEvaluationContract, err)
+	}
+	if src.Checks.Triage == nil || len(src.Checks.Triage.Source) == 0 || string(src.Checks.Triage.Source) == "null" {
+		return "", fmt.Errorf("%w: retry_checks verdict requires checks.triage.source", ErrGateReEvaluationContract)
+	}
+	var node any
+	if err := json.Unmarshal(src.Checks.Triage.Source, &node); err != nil {
+		return "", fmt.Errorf("%w: triage source is not JSON: %v", ErrGateReEvaluationContract, err)
+	}
+	canon, err := canonicalJSON(node)
+	if err != nil {
+		return "", fmt.Errorf("%w: triage source canonical encode: %v", ErrGateReEvaluationContract, err)
+	}
+	return sha256Hex(canon), nil
 }
 
 // insertOrReturnGateSnapshotTx inserts a gate_input_snapshots row for hash if

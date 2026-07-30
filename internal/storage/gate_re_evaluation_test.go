@@ -495,6 +495,228 @@ func TestCompleteGateReEvaluationSucceededReadyMerge(t *testing.T) {
 	}
 }
 
+// TestCompleteGateReEvaluationSucceededRerunChecks verifies the retry_checks/
+// flaky_retry arm (storage.md §8.1, §8.2): Run -> running(gate_retry_checks),
+// one terminal event, exactly one rerun_checks successor enqueued with the
+// closed payload fields and created_from_event_id byte-for-byte event:<K>, and
+// exactly one check_rerun_consumptions row linking to that operation. A
+// replayed Complete cannot double-enqueue or double-consume, and the successor
+// is claimable by a future RerunCheck worker via ClaimOutboxOperationKind.
+func TestCompleteGateReEvaluationSucceededRerunChecks(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	head := "0123456789012345678901234567890123456789"
+	// A flaky triage source. No logical_call_id is set so no brain input link is
+	// created (the link is orthogonal to the successor/consumption wiring under
+	// test); triage_source_digest is SHA-256 of these canonical bytes regardless.
+	triageSource := map[string]any{
+		"kind": "fallback", "version": "T5/fallback/v1", "reason": "provider_disabled",
+	}
+	inputJSON := mustCanon(t, map[string]any{
+		"schema_version":        1,
+		"effective_policy_hash": strings.Repeat("c", 64),
+		"certification_version": strings.Repeat("d", 64),
+		"change":                map[string]any{"head_sha": head, "mergeability": "mergeable"},
+		"identity":              map[string]any{"change_id": "change-01", "run_id": cmdRun, "project_id": "project", "task_kind": "bug"},
+		"risk":                  map[string]any{"source": map[string]any{"version": "T3/fallback/v1"}},
+		"checks": map[string]any{
+			"conclusion": "failure", "external_url": "https://ci.example/runs/1",
+			"failed_jobs":        []any{},
+			"flaky_retries_used": 0,
+			"triage": map[string]any{
+				"classification": "flaky", "retry_check_id": "cr-1",
+				"source": triageSource,
+			},
+		},
+	})
+	inputHash := SHA256Hex([]byte(inputJSON))
+	checkRunID := "cr-1"
+	retryNo := 1
+	verdictJSON := mustCanon(t, map[string]any{
+		"schema_version": 1, "kind": "retry_checks", "code": "flaky_retry",
+		"head_sha": head, "check_run_id": checkRunID, "retry_no": retryNo,
+	})
+	verdictDigest := SHA256Hex([]byte(verdictJSON))
+	claim, _ := seedClaimedGateReEval(t, db, ctx, InterruptGuardrailViolation, inputJSON, inputHash, "", "")
+
+	var runVersionBefore int64
+	if err := db.db.QueryRow(`SELECT version FROM runs WHERE id=?`, cmdRun).Scan(&runVersionBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	result := canonicalResult(t, "succeeded", map[string]any{
+		"gate_input_json": inputJSON,
+		"gate_input_hash": inputHash,
+		"gate_version":    "gate/v1",
+		"verdict_json":    verdictJSON,
+		"verdict_digest":  verdictDigest,
+	})
+	if err := db.CompleteGateReEvaluation(ctx, claim, result, testNow+20); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// Run -> running, version bumped; no completion timestamp.
+	var runStatus string
+	var runVersion int64
+	var completedAt sql.NullInt64
+	if err := db.db.QueryRow(`SELECT status, version, completed_at_ms FROM runs WHERE id=?`, cmdRun).Scan(&runStatus, &runVersion, &completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "running" || runVersion != runVersionBefore+1 {
+		t.Fatalf("run = %s v%d, want running v%d", runStatus, runVersion, runVersionBefore+1)
+	}
+	if completedAt.Valid {
+		t.Fatalf("run completed_at_ms = %d, want unset", completedAt.Int64)
+	}
+
+	// Terminal event: type gate.reevaluation.retry_checks.flaky_retry at key
+	// O:verdict:retry_checks:flaky_retry.
+	evKey := claim.Key + ":verdict:retry_checks:flaky_retry"
+	var evType, evID string
+	if err := db.db.QueryRow(`SELECT type, id FROM events WHERE idempotency_key=?`, evKey).Scan(&evType, &evID); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if evType != "gate.reevaluation.retry_checks.flaky_retry" || evID != "event:"+evKey {
+		t.Fatalf("event type/id = %s / %s", evType, evID)
+	}
+
+	// Exactly one rerun_checks successor with the closed payload fields and
+	// created_from_event_id == the terminal event id.
+	rerunKey := RerunChecksOperationKey(cmdRun, head, checkRunID, retryNo)
+	var rerunCount int
+	if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='rerun_checks'`).Scan(&rerunCount); err != nil {
+		t.Fatal(err)
+	}
+	if rerunCount != 1 {
+		t.Fatalf("rerun_checks count = %d, want 1", rerunCount)
+	}
+	var rerunPayload, rerunKind, rerunOpID string
+	if err := db.db.QueryRow(`SELECT payload_json, kind, id FROM outbox_operations WHERE operation_key=?`, rerunKey).Scan(&rerunPayload, &rerunKind, &rerunOpID); err != nil {
+		t.Fatalf("successor rerun_checks: %v", err)
+	}
+	if rerunKind != "rerun_checks" {
+		t.Fatalf("successor kind = %s", rerunKind)
+	}
+	var rerun map[string]any
+	if err := json.Unmarshal([]byte(rerunPayload), &rerun); err != nil {
+		t.Fatal(err)
+	}
+	// The §8.1 closed payload is exactly these seven fields.
+	wantFields := map[string]any{
+		"run_id": cmdRun, "change_id": "change-01", "head_sha": head,
+		"check_run_id": checkRunID, "retry_no": float64(retryNo),
+		"created_from_event_id": "event:" + evKey,
+	}
+	for k, want := range wantFields {
+		if rerun[k] != want {
+			t.Fatalf("rerun_checks %s = %v, want %v (payload=%s)", k, rerun[k], want, rerunPayload)
+		}
+	}
+	if got := rerun["triage_source_digest"]; got == nil || got == "" {
+		t.Fatalf("rerun_checks missing triage_source_digest (payload=%s)", rerunPayload)
+	}
+	// triage_source_digest == SHA-256(canonical_json(checks.triage.source)).
+	canonSrc, err := CanonicalJSON(triageSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTriageDigest := SHA256Hex(canonSrc)
+	if rerun["triage_source_digest"] != wantTriageDigest {
+		t.Fatalf("triage_source_digest = %v, want %s", rerun["triage_source_digest"], wantTriageDigest)
+	}
+	if len(rerun) != 7 {
+		t.Fatalf("rerun_checks payload has %d fields, want 7 (payload=%s)", len(rerun), rerunPayload)
+	}
+
+	// Exactly one check_rerun_consumptions row linking to the successor op,
+	// keyed by (run, head, check, retry) and UNIQUE on operation_id.
+	var consCount, consOpID string
+	var consRetryNo int
+	if err := db.db.QueryRow(`SELECT count(*), operation_id, retry_no FROM check_rerun_consumptions WHERE run_id=? AND head_sha=? AND check_run_id=?`, cmdRun, head, checkRunID).Scan(&consCount, &consOpID, &consRetryNo); err != nil {
+		t.Fatalf("consumption row: %v", err)
+	}
+	if consCount != "1" || consOpID != rerunOpID || consRetryNo != retryNo {
+		t.Fatalf("consumption = count=%s op=%s retry=%d, want count=1 op=%s retry=%d", consCount, consOpID, consRetryNo, rerunOpID, retryNo)
+	}
+
+	// at-most-one: a second Complete under the now-cleared lease cannot
+	// double-enqueue the successor or double-consume the retry quota.
+	if err := db.CompleteGateReEvaluation(ctx, claim, result, testNow+30); !errors.Is(err, ErrRejectedStaleWorker) {
+		t.Fatalf("second Complete err = %v, want ErrRejectedStaleWorker", err)
+	}
+	if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='rerun_checks'`).Scan(&rerunCount); err != nil {
+		t.Fatal(err)
+	}
+	if rerunCount != 1 {
+		t.Fatalf("rerun_checks count after replay = %d, want 1", rerunCount)
+	}
+	var consTotal int
+	if err := db.db.QueryRow(`SELECT count(*) FROM check_rerun_consumptions`).Scan(&consTotal); err != nil {
+		t.Fatal(err)
+	}
+	if consTotal != 1 {
+		t.Fatalf("consumption rows after replay = %d, want 1", consTotal)
+	}
+
+	// The successor is claimable by a future RerunCheck worker via the
+	// kind-scoped claim path (storage.md §8.1: rerun_checks can be claimed).
+	c, err := db.ClaimOutboxOperationKind(ctx, "siftd:rerun:worker", OperationRerunChecks, testNow+40, 60_000)
+	if err != nil || c == nil {
+		t.Fatalf("claim rerun_checks: %v claim=%v", err, c)
+	}
+	if c.Key != rerunKey {
+		t.Fatalf("claimed key = %s, want %s", c.Key, rerunKey)
+	}
+}
+
+// TestCompleteGateReEvaluationRerunChecksContractRejections covers the
+// retry_checks/flaky_retry verdict field contract violations.
+func TestCompleteGateReEvaluationRerunChecksContractRejections(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	head := "0123456789012345678901234567890123456789"
+	baseInput := map[string]any{
+		"schema_version":        1,
+		"effective_policy_hash": strings.Repeat("c", 64),
+		"certification_version": strings.Repeat("d", 64),
+		"change":                map[string]any{"head_sha": head},
+		"identity":              map[string]any{"change_id": "change-01", "run_id": cmdRun, "project_id": "project", "task_kind": "bug"},
+		"risk":                  map[string]any{"source": map[string]any{"version": "T3/fallback/v1"}},
+		"checks": map[string]any{
+			"conclusion": "failure", "external_url": "https://ci.example/runs/1",
+			"failed_jobs":        []any{},
+			"flaky_retries_used": 0,
+			"triage": map[string]any{
+				"classification": "flaky", "retry_check_id": "cr-1",
+				"source": map[string]any{"kind": "fallback", "version": "T5/fallback/v1", "reason": "provider_disabled"},
+			},
+		},
+	}
+
+	// Missing check_run_id.
+	inputJSON := mustCanon(t, baseInput)
+	inputHash := SHA256Hex([]byte(inputJSON))
+	claim, _ := seedClaimedGateReEval(t, db, ctx, InterruptGuardrailViolation, inputJSON, inputHash, "", "")
+	vJSON := mustCanon(t, map[string]any{"schema_version": 1, "kind": "retry_checks", "code": "flaky_retry", "head_sha": head, "retry_no": 1})
+	result := canonicalResult(t, "succeeded", map[string]any{
+		"gate_input_json": inputJSON, "gate_input_hash": inputHash, "gate_version": "gate/v1",
+		"verdict_json": vJSON, "verdict_digest": SHA256Hex([]byte(vJSON)),
+	})
+	if err := db.CompleteGateReEvaluation(ctx, claim, result, testNow+20); !errors.Is(err, ErrGateReEvaluationContract) {
+		t.Fatalf("missing check_run_id err = %v, want ErrGateReEvaluationContract", err)
+	}
+
+	// retry_no < 1.
+	vJSON2 := mustCanon(t, map[string]any{"schema_version": 1, "kind": "retry_checks", "code": "flaky_retry", "head_sha": head, "check_run_id": "cr-1", "retry_no": 0})
+	result2 := canonicalResult(t, "succeeded", map[string]any{
+		"gate_input_json": inputJSON, "gate_input_hash": inputHash, "gate_version": "gate/v1",
+		"verdict_json": vJSON2, "verdict_digest": SHA256Hex([]byte(vJSON2)),
+	})
+	if err := db.CompleteGateReEvaluation(ctx, claim, result2, testNow+21); !errors.Is(err, ErrGateReEvaluationContract) {
+		t.Fatalf("retry_no<1 err = %v, want ErrGateReEvaluationContract", err)
+	}
+}
+
 // TestCompleteGateReEvaluationConflict verifies the conflict arm: Run version
 // bump, terminal conflict event and a verified different-head successor op.
 func TestCompleteGateReEvaluationConflict(t *testing.T) {
@@ -584,7 +806,9 @@ func TestCompleteGateReEvaluationContractRejections(t *testing.T) {
 	if err := db.CompleteGateReEvaluation(ctx, claim, unknown, testNow+21); !errors.Is(err, ErrGateReEvaluationContract) {
 		t.Fatalf("unknown kind err = %v", err)
 	}
-	// Unwired verdict successor (retry_checks/flaky_retry — deferred rerun_checks).
+	// retry_checks/flaky_retry is now wired (see TestCompleteGateReEvaluationSucceededRerunChecks);
+	// a gate input lacking checks.triage.source is a closed contract violation, not
+	// a deferred successor.
 	vJSON := mustCanon(t, map[string]any{"schema_version": 1, "kind": "retry_checks", "code": "flaky_retry", "head_sha": head, "check_run_id": "cr-1", "retry_no": 1})
 	result := canonicalResult(t, "succeeded", map[string]any{
 		"gate_input_json": inputJSON,
@@ -593,8 +817,8 @@ func TestCompleteGateReEvaluationContractRejections(t *testing.T) {
 		"verdict_json":    vJSON,
 		"verdict_digest":  SHA256Hex([]byte(vJSON)),
 	})
-	if err := db.CompleteGateReEvaluation(ctx, claim, result, testNow+22); !errors.Is(err, ErrGateReEvaluationSuccessorNotWired) {
-		t.Fatalf("unwired verdict err = %v, want ErrGateReEvaluationSuccessorNotWired", err)
+	if err := db.CompleteGateReEvaluation(ctx, claim, result, testNow+22); !errors.Is(err, ErrGateReEvaluationContract) {
+		t.Fatalf("retry_checks missing triage source err = %v, want ErrGateReEvaluationContract", err)
 	}
 }
 

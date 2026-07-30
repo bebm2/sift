@@ -34,7 +34,7 @@ var migrationFileRE = regexp.MustCompile(`^([0-9]{4})_([a-z0-9_]+)\.sql$`)
 
 // foreignKeyRebuilds lists migrations that rebuild a table. They run with
 // foreign_keys temporarily disabled (PRAGMA is only honored outside a tx).
-var foreignKeyRebuilds = map[int]bool{21: true, 54: true}
+var foreignKeyRebuilds = map[int]bool{21: true, 54: true, 57: true}
 
 // migration is one embedded forward migration file.
 type migration struct {
@@ -178,7 +178,9 @@ func applyOne(ctx context.Context, db *sql.DB, m migration, binaryVersion string
 	// temporarily disabled. This preserves FK definitions on the replacement
 	// table and lets populated databases advance; foreign_key_check runs after.
 	// 0021 rebuilds interrupts; 0054 rebuilds outbox_operations to add the
-	// gate_re_evaluation outbox kind (storage.md §8.1).
+	// gate_re_evaluation outbox kind (storage.md §8.1); 0057 rebuilds it again
+	// to add the rerun_checks kind and creates check_rerun_consumptions
+	// (storage.md §8.1 retry_checks successor + §8.2).
 	foreignKeysDisabled := false
 	if foreignKeyRebuilds[m.version] {
 		if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
