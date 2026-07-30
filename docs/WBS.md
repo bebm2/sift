@@ -510,13 +510,13 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.7 指标、CLI 与时间线
 
-> [指标/CLI/时间线 bootstrap #770 PASS WITH NOTES](reviews/2026-07-30-m5-rereview-metrics-cli-timeline-bootstrap-770-pi-deepseek-v4-pro.md) / #767 / PR #769（merge `0b63a6c`，feat `01fd130`）闭合 wave-2 §5.7 只读派生面：`ops.metrics`/`ops.timeline` + `sift metrics`/`timeline`/`ps`/`logs`；九项 PRD §10.2 指标经 `internal/storage/metrics.go` 从事件流/Ledger/预算表确定性派生，缺数据处 coverage 失败闭合（绝不发明数字）；北极星权重取 Run 冻结 `config_snapshot`，响应间隔不作人类分钟数；`TestV11GateBypassExcludedFromFalseRelease` 证实 `gate_bypassed` 排除误放行率分母并进入门禁绕过率；触发→started 延迟分布可查（真实 P50 < 60s 留 M7）。五项关键验收据此勾选。诚实缺口（非阻断）：误放行率分子在 revert/fix 事件写入前恒为 0；分派准确率为结构性 100%（无人类 Agent 改写事件）。本片不闭合 critical 熔断、Channel `ops.ps`/`ops.doctor` 端点级验收、M5 门禁；不读作 M5 已实现。
+> [指标/CLI/时间线 bootstrap #767 round-2 PASS](reviews/2026-07-30-m5-metrics-cli-timeline-767-rereview-2-pi-deepseek-v4-pro.md) / 并行 [#770 PASS WITH NOTES](reviews/2026-07-30-m5-rereview-metrics-cli-timeline-bootstrap-770-pi-deepseek-v4-pro.md) / #767 / PR #769（merge `0b63a6c`）+ fix PR #774（merge `adbf11f`）闭合 wave-2 §5.7 只读派生面：`ops.metrics`/`ops.timeline` + `sift metrics`/`timeline`/`ps`/`logs`；九项 PRD §10.2 指标经 `internal/storage/metrics.go` 从事件流/Ledger/预算表确定性派生，缺数据处 coverage 失败闭合（绝不发明数字）；北极星权重取 Run 冻结 `config_snapshot`，响应间隔不作人类分钟数；`TestV11GateBypassExcludedFromFalseRelease` 证实 `gate_bypassed` 排除误放行率分母并进入门禁绕过率；触发→started 延迟分布可查（真实 P50 < 60s 留 M7）。#774 关闭 Sol round-1 P0/P1（项目作用域 `weightedAttention` 双 WHERE、零延迟样本、`TestMetricsProjectScoped`）。五项关键验收据此勾选。诚实缺口（非阻断）：误放行率分子在 revert/fix 事件写入前恒为 0；分派准确率为结构性 100%；P2=`RunTimeline.HasMore` 无作用域 COUNT、`llmCost` 忽略 `ProjectID`。本片不闭合 critical 熔断、Channel `ops.ps`/`ops.doctor` 端点级验收、M5 门禁；不读作 M5 已实现。
 
-- [x] 从事件流/Ledger 确定性派生 PRD §10.2 全部指标（当前九项）：加权打扰/已合并 Change、误放行率、门禁绕过率、Gate 漏放/误拦、HITL 率、配额消耗、分派准确率、LLM 成本（[#770](reviews/2026-07-30-m5-rereview-metrics-cli-timeline-bootstrap-770-pi-deepseek-v4-pro.md) / #767：`Metrics()` 九项 + `TestOpsMetricsCoversNineSeries` / `TestMetricsEmptyIsHonest`；误放行分子失败闭合为 0）
-- [x] reason 耗时权重为配置项；响应间隔只作调度特征，不作人类分钟数（#770/#767：`reasonWeight()`→`config_snapshots`；`TestMetricsWeightedAttentionUsesFrozenWeights`；coverage 声明响应间隔不计入）
-- [x] `gate_bypassed` 排除误放行率分母的查询测试（#770/#767：`TestV11GateBypassExcludedFromFalseRelease`；分母仅 `merge_change` succeeded outbox）
-- [x] `sift ps` 显示 Run/attempt、今日注意力余量、隔离与推送故障；`logs` 提供 Run 原始日志；事件时间线可查（#770/#767：`RunPS`/`handleOpsLogs`/`RunTimeline` + online CLI 测试；Channel 故障为投影层，端点级跨重启验收仍开）
-- [x] 输出「触发标签 → started」延迟分布；真实 P50 < 60s 在 M7 验收（#770/#767：`TriggerStartedLatency` + `TestTriggerStartedLatencyDistribution`；coverage 显式留 M7）
+- [x] 从事件流/Ledger 确定性派生 PRD §10.2 全部指标（当前九项）：加权打扰/已合并 Change、误放行率、门禁绕过率、Gate 漏放/误拦、HITL 率、配额消耗、分派准确率、LLM 成本（[#767 r2](reviews/2026-07-30-m5-metrics-cli-timeline-767-rereview-2-pi-deepseek-v4-pro.md) / [#770](reviews/2026-07-30-m5-rereview-metrics-cli-timeline-bootstrap-770-pi-deepseek-v4-pro.md)：`Metrics()` 九项 + `TestOpsMetricsCoversNineSeries` / `TestMetricsEmptyIsHonest` / `TestMetricsProjectScoped`；误放行分子失败闭合为 0）
+- [x] reason 耗时权重为配置项；响应间隔只作调度特征，不作人类分钟数（#767/#770：`reasonWeight()`→`config_snapshots`；`TestMetricsWeightedAttentionUsesFrozenWeights`；coverage 声明响应间隔不计入）
+- [x] `gate_bypassed` 排除误放行率分母的查询测试（#767/#770：`TestV11GateBypassExcludedFromFalseRelease`；分母仅 `merge_change` succeeded outbox）
+- [x] `sift ps` 显示 Run/attempt、今日注意力余量、隔离与推送故障；`logs` 提供 Run 原始日志；事件时间线可查（#767/#770：`RunPS`/`handleOpsLogs`/`RunTimeline` + online CLI 测试；Channel 故障为投影层，端点级跨重启验收仍开）
+- [x] 输出「触发标签 → started」延迟分布；真实 P50 < 60s 在 M7 验收（#767/#770：`TriggerStartedLatency` + `TestTriggerStartedLatencyDistribution` / `TestTriggerStartedLatencyZeroAllowed`；coverage 显式留 M7）
 
 ### 先写/增补 spec
 
