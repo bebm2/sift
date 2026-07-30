@@ -1,0 +1,226 @@
+package storage
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/miaoxiaoyong/sift/internal/command"
+)
+
+// startup_stall two-phase result port (specs/command.md §5, ADR-013). The retry
+// request is written by ApplyCommandEvent; this port owns the final probe
+// result. Probe success is the ADR-013 single CAS: absence evidence, end old
+// attempt (retry_after_absence), isolation release, close/responded,
+// waiting_human -> queued, final outcome + ack — all-or-nothing. Probe failure
+// reuses the same Interrupt, increments version, rotates nonce and emits one
+// absence_unconfirmed ack; isolation is retained.
+
+// RetryProbeResultCmd is the input to ApplyRetryProbeResult.
+type RetryProbeResultCmd struct {
+	InterruptID        string
+	ProbeID            string
+	Succeeded          bool
+	ExpectedRunVersion int64
+	// AbsenceEvidenceJSON is the proven-absence evidence (required on success).
+	AbsenceEvidenceJSON json.RawMessage
+	NowMS               int64
+}
+
+// ApplyRetryProbeResult is the sole finalizer of a startup_stall retry probe.
+// On success it runs the ADR-013 transaction; on failure it rotates the nonce
+// and emits the absence_unconfirmed ack. It is the only writer of the
+// probe-succeeded / probe-failed final stage keys.
+func (d *DB) ApplyRetryProbeResult(ctx context.Context, cmd RetryProbeResultCmd) (ApplyCommandEventResult, error) {
+	if cmd.InterruptID == "" || cmd.ProbeID == "" || cmd.NowMS <= 0 {
+		return ApplyCommandEventResult{}, errors.New("storage: probe result requires interrupt, probe and timestamp")
+	}
+	if cmd.Succeeded && (len(cmd.AbsenceEvidenceJSON) == 0 || !json.Valid(cmd.AbsenceEvidenceJSON)) {
+		return ApplyCommandEventResult{}, errors.New("storage: probe success requires absence evidence")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	defer tx.Rollback()
+	res, err := d.applyRetryProbeResultTx(ctx, tx, cmd)
+	if err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	if res.AckOperationKey != "" {
+		d.wakeOutbox()
+	}
+	return res, nil
+}
+
+func (d *DB) applyRetryProbeResultTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeResultCmd) (ApplyCommandEventResult, error) {
+	var runID, reason, status, nonce string
+	var version, runVersion int64
+	var attemptNo int
+	err := tx.QueryRowContext(ctx, `SELECT i.run_id,i.reason,i.status,i.nonce,i.version,r.version,i.attempt_no FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, cmd.InterruptID).
+		Scan(&runID, &reason, &status, &nonce, &version, &runVersion, &attemptNo)
+	if err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	if reason != string(InterruptStartupStall) || status != "open" {
+		return ApplyCommandEventResult{}, ErrRejectedStale
+	}
+	if cmd.ExpectedRunVersion != 0 && runVersion != cmd.ExpectedRunVersion {
+		return ApplyCommandEventResult{}, ErrRejectedStale
+	}
+	// Resolve the initial retry event / event_key for the final stage key.
+	var eventKey, initialEventID string
+	if err := tx.QueryRowContext(ctx, `SELECT o.event_key,o.initial_event_id FROM command_event_outcomes o JOIN attempt_probes p ON p.interrupt_id=? WHERE p.id=? AND o.initial_event_id=p.requested_by_event_id`, cmd.InterruptID, cmd.ProbeID).Scan(&eventKey, &initialEventID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ApplyCommandEventResult{}, ErrRejectedStale
+		}
+		return ApplyCommandEventResult{}, err
+	}
+
+	if cmd.Succeeded {
+		return d.probeSucceededTx(ctx, tx, cmd, runID, runVersion, nonce, version, attemptNo, eventKey, initialEventID)
+	}
+	return d.probeFailedTx(ctx, tx, cmd, nonce, version, eventKey, initialEventID)
+}
+
+// probeSucceededTx runs the ADR-013 single CAS (specs/command.md §5). Evidence,
+// retry_after_absence, isolation release, close/responded, waiting_human ->
+// queued, final outcome + ack are all-or-nothing. The next attempt/claim/
+// launch is driven by the queued Run through the existing launch path.
+func (d *DB) probeSucceededTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeResultCmd, runID string, runVersion int64, nonce string, version int64, attemptNo int, eventKey, initialEventID string) (ApplyCommandEventResult, error) {
+	// 1. Probe -> succeeded (one-time CAS) with the absence evidence.
+	res, err := tx.ExecContext(ctx, `UPDATE attempt_probes SET state='succeeded',absence_evidence_json=?,absence_evidence_digest=?,finished_at_ms=? WHERE id=? AND state IN ('pending','running')`, string(cmd.AbsenceEvidenceJSON), digestJSON(cmd.AbsenceEvidenceJSON), cmd.NowMS, cmd.ProbeID)
+	if err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ApplyCommandEventResult{}, ErrRejectedStale
+	}
+	// 2. End old attempt with retry_after_absence (isolation still frozen here;
+	// released below once the release event exists).
+	if _, err := tx.ExecContext(ctx, `UPDATE attempts SET attempt_resolution='retry_after_absence',resolution_at_ms=?,updated_at_ms=? WHERE run_id=? AND attempt_no=? AND attempt_resolution IS NULL`, cmd.NowMS, cmd.NowMS, runID, attemptNo); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	// 3. Close Interrupt responded.
+	if err := closeInterruptTx(ctx, tx, cmd.InterruptID, version, nonce, "responded", cmd.NowMS); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	// 4. waiting_human -> queued.
+	if err := d.transition(ctx, tx, runID, runVersion, DomainCommand{To: RunQueued, Source: SourceOperator, Actor: "startup_stall_probe", OccurredAtMS: cmd.NowMS}); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	// 5. Final event (probe-succeeded) + outcome CAS. Its id is the isolation
+	// release evidence event.
+	finalID, err := finalizeRetryOutcomeTx(ctx, tx, eventKey, initialEventID, command.OutcomeApplied, runID, cmd.InterruptID, "", cmd.NowMS, command.StageFinalProbeSucceeded)
+	if err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	// 6. Release isolation, referencing the final event as proof.
+	if _, err := tx.ExecContext(ctx, `UPDATE attempts SET isolation_state='none',isolation_released_at_ms=?,isolation_release_event_id=?,updated_at_ms=? WHERE run_id=? AND attempt_no=? AND isolation_state='frozen'`, cmd.NowMS, finalID, cmd.NowMS, runID, attemptNo); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	// 7. Ack operation.
+	ackKey := command.AckOperationKey(eventKey)
+	if err := writeProbeAckOpTx(ctx, tx, eventKey, command.OutcomeApplied, finalID, cmd.InterruptID, runID, ackKey, cmd.NowMS); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	return ApplyCommandEventResult{Outcome: command.OutcomeApplied, FinalEventID: finalID, AckOperationKey: ackKey, InterruptID: cmd.InterruptID, RunID: runID}, nil
+}
+
+// probeFailedTx marks the probe failed, retains Interrupt/isolation, increments
+// version, rotates nonce and emits the absence_unconfirmed ack (specs/command.md
+// §5). At the escalation cap the caller holds via the expiry path; here we only
+// rotate and ack so a later candidate may retry again.
+func (d *DB) probeFailedTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeResultCmd, nonce string, version int64, eventKey, initialEventID string) (ApplyCommandEventResult, error) {
+	res, err := tx.ExecContext(ctx, `UPDATE attempt_probes SET state='failed',finished_at_ms=? WHERE id=? AND state IN ('pending','running')`, cmd.NowMS, cmd.ProbeID)
+	if err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ApplyCommandEventResult{}, ErrRejectedStale
+	}
+	nextNonce := newToken()
+	if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET nonce=?,version=version+1,dispatch_state='held',held_reason=NULL,nonce_issued_at_ms=?,updated_at_ms=? WHERE id=? AND status='open' AND version=? AND nonce=?`, nextNonce, cmd.NowMS, cmd.NowMS, cmd.InterruptID, version, nonce); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	finalID, err := finalizeRetryOutcomeTx(ctx, tx, eventKey, initialEventID, command.OutcomeAbsenceUnconfirmed, "", cmd.InterruptID, nextNonce, cmd.NowMS, command.StageFinalProbeFailed)
+	if err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	ackKey := command.AckOperationKey(eventKey)
+	if err := writeProbeAckOpTx(ctx, tx, eventKey, command.OutcomeAbsenceUnconfirmed, finalID, cmd.InterruptID, "", ackKey, cmd.NowMS); err != nil {
+		return ApplyCommandEventResult{}, err
+	}
+	return ApplyCommandEventResult{Outcome: command.OutcomeAbsenceUnconfirmed, FinalEventID: finalID, AckOperationKey: ackKey, NextNonce: nextNonce, InterruptID: cmd.InterruptID}, nil
+}
+
+// finalizeRetryOutcomeTx is the sole finalizer of a retry outcome. It inserts
+// the final event (referencing the initial by final_for_event_id) and CAS-
+// completes the outcome relation from pending to final. The final event's
+// source identity is taken from the initial event payload, which is itself a
+// CommandEventV1.
+func finalizeRetryOutcomeTx(ctx context.Context, tx *sql.Tx, eventKey, initialEventID string, outcome command.CommandOutcome, runID, interruptID, nextNonce string, nowMS int64, stage string) (string, error) {
+	var initialBytes []byte
+	if err := tx.QueryRowContext(ctx, `SELECT payload_json FROM events WHERE id=?`, initialEventID).Scan(&initialBytes); err != nil {
+		return "", err
+	}
+	var initial command.CommandEventV1
+	if err := json.Unmarshal(initialBytes, &initial); err != nil {
+		return "", fmt.Errorf("storage: corrupt initial command event: %w", err)
+	}
+	finalEvent := command.NewEvent(command.CommandEventEnvelopeV1{
+		SchemaVersion: 1, EventKey: initial.EventKey, ProjectID: "", Source: initial.Source, RemoteEventID: initial.RemoteEventID,
+	}, outcome, command.ActionRetry, runID, interruptID, nextNonce, initialEventID)
+	// Preserve the project id (the initial event stored it; the final carries it).
+	var projectID string
+	_ = tx.QueryRowContext(ctx, `SELECT project_id FROM events WHERE id=?`, initialEventID).Scan(&projectID)
+	body, err := finalEvent.CanonicalBytes()
+	if err != nil {
+		return "", err
+	}
+	finalID := newID()
+	idem := command.EventStageKey(eventKey, stage)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO events (id,run_id,project_id,type,source,payload_schema_version,payload_json,idempotency_key,occurred_at_ms,recorded_at_ms) VALUES (?,?,?,'command.event','forge',1,?,?,?,?)`,
+		finalID, nullable(runID), nullable(projectID), string(body), idem, nowMS, nowMS); err != nil {
+		return "", err
+	}
+	// Single finalizer CAS: pending -> final with this event id.
+	res, err := tx.ExecContext(ctx, `UPDATE command_event_outcomes SET final_event_id=?,state='final',finalized_at_ms=? WHERE event_key=? AND state='pending' AND final_event_id IS NULL AND finalized_at_ms IS NULL`, finalID, nowMS, eventKey)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return "", fmt.Errorf("storage: retry outcome already finalized")
+	}
+	return finalID, nil
+}
+
+func actionPtr(a command.CommandAction) *command.CommandAction { return &a }
+
+func writeProbeAckOpTx(ctx context.Context, tx *sql.Tx, eventKey string, outcome command.CommandOutcome, finalEventID, interruptID, runID, ackKey string, nowMS int64) error {
+	ack := command.CommandAckV1{
+		SchemaVersion:  1,
+		CommandEventID: finalEventID,
+		Action:         actionPtr(command.ActionRetry),
+		Disposition:    outcome,
+	}
+	if runID != "" {
+		r := runID
+		ack.RunID = &r
+	}
+	if interruptID != "" {
+		i := interruptID
+		ack.InterruptID = &i
+	}
+	body, err := ack.CanonicalBytes()
+	if err != nil {
+		return err
+	}
+	op := Operation{Key: ackKey, Kind: OperationCommandAck, Payload: body, InterruptID: interruptID, RunID: runID}
+	return insertOperation(ctx, tx, op, runID, interruptID, nowMS)
+}
