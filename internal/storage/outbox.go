@@ -18,6 +18,7 @@ const (
 	OperationForgeLabels      OperationKind = "forge_labels"
 	OperationCreateChange     OperationKind = "create_change"
 	OperationMergeChange      OperationKind = "merge_change"
+	OperationRerunChecks      OperationKind = "rerun_checks"
 	OperationChannelPublish   OperationKind = "channel_publish"
 	OperationLaunchAgent      OperationKind = "launch_agent"
 	OperationCommandAck       OperationKind = "command_ack"
@@ -91,6 +92,15 @@ func CreateChangeOperationKey(runID, headSHA string) string {
 }
 func MergeChangeOperationKey(runID, headSHA string) string {
 	return "run:" + runID + ":merge:" + headSHA
+}
+
+// RerunChecksOperationKey is the frozen identity key for the Gate retry_checks/
+// flaky_retry successor (storage.md §8.1, outbox.md §8). It is keyed by the
+// frozen run, head, check and 1-based retry number, so a replayed or concurrent
+// Gate evaluation cannot create a second rerun_checks operation for the same
+// flaky retry (insertOperation dedupes by key).
+func RerunChecksOperationKey(runID, headSHA, checkRunID string, retryNo int) string {
+	return fmt.Sprintf("run:%s:checks-rerun:%s:%s:%d", runID, headSHA, checkRunID, retryNo)
 }
 func LaunchOperationKey(runID string, attemptNo, generation int) string {
 	return fmt.Sprintf("run:%s:attempt:%d:generation:%d:launch", runID, attemptNo, generation)
@@ -459,7 +469,7 @@ func CanonicalJSON(v any) ([]byte, error) { return canonicalJSON(v) }
 func SHA256Hex(b []byte) string { return sha256Hex(b) }
 func validOperationKind(k OperationKind) bool {
 	switch k {
-	case OperationForgeComment, OperationForgeLabels, OperationCreateChange, OperationMergeChange, OperationChannelPublish, OperationLaunchAgent, OperationCommandAck, OperationGateReEvaluation, OperationForgeAlert:
+	case OperationForgeComment, OperationForgeLabels, OperationCreateChange, OperationMergeChange, OperationRerunChecks, OperationChannelPublish, OperationLaunchAgent, OperationCommandAck, OperationGateReEvaluation, OperationForgeAlert:
 		return true
 	}
 	return false
