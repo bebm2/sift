@@ -467,9 +467,9 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.3 超时与升级
 
-> [#711 PASS WITH NOTES](reviews/2026-07-30-m5-advance-interrupt-711-rereview-pi-deepseek-v4-pro.md) 在 storage 端口闭合了升级行为矩阵：severity 封顶（升级复用冻结 downgrade、从不达 critical）、reason 确定性映射（`startup_stall` 强制 hold 且不可 `auto_reject`）、两类上限结局状态机测试与每次升级轮换 nonce。但这是 `AdvanceInterrupt`/`AdvanceExpiry` 端口测试，Supervisor tick（首项）与 critical 熔断（末项）未接线，下列各项保持未勾。
+> [#711 PASS WITH NOTES](reviews/2026-07-30-m5-advance-interrupt-711-rereview-pi-deepseek-v4-pro.md) 在 storage 端口闭合了升级行为矩阵：severity 封顶（升级复用冻结 downgrade、从不达 critical）、reason 确定性映射（`startup_stall` 强制 hold 且不可 `auto_reject`）、两类上限结局状态机测试与每次升级轮换 nonce。[#727 PASS](reviews/2026-07-30-m5-advance-interrupt-727-rereview-pi-deepseek-v4-pro.md) 闭合 I4 `SupervisorInterruptTick` 生产 seam（siftd 唯一接线、expiry/dispatch 双谓词、stale CAS 双层吞错、escalate→redeliver 双 tick 四测试 3/3 无 flake），升级行为经生产 seam 再验证，据此勾选首项。但中段各项仍按 §5.2 收费项保守约定保持未勾（待全生命周期 Command/Channel redelivery 证据），critical 熔断（末项）尚未接线。
 
-- [ ] Supervisor tick 扫描 `expires_at/on_expire`
+- [x] Supervisor tick 扫描 `expires_at/on_expire`（[#727 PASS](reviews/2026-07-30-m5-advance-interrupt-727-rereview-pi-deepseek-v4-pro.md)：`SupervisorInterruptTick` 生产 seam + expiry/escalate 四测试 3/3 无 flake）
 - [ ] 达 `max_escalations` 后 severity 封顶，并按 reason 的确定性映射进入 `auto_reject` 或 `hold`
 - [ ] `startup_stall` 禁止配置 `auto_reject`，达上限强制 `hold`，且不写 resolution
 - [ ] 两类上限结局分别做状态机测试；每次升级轮换 nonce
