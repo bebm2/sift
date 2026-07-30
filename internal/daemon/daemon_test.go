@@ -173,6 +173,24 @@ func TestAssembleWiresIntakeT1ReconcilerCommentsAndBudget(t *testing.T) {
 			t.Fatalf("adapter call without charge key: %v", err)
 		}
 	}
+
+	// command_ack shares the per-project adapter map assembled for forge_alert.
+	// It is a single worker whose routing is resolved per-operation from the
+	// append-only receipt, so it must cover every enabled project's adapter.
+	if workers.CommandAcks == nil || workers.Alerts == nil {
+		t.Fatalf("command_ack/alert worker not wired: ack=%v alert=%v", workers.CommandAcks, workers.Alerts)
+	}
+	if len(workers.CommandAcks.Clients) != 2 {
+		t.Fatalf("command_ack client map size=%d, want 2", len(workers.CommandAcks.Clients))
+	}
+	for i, p := range workers.Pollers {
+		pollerClient := p.Forge.(*forge.Adapter)
+		ref := p.Projects[0].Ref
+		ackClient := workers.CommandAcks.Clients[string(ref.Kind)+"|"+ref.Host+"|"+ref.ProjectKey]
+		if ackClient == nil || ackClient.(*forge.Adapter) != pollerClient {
+			t.Fatalf("command_ack worker %d not scoped to its poller's adapter", i)
+		}
+	}
 }
 
 func TestAssembleProbesAndRecordsAutoMergeCapabilityOnEveryStartup(t *testing.T) {

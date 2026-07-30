@@ -82,6 +82,7 @@ type CompleteOutcome struct {
 
 var ErrOperationConflict = errors.New("storage: operation key payload conflict")
 var ErrRejectedStaleWorker = errors.New("storage: rejected stale outbox worker")
+var ErrMissingCommandAckRoute = errors.New("storage: command ack route not found")
 
 // Stable operation-key constructors are the sole key vocabulary from
 // specs/outbox.md §2. They use only frozen identities, never wall-clock data.
@@ -114,6 +115,40 @@ func AlertOperationKey(kind, subjectID string, generation int) string {
 // is never reconstructed from the current Change or Run state.
 func GateReEvaluationOperationKey(sourceInterruptID, headSHA string) string {
 	return fmt.Sprintf("gate:%s:%s:reeval:1", sourceInterruptID, headSHA)
+}
+
+// CommandAckRoute is the frozen Forge routing a command_ack worker needs to
+// publish an acknowledgement. It is resolved from the append-only command
+// receipt and the project row, never reconstructed from the current Run,
+// Change or Interrupt state (command.md §6.1: the ack target is the immutable
+// envelope target).
+type CommandAckRoute struct {
+	ProjectID       string
+	ForgeKind       string
+	ForgeHost       string
+	ForgeProjectKey string
+	TargetKind      string
+	TargetID        string
+}
+
+// ResolveCommandAckRouting returns the Forge target and project forge ref for a
+// command ack from its append-only receipt. eventKey is the canonical command
+// event key (command.md §1) carried by the ack operation key. A missing
+// receipt fails closed as a contract violation: the worker must never post to
+// a target it cannot prove from durable evidence.
+func (d *DB) ResolveCommandAckRouting(ctx context.Context, eventKey string) (CommandAckRoute, error) {
+	if eventKey == "" {
+		return CommandAckRoute{}, errors.New("storage: event key is required")
+	}
+	var r CommandAckRoute
+	err := d.db.QueryRowContext(ctx, `SELECT r.project_id, p.forge_kind, p.forge_host, p.forge_project_key, r.target_kind, r.target_id
+		FROM command_receipts r JOIN projects p ON p.id = r.project_id
+		WHERE r.event_key = ? LIMIT 1`, eventKey).
+		Scan(&r.ProjectID, &r.ForgeKind, &r.ForgeHost, &r.ForgeProjectKey, &r.TargetKind, &r.TargetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CommandAckRoute{}, ErrMissingCommandAckRoute
+	}
+	return r, err
 }
 
 // EnqueueOperation is for operations without a Run state transition. Stateful
