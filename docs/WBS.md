@@ -493,12 +493,12 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.5 Report
 
-> Report bootstrap #745：`sift report` 只经 `run.sock`、只读 `SIFT_RUN_DIR/control.json`、以 closed retry_policy 重试 `not_ready`；`RecordReport` 拆出 `checkReportBinding`/`assertReportBindingTx`/`lookupReportDuplicateTx`，spawning 返回携带从 Run snapshot 导出 `RetryPolicy` 的 `ReportNotReadyError`（不消费 token），跨 Run token→`unauthorized`、错 generation→`stale`、其余非 running phase→永久 `conflict`；补齐两层去重（idempotency key + `dedupe_window` 语义窗口）、`max_payload_bytes` 与全 Cc 控制码点拒绝。存储错误以 typed sentinel 经控制面 `reportFailure` 映射为 closed code。复核 PASS / PASS WITH NOTES 后再勾选下列项；本片不闭合 Report 配额异常发射的崩溃重放端到端段（storage 既有覆盖），也不闭合 critical 熬断与 Channel `ops.ps`/`ops.doctor`。
+> [Report bootstrap #755 PASS](reviews/2026-07-30-m5-report-runsock-rereview-755-pi-deepseek-v4-pro.md) / #745 / PR #754（merge `9da6499`）闭合 wave-2 Report 写入端口：`sift report` 只 dial `run.sock`、只读 `SIFT_RUN_DIR/control.json`（owner/mode/symlink 防护）；running 接受；spawning 返回携带 closed `RetryPolicy` 的有界 `not_ready`（不消费 token）；跨 Run token→`unauthorized`、错 generation→`stale`、finished/其余非 running→永久 `conflict`；`progress`/`goal`/`blocker`/`completed` 只写事件（+ receipts；blocker 复用 `EmitInterrupt`），不直接改 `runs.status`；两层去重 + 令牌桶 + 每 Run Interrupt 子配额，触顶 at-most-once。四项关键验收据此勾选。非阻断 [P2]：`agent_log_ref` 链接合法性诊断未接线（系统生成 worktree 路径常规不可触发）。本片不闭合 critical 熔断、Channel `ops.ps`/`ops.doctor`、预算 §5.6、指标 §5.7；不读作 M5 已实现。
 
-- [ ] `sift report` 只连 `run.sock`，从 `SIFT_RUN_DIR/control.json` 读 run token
-- [ ] running 接受；spawning 返回有界可重试 `not_ready`；跨 Run/过期 attempt 永久拒绝
-- [ ] 进度/goal/blocker/完成声明只写事件，不直接转状态
-- [ ] 确定性去重、令牌桶与每 Run Interrupt 子配额；触顶只生成一次异常处置
+- [x] `sift report` 只连 `run.sock`，从 `SIFT_RUN_DIR/control.json` 读 run token（[#755](reviews/2026-07-30-m5-report-runsock-rereview-755-pi-deepseek-v4-pro.md) / #745：`runReport`→`ReadControlFile`；`RunReportRequest` 只 dial `run.sock`；operator token 在 run.sock 被拒）
+- [x] running 接受；spawning 返回有界可重试 `not_ready`；跨 Run/过期 attempt 永久拒绝（#755/#745：`checkReportBinding`/`assertReportBindingTx`；CLI `BackoffDelays` + policy drift fail-closed；unauthorized/stale/conflict 映射）
+- [x] 进度/goal/blocker/完成声明只写事件，不直接转状态（#755/#745：`recordSimpleReport`/`recordBlockerReport` 无 `runs.status` 写入；`completed` 后 status 仍为 running）
+- [x] 确定性去重、令牌桶与每 Run Interrupt 子配额；触顶只生成一次异常处置（#755/#745：key/digest + `dedupe_window`；CAS 令牌桶；`report_quota_exhaustions` UNIQUE 日桶；crash-replay/concurrency 测试）
 
 #### 5.6 三类预算集成
 
