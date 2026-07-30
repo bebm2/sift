@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -359,5 +360,240 @@ func TestChannelRendererIncludesCanonicalCommands(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "log: /log") || !strings.Contains(rendered, commands[0]) {
 		t.Fatalf("incomplete renderer: %q", rendered)
+	}
+}
+
+// TestSupervisorInterruptTickExpiryHoldRoutesHold proves the I4 supervisor
+// tick scans the expiry predicate and only calls AdvanceInterrupt on the
+// resulting rows. An on_expire=hold Interrupt flips to held/expiry in the
+// tick, with version bumped but nonce preserved and no second charge.
+func TestSupervisorInterruptTickExpiryHoldRoutesHold(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	cmd := t6Command(testNow)
+	cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = 10, ExpireHold, ExpireHold, 1
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{Delivery: "immediate", ChannelID: "ops"}, nil
+	}
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initialNonce string
+	if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&initialNonce); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SupervisorInterruptTick(ctx, testNow+10); err != nil {
+		t.Fatal(err)
+	}
+	assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+		status: "open", dispatchState: "held", delivery: "held", severity: "normal",
+		held: "expiry", closeReason: "",
+		version: 2, escalation: 0, expiresAt: testNow + 10, nextDispatch: sql.NullInt64{},
+		admissions: 1, charges: 1, channelOps: 1, members: 0, authority: 0,
+	}, initialNonce, false)
+	var event string
+	if err := db.db.QueryRow(`SELECT type FROM events WHERE payload_json LIKE ? ORDER BY occurred_at_ms DESC LIMIT 1`, `%"interrupt_id":"`+in.ID+`"%`).Scan(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event != "interrupt.expired" {
+		t.Fatalf("advance event = %q, want interrupt.expired", event)
+	}
+}
+
+// TestSupervisorInterruptTickExpiryAutoRejectClosesRunAndInterrupt covers the
+// expiry → auto_reject path through the I4 tick. The Interrupt must close
+// with the right close reason while the Run transitions to failed.
+func TestSupervisorInterruptTickExpiryAutoRejectClosesRunAndInterrupt(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	cmd := t6Command(testNow)
+	cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = 10, ExpireAutoReject, ExpireAutoReject, 1
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{Delivery: "immediate", ChannelID: "ops"}, nil
+	}
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initialNonce string
+	if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&initialNonce); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SupervisorInterruptTick(ctx, testNow+10); err != nil {
+		t.Fatal(err)
+	}
+	assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+		status: "closed", dispatchState: "batched", delivery: "immediate", severity: "normal",
+		held: "", closeReason: "expired_auto_reject",
+		version: 2, escalation: 0, expiresAt: testNow + 10, nextDispatch: sql.NullInt64{},
+		admissions: 1, charges: 1, channelOps: 1, members: 0, authority: 0,
+	}, initialNonce, false)
+	var status, failureReason string
+	if err := db.db.QueryRow(`SELECT status, COALESCE(failure_reason,'') FROM runs WHERE id=?`, "run").Scan(&status, &failureReason); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(RunFailed) || failureReason != "hitl_expired" {
+		t.Fatalf("run = %s/%s, want failed/hitl_expired", status, failureReason)
+	}
+}
+
+// TestSupervisorInterruptTickEscalatesThenRedelivers exercises the full
+// expires → next_dispatch cycle through two supervisor ticks. The first tick
+// sees expires_at_ms<=now, escalates the Interrupt (version+1, new nonce),
+// and re-freezes next_dispatch_at_ms to the next frozen summary. The second
+// tick sees next_dispatch_at_ms<=now and seals the Interrupt into the daily
+// batch with the bumped authority. Only AdvanceInterrupt runs between the two
+// ticks; no second advance path is used.
+func TestSupervisorInterruptTickEscalatesThenRedelivers(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	const expiry = int64(48 * 60 * 60 * 1000)
+	initialBatchAt := int64(testNow + 60 * 60 * 1000) // one hour after emit, well before expiry.
+	cmd := t6Command(testNow)
+	cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = expiry, ExpireEscalate, ExpireHold, 1
+	cmd.BatchAtMS = &initialBatchAt
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{Delivery: "batch", ChannelID: "ops", SuggestedDowngrade: true}, nil
+	}
+	in, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initialNonce string
+	if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&initialNonce); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SupervisorInterruptTick(ctx, testNow+expiry); err != nil {
+		t.Fatal(err)
+	}
+	var newNonce string
+	var newDispatch sql.NullInt64
+	var version int64
+	if err := db.db.QueryRow(`SELECT nonce,version,next_dispatch_at_ms FROM interrupts WHERE id=?`, in.ID).Scan(&newNonce, &version, &newDispatch); err != nil {
+		t.Fatal(err)
+	}
+	if newNonce == initialNonce || version != 2 || !newDispatch.Valid || newDispatch.Int64 <= testNow+expiry {
+		t.Fatalf("post-escalation = nonce=%s version=%d due=%v", newNonce, version, newDispatch)
+	}
+	if err := db.SupervisorInterruptTick(ctx, newDispatch.Int64); err != nil {
+		t.Fatal(err)
+	}
+	assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+		status: "open", dispatchState: "batched", delivery: "batch", severity: "normal",
+		held: "", closeReason: "",
+		version: 3, escalation: 1, expiresAt: testNow + 2*expiry, nextDispatch: sql.NullInt64{},
+		admissions: 1, charges: 1, channelOps: 0, members: 1, authority: 1,
+	}, newNonce, false)
+	var batchID string
+	var memberNonce string
+	var memberVersion int64
+	if err := db.db.QueryRow(`SELECT batch_id,nonce,interrupt_version FROM attention_batch_members WHERE interrupt_id=?`, in.ID).Scan(&batchID, &memberNonce, &memberVersion); err != nil {
+		t.Fatal(err)
+	}
+	if memberVersion != 3 || memberNonce != newNonce {
+		t.Fatalf("batch member = %s/%d/%s, want escalated authority", batchID, memberVersion, memberNonce)
+	}
+}
+
+// TestSupervisorInterruptTickProcessesExpiryAndDispatchInOneCall proves the
+// I4 tick scans both predicates in a single sweep and routes each candidate
+// through AdvanceInterrupt with the right kind. One Interrupt reaches its
+// expiry (AdvanceExpiry → hold), another reaches its frozen next_dispatch
+// (AdvanceDispatch → batched). Only AdvanceInterrupt runs in the tick; no
+// extra charges, members, or operations are created beyond the per-path
+// expectations.
+func TestSupervisorInterruptTickProcessesExpiryAndDispatchInOneCall(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run2", "project", "cfg", "43", testNow); err != nil {
+		t.Fatal(err)
+	}
+	// First Interrupt: immediate delivery so the dispatch scan skips it; its
+	// expiry predicate is the only one that fires at T.
+	holdCmd := t6Command(testNow)
+	holdCmd.RunID = "run"
+	holdCmd.ExpiresAfterMS, holdCmd.OnExpire, holdCmd.OnMaxEscalations, holdCmd.MaxEscalations = 100, ExpireHold, ExpireHold, 1
+	holdCmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	holdCmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{Delivery: "immediate", ChannelID: "ops"}, nil
+	}
+	holdInterrupt, err := emitTestInterrupt(t, ctx, db, holdCmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Second Interrupt: batched delivery with a frozen next_dispatch at T-1 so
+	// the dispatch scan matches at T and only the dispatch path fires.
+	batchAt := int64(testNow + 50)
+	dispatchCmd := t6Command(testNow)
+	dispatchCmd.RunID = "run2"
+	dispatchCmd.Generation.ChangeID = "change-02"
+	dispatchCmd.ExpiresAfterMS, dispatchCmd.OnExpire, dispatchCmd.OnMaxEscalations, dispatchCmd.MaxEscalations = 72*60*60*1000, ExpireEscalate, ExpireHold, 1
+	dispatchCmd.BatchAtMS = &batchAt
+	dispatchCmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}}}
+	dispatchCmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{Delivery: "batch", ChannelID: "ops", SuggestedDowngrade: true}, nil
+	}
+	dispatchInterrupt, err := emitTestInterrupt(t, ctx, db, dispatchCmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := int64(testNow + 100)
+	if err := db.SupervisorInterruptTick(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var holdState, holdHeld string
+	var holdVersion int64
+	if err := db.db.QueryRow(`SELECT dispatch_state, COALESCE(held_reason,''), version FROM interrupts WHERE id=?`, holdInterrupt.ID).Scan(&holdState, &holdHeld, &holdVersion); err != nil {
+		t.Fatal(err)
+	}
+	if holdState != "held" || holdHeld != "expiry" || holdVersion != 2 {
+		t.Fatalf("expiry outcome = %s/%s version=%d, want held/expiry/2", holdState, holdHeld, holdVersion)
+	}
+	var dispatchState string
+	var dispatchVersion int64
+	if err := db.db.QueryRow(`SELECT dispatch_state, version FROM interrupts WHERE id=?`, dispatchInterrupt.ID).Scan(&dispatchState, &dispatchVersion); err != nil {
+		t.Fatal(err)
+	}
+	if dispatchState != "batched" || dispatchVersion != 2 {
+		t.Fatalf("dispatch outcome = %s version=%d, want batched/2", dispatchState, dispatchVersion)
+	}
+	assertCount(t, db, "outbox_operations", 4) // 2 forge_comment + 1 immediate channel publish + 1 sealed daily batch publish
+	var expiryCount, dispatchedCount int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM events WHERE type='interrupt.expired'`).Scan(&expiryCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM events WHERE type='interrupt.dispatched'`).Scan(&dispatchedCount); err != nil {
+		t.Fatal(err)
+	}
+	if expiryCount != 1 || dispatchedCount != 1 {
+		t.Fatalf("events = expired:%d dispatched:%d, want 1/1", expiryCount, dispatchedCount)
 	}
 }
