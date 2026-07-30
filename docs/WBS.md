@@ -502,9 +502,11 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 5.6 三类预算集成
 
-- [ ] token 预算沿用 M1 Brain 收费口；API 预算沿用 M2 Forge 收费口；注意力沿用 M3 发射器收费口
-- [ ] 本片只做三者并存与降级集成，不复制收费实现
-- [ ] token/API 降级不得突破注意力配额
+> [三类预算共存 #763 PASS](reviews/2026-07-30-m5-three-budget-coexistence-763-rereview-pi-deepseek-v4-pro.md) / #760 / PR #762（merge `9e26f6f`）闭合 wave-2 三预算集成片：token 经 Brain `RecordBrainAttempt`（`brain.go:198`、brain.md §6）、API 经 Forge `ChargeForgeAPICall`（`forgebudget.go:95`、forge.md §9）、注意力经 `EmitInterrupt`（interrupt.md §1）三个既有唯一收费口并存；`three_budget_coexistence_test.go` 仅新增测试、零生产代码改动，无第二收费口；`TestTokenDegradeDoesNotBreakAttentionQuota` 与 `TestForgeAPIDegradeDoesNotBreakAttentionQuota` 验证 token/API 各自降级仍只经 `EmitInterrupt` 计注意力、不突破配额。三项关键验收据此勾选。本片不闭合 critical 熔断、Channel `ops.ps`/`ops.doctor`、指标 §5.7；不读作 M5 已实现。
+
+- [x] token 预算沿用 M1 Brain 收费口；API 预算沿用 M2 Forge 收费口；注意力沿用 M3 发射器收费口（[#763](reviews/2026-07-30-m5-three-budget-coexistence-763-rereview-pi-deepseek-v4-pro.md) / #760：共存用例经 `db.RecordBrainAttempt`/`db.ChargeForgeAPICall`/`db.EmitInterrupt` 三收费口；唯一收费口 `brain.go:198`/`forgebudget.go:95`/`interrupt.go:437`；brain.md §6、forge.md §9、interrupt.md §1）
+- [x] 本片只做三者并存与降级集成，不复制收费实现（#763/#760：PR #762 仅新增 `three_budget_coexistence_test.go`，零生产代码改动，无重复收费实现）
+- [x] token/API 降级不得突破注意力配额（#763/#760：`TestTokenDegradeDoesNotBreakAttentionQuota` + `TestForgeAPIDegradeDoesNotBreakAttentionQuota` 各 3/3 PASS 含 `-race`；注意力计数只写于 `EmitInterrupt` 内部；`internal/storage/` + `internal/brain/` 包全绿）
 
 #### 5.7 指标、CLI 与时间线
 
