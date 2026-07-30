@@ -231,7 +231,9 @@ func (d *DB) TriggerStartedLatency(ctx context.Context, q MetricsQuery) (Latency
 	}
 
 	for runID, a := range anchors {
-		if a.observed <= 0 || a.started <= 0 || a.started <= a.observed {
+		// Zero latency (started == observed) is a valid instantaneous start; only
+		// negative latency (started < observed) is excluded as an invalid anchor.
+		if a.observed <= 0 || a.started <= 0 || a.started < a.observed {
 			continue
 		}
 		dist.Samples = append(dist.Samples, LatencySample{RunID: runID, TriggerObservedAtMS: a.observed, AgentStartedAtMS: a.started, LatencyMS: a.started - a.observed})
@@ -299,13 +301,18 @@ func (d *DB) countDoneChanges(ctx context.Context, runWhere string, runArgs []an
 // weightedAttention sums each delivered metric identity's frozen reason weight.
 func (d *DB) weightedAttention(ctx context.Context, projectID string, mergedChanges int) (WeightedAttentionMetric, error) {
 	m := WeightedAttentionMetric{MergedChanges: mergedChanges, Coverage: "weights from each Run's frozen config_snapshot; response interval never used as human-minutes"}
+	// deliveredExists is the OR of the two delivery projections. It must be
+	// parenthesized when combined with a project filter so AND does not bind
+	// only the first branch and leak the second (batch) path across projects.
+	deliveredExists := `EXISTS (SELECT 1 FROM interrupt_deliveries d WHERE d.interrupt_id=i.id AND d.state='delivered') OR EXISTS (SELECT 1 FROM attention_batch_members m JOIN batch_deliveries b ON b.delivery_id=m.delivery_id WHERE m.interrupt_id=i.id AND b.state='delivered')`
 	query := `SELECT i.id, i.run_id, i.reason FROM interrupts i`
 	args := []any{}
 	if projectID != "" {
-		query += ` JOIN runs r ON r.id=i.run_id WHERE r.project_id=?`
+		query += ` JOIN runs r ON r.id=i.run_id WHERE r.project_id=? AND (` + deliveredExists + `)`
 		args = append(args, projectID)
+	} else {
+		query += ` WHERE ` + deliveredExists
 	}
-	query += ` WHERE EXISTS (SELECT 1 FROM interrupt_deliveries d WHERE d.interrupt_id=i.id AND d.state='delivered') OR EXISTS (SELECT 1 FROM attention_batch_members m JOIN batch_deliveries b ON b.delivery_id=m.delivery_id WHERE m.interrupt_id=i.id AND b.state='delivered')`
 	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return m, fmt.Errorf("storage: weighted attention deliveries: %w", err)
