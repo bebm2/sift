@@ -171,3 +171,123 @@ func waitSocket(t *testing.T, path string) {
 	}
 	t.Fatalf("socket %s not created", path)
 }
+
+// TestRequestMetricsMaps verifies the metrics command builds the closed ops.metrics
+// param set, including the --project scope.
+func TestRequestMetricsMaps(t *testing.T) {
+	method, params, err := request("metrics", []string{})
+	if err != nil || method != "ops.metrics" {
+		t.Fatalf("metrics default = %q %v err=%v", method, params, err)
+	}
+	if _, ok := params["project_id"]; !ok {
+		t.Fatalf("metrics params missing project_id: %v", params)
+	}
+	method, params, err = request("metrics", []string{"--project", "proj-1"})
+	if err != nil || params["project_id"] != "proj-1" {
+		t.Fatalf("metrics --project = %q %v err=%v", method, params, err)
+	}
+}
+
+// TestRequestTimelineMaps verifies the timeline command builds the closed
+// ops.timeline param set with keyset/type filters.
+func TestRequestTimelineMaps(t *testing.T) {
+	method, params, err := request("timeline", []string{"--run", "run-1", "--type", "report.progress", "--after-seq", "5", "--limit", "10"})
+	if err != nil || method != "ops.timeline" {
+		t.Fatalf("timeline = %q %v err=%v", method, params, err)
+	}
+	if params["run_id"] != "run-1" || params["type"] != "report.progress" || params["after_seq"] != int64(5) || params["limit"] != 10 {
+		t.Fatalf("timeline params = %v", params)
+	}
+}
+
+// startServerWithDB opens a real database under home and starts the operator
+// server bound to it, for online metrics/timeline/ps assertions.
+func startServerWithDB(t *testing.T, home string) *controlplane.Server {
+	t.Helper()
+	db, err := storage.Open(context.Background(), storage.OpenConfig{Path: filepath.Join(home, "sift.db"), BinaryVersion: controlplane.Version, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.SeedProjectForTest(context.Background(), "cfg-cli", "proj-cli", 1_700_000_000_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(context.Background(), "runCLI", "proj-cli", "cfg-cli", "issue-1", 1_700_000_000_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AppendEvent(context.Background(), storage.EventCmd{RunID: "runCLI", Type: "report.progress", Source: storage.SourceAgent, PayloadJSON: []byte("{}"), OccurredAtMS: 1_700_000_000_000, RecordedAtMS: 1_700_000_000_000}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := controlplane.Start(config.Home{Path: home}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Serve(ctx) }()
+	waitSocket(t, filepath.Join(home, "siftd.sock"))
+	return s
+}
+
+// TestRunMetricsOnline prints the nine-series report over a real daemon.
+func TestRunMetricsOnline(t *testing.T) {
+	home := freshHome(t)
+	startServerWithDB(t, home)
+	var out bytes.Buffer
+	code := run([]string{"sift", "metrics"}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	result := response["result"].(map[string]any)
+	metrics := result["metrics"].(map[string]any)
+	// The north-star and false-release series are present with coverage notes.
+	w := metrics["weighted_attention_per_merged_change"].(map[string]any)
+	if _, ok := w["coverage"]; !ok {
+		t.Fatalf("weighted attention missing coverage: %v", w)
+	}
+}
+
+// TestRunTimelineOnline prints the persisted event stream over a real daemon.
+func TestRunTimelineOnline(t *testing.T) {
+	home := freshHome(t)
+	startServerWithDB(t, home)
+	var out bytes.Buffer
+	code := run([]string{"sift", "timeline", "--run", "runCLI"}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	result := response["result"].(map[string]any)
+	events := result["events"].([]any)
+	if len(events) == 0 {
+		t.Fatal("timeline returned no events")
+	}
+}
+
+// TestRunPSOnline prints persisted runs over a real daemon.
+func TestRunPSOnline(t *testing.T) {
+	home := freshHome(t)
+	startServerWithDB(t, home)
+	var out bytes.Buffer
+	code := run([]string{"sift", "ps"}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	result := response["result"].(map[string]any)
+	runs := result["runs"].([]any)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+}

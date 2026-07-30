@@ -126,6 +126,31 @@ func request(command string, args []string) (string, map[string]any, error) {
 			return "", nil, fmt.Errorf("usage: sift %s <run-id> --expected-version N --request-key KEY", command)
 		}
 		return "ops." + command, map[string]any{"run_id": fs.Arg(0), "expected_version": *version, "request_key": *key}, nil
+	case "metrics":
+		fs := flag.NewFlagSet("metrics", flag.ContinueOnError)
+		project := fs.String("project", "", "scope metrics to a project id")
+		if err := fs.Parse(args); err != nil {
+			return "", nil, err
+		}
+		if fs.NArg() != 0 {
+			return "", nil, fmt.Errorf("usage: sift metrics [--project ID]")
+		}
+		return "ops.metrics", map[string]any{"project_id": nullableStringCLI(*project)}, nil
+	case "timeline":
+		fs := flag.NewFlagSet("timeline", flag.ContinueOnError)
+		run := fs.String("run", "", "filter timeline to a run id")
+		project := fs.String("project", "", "filter timeline to a project id")
+		eventType := fs.String("type", "", "filter by event type")
+		afterSeq := fs.Int64("after-seq", 0, "keyset pagination cursor (seq)")
+		limit := fs.Int("limit", 100, "max events (1..1000)")
+		if err := fs.Parse(args); err != nil {
+			return "", nil, err
+		}
+		if fs.NArg() != 0 || *limit < 1 || *limit > 1000 || *afterSeq < 0 {
+			return "", nil, fmt.Errorf("usage: sift timeline [--run ID] [--project ID] [--type T] [--after-seq N] [--limit N]")
+		}
+		params := map[string]any{"run_id": nullableStringCLI(*run), "project_id": nullableStringCLI(*project), "type": nullableStringCLI(*eventType), "after_seq": *afterSeq, "limit": *limit}
+		return "ops.timeline", params, nil
 	default:
 		return "", nil, fmt.Errorf("unknown command %q", command)
 	}
@@ -140,7 +165,16 @@ func printJSON(w io.Writer, v any) error {
 }
 func report(w io.Writer, err error) { fmt.Fprintln(w, "sift:", err) }
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: sift ps|logs|worktree|doctor [--offline]|kill|retry|report <kind> --key KEY --payload JSON")
+	fmt.Fprintln(w, "usage: sift ps|logs|worktree|metrics|timeline|doctor [--offline]|kill|retry|report <kind> --key KEY --payload JSON")
+}
+
+// nullableStringCLI emits nil for an empty string so the RPC param set stays
+// exactly the closed keys the server validates.
+func nullableStringCLI(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 var reportKinds = map[string]bool{"progress": true, "goal": true, "blocker": true, "completed": true}

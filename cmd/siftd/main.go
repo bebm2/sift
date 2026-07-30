@@ -89,6 +89,7 @@ func main() {
 	s.SetOperatorAction(func(ctx context.Context, method, runID string, version int64) error {
 		return termination.Operator(ctx, runID, version, method == "ops.retry")
 	})
+	s.SetAttentionQuota(attentionQuotaStrings(snapshot.Config.Attention.DailyQuota))
 	if err := startSchedulers(ctx, db, workers, termination, snapshot.Config.Scheduler); err != nil {
 		fatal(err)
 	}
@@ -108,6 +109,12 @@ func hasEnabledProjects(cfg *config.Config) bool {
 
 func attentionQuota(q config.DailyQuota) map[storage.InterruptSeverity]int {
 	return map[storage.InterruptSeverity]int{storage.SeverityLow: q.Low, storage.SeverityNormal: q.Normal, storage.SeverityHigh: q.High}
+}
+
+// attentionQuotaStrings is the string-keyed form the control-plane server uses
+// for its attention_remaining projection (low/normal/high).
+func attentionQuotaStrings(q config.DailyQuota) map[string]int {
+	return map[string]int{"low": q.Low, "normal": q.Normal, "high": q.High}
 }
 
 // startSchedulers is the sole owner of siftd's three DESIGN §6.1 clocks.
