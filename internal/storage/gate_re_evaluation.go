@@ -26,6 +26,9 @@ import (
 //     failed/change_not_open, failed/hard_guardrail (Run -> failed(gate_verdict)),
 //     wait_checks/checks_pending (Run -> running),
 //     ready/no_auto_merge (Run -> done(gate_passed_no_auto_merge)).
+//   - succeeded ready/merge: Run -> running(gate_merge_requested) plus the
+//     sole merge_change successor operation enqueued in the same transaction
+//     (Run CAS + terminal gate.reevaluation.ready.merge event).
 //   - failed result union (forge_read_failed | gate_input_assembly_failed |
 //     gate_contract_failed): terminal gate.reevaluation.failed event + Run CAS
 //     (waiting_human, version+1).
@@ -36,8 +39,12 @@ import (
 // so the worker can terminate the operation rather than leave it pending):
 //   - HITL verdict successors (failure_review Interrupt emission),
 //   - retry_checks/flaky_retry (rerun_checks successor operation),
-//   - ready/merge (merge_change successor operation),
 //   - the failed result union's failure_review successor Interrupt.
+//
+// The ready/merge -> merge_change successor is the minimal honest closure of
+// the #807/#808 remaining gap; it does not touch EmitInterrupt transactional
+// refactoring, does not claim once-charge, and does not close the full §8.1
+// matrix or M5.
 //
 // The exact digest vectors in storage.md §8.1 for the failed result union and
 // the continuous conflict→replacement Complete are reproduced by the tests.
@@ -263,9 +270,10 @@ func (d *DB) completeGateReEvalSucceededTx(ctx context.Context, tx *sql.Tx, clai
 	if v.HeadSHA != row.op.HeadSHA {
 		return fmt.Errorf("%w: verdict head differs from operation", ErrGateReEvaluationContract)
 	}
-	// Only the no-successor verdict matrix is wired in this slice.
+	// The wired succeeded matrix: no-successor verdicts plus ready/merge, whose
+	// merge_change successor is enqueued below in the same transaction.
 	switch v.Kind + "/" + v.Code {
-	case "failed/change_not_open", "failed/hard_guardrail", "wait_checks/checks_pending", "ready/no_auto_merge":
+	case "failed/change_not_open", "failed/hard_guardrail", "wait_checks/checks_pending", "ready/no_auto_merge", "ready/merge":
 	default:
 		return fmt.Errorf("%w: succeeded verdict %s/%s successor not wired", ErrGateReEvaluationSuccessorNotWired, v.Kind, v.Code)
 	}
@@ -308,6 +316,15 @@ func (d *DB) completeGateReEvalSucceededTx(ctx context.Context, tx *sql.Tx, clai
 	}
 	if err := insertGateReEvalEventTx(ctx, tx, row, eventType, eventKey, evPayload, nowMS); err != nil {
 		return err
+	}
+	// ready/merge successor: enqueue the sole merge_change operation in the same
+	// transaction as the terminal event and Run CAS (storage.md §8.1). This
+	// mirrors the conflict arm's replacement-head successor write. insertOperation
+	// dedupes by key, so a replayed transaction cannot double-enqueue.
+	if v.Kind == "ready" && v.Code == "merge" {
+		if err := insertGateReEvalMergeSuccessorTx(ctx, tx, row, recorded, p, eventKey, nowMS); err != nil {
+			return err
+		}
 	}
 	return finalizeGateReEvalOpTx(ctx, tx, claim, OperationSucceeded, R, nowMS)
 }
@@ -405,7 +422,7 @@ func gateReEvalRunCASTx(ctx context.Context, tx *sql.Tx, op GateReEvaluationPayl
 	case "failed/change_not_open", "failed/hard_guardrail":
 		base += `, status='failed', failure_reason='gate_verdict', completed_at_ms=?`
 		args = append(args, nowMS)
-	case "wait_checks/checks_pending":
+	case "wait_checks/checks_pending", "ready/merge":
 		base += `, status='running'`
 	case "ready/no_auto_merge":
 		base += `, status='done', change_id=COALESCE(?, change_id), change_head_sha=COALESCE(?, change_head_sha), completed_at_ms=?`
@@ -607,6 +624,39 @@ func (d *DB) completeGateReEvalConflictTx(ctx context.Context, tx *sql.Tx, claim
 		return err
 	}
 	return finalizeGateReEvalOpTx(ctx, tx, claim, OperationConflict, R, nowMS)
+}
+
+// insertGateReEvalMergeSuccessorTx enqueues the ready/merge successor
+// merge_change operation in the same transaction as the terminal event and Run
+// CAS (storage.md §8.1). It mirrors the conflict arm's replacement-head
+// successor write. The successor payload carries the §8.1 Gate-provenance
+// closed fields (gate_input_snapshot_id, gate_evaluation_id, verdict_digest,
+// created_from_event_id) plus the routing/method fields the wired MergeWorker
+// needs to claim and execute the merge: project_id drives the per-project claim
+// filter (outbox claim queries json_extract(payload_json,'$.project_id')), and
+// method is the Forge merge method (the production reconciler uses "merge").
+// created_from_event_id is byte-for-byte the terminal event id event:<K>. The
+// operation key is frozen by (run_id, head_sha) so a replay cannot create a
+// second successor (insertOperation dedupes by key).
+func insertGateReEvalMergeSuccessorTx(ctx context.Context, tx *sql.Tx, row gateReEvalAttemptRow, recorded RecordedGateEvaluation, p gateReEvalSucceededPayload, eventKey string, nowMS int64) error {
+	key := MergeChangeOperationKey(row.op.RunID, row.op.HeadSHA)
+	payload, err := canonicalJSON(map[string]any{
+		"project_id":             row.projectID,
+		"run_id":                 row.op.RunID,
+		"change_id":              row.op.ChangeID,
+		"expected_head_sha":      row.op.HeadSHA,
+		"gate_input_snapshot_id": recorded.SnapshotID,
+		"gate_evaluation_id":     recorded.EvaluationID,
+		"verdict_digest":         p.VerdictDigest,
+		"created_from_event_id":  "event:" + eventKey,
+		"method":                 "merge",
+	})
+	if err != nil {
+		return err
+	}
+	return insertOperation(ctx, tx, Operation{
+		Key: key, Kind: OperationMergeChange, Payload: payload, RunID: row.op.RunID,
+	}, row.op.RunID, "", nowMS)
 }
 
 // insertOrReturnGateSnapshotTx inserts a gate_input_snapshots row for hash if
