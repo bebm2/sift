@@ -291,3 +291,147 @@ func TestRunPSOnline(t *testing.T) {
 		t.Fatalf("runs = %d, want 1", len(runs))
 	}
 }
+
+// seedCLIDurableChannelFailure drives the production Channel write ports to a
+// durable, alert-raising failure. It mirrors the controlplane acceptance
+// fixture so the thin client can assert the projection end-to-end over the
+// real unix socket (with full JSON round-trip) without exporting a test-only
+// helper across packages.
+func seedCLIDurableChannelFailure(t *testing.T, db *storage.DB) {
+	t.Helper()
+	ctx := context.Background()
+	const now = int64(1_700_000_000_000)
+	if err := db.SeedProjectForTest(ctx, "cfg-ch", "project-ch", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run-ch", "project-ch", "cfg-ch", "42", now); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		batchID    = "daily:project-ch:Asia/Shanghai:1785286800000:ops-slack"
+		deliveryID = batchID + ":publish:1"
+		batchKey   = "attention-batch:" + deliveryID
+	)
+	payload, err := json.Marshal(map[string]any{
+		"batch_id": batchID, "batch_kind": "daily_summary",
+		"channel":     json.RawMessage(`{"id":"ops-slack","type":"webhook","target_ref":"secret_ref:SIFT_CHANNEL_OPS_SLACK","renderer":"plain-v1","capabilities":["text"]}`),
+		"delivery_id": deliveryID, "delivery_kind": "attention_batch",
+		"due_at_ms": int64(1_785_286_800_000),
+		"forge_alert_target": map[string]any{
+			"forge_kind": "github", "forge_host": "github.com",
+			"forge_project_key": "owner/project-ch", "target_kind": "issue", "target_id": "42",
+		},
+		"members": []any{}, "project_id": "project-ch", "rendered_text": "channel failure fixture",
+		"scope": "day", "scope_id": "Asia/Shanghai:1785286800000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnqueueChannelPublish(ctx,
+		storage.Operation{Key: batchKey, Kind: storage.OperationChannelPublish, Payload: payload},
+		deliveryID, now); err != nil {
+		t.Fatalf("enqueue channel publish: %v", err)
+	}
+	db.SetChannelPolicy(3, 3)
+	for i, ec := range []storage.ErrorClass{storage.ErrorTransient, storage.ErrorTransient, storage.ErrorRateLimited} {
+		attemptAt := now + int64(i+1)
+		claim, err := db.ClaimOutboxOperationKind(ctx, "channel", storage.OperationChannelPublish, attemptAt, 10_000)
+		if err != nil || claim == nil {
+			t.Fatalf("claim %d: %v", i, err)
+		}
+		if err := db.CompleteOutboxAttempt(ctx, *claim, storage.CompleteOutcome{
+			State: storage.OperationRetryable, ErrorClass: ec, ErrorSummary: "err",
+			NowMS: attemptAt + 1, ChannelFailureAlertAfter: 3, MaxAttempts: 3,
+		}); err != nil {
+			t.Fatalf("complete %d: %v", i, err)
+		}
+	}
+}
+
+// startServerWithChannelFailure opens a database seeded with a durable
+// Channel failure and serves a real daemon so a CLI command can talk to it
+// over the operator socket.
+func startServerWithChannelFailure(t *testing.T, home string) {
+	t.Helper()
+	db, err := storage.Open(context.Background(), storage.OpenConfig{Path: filepath.Join(home, "sift.db"), BinaryVersion: controlplane.Version, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCLIDurableChannelFailure(t, db)
+	s, err := controlplane.Start(config.Home{Path: home}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Serve(ctx) }()
+	waitSocket(t, filepath.Join(home, "siftd.sock"))
+}
+
+// channelDeliveryFromCLI runs one CLI command, parses its JSON response and
+// returns the surfaced channel_deliveries projection. It checks the RPC-level
+// `ok` flag rather than the process exit code: `sift doctor` legitimately
+// exits 0/1/2 to project health while still returning a successful RPC.
+func channelDeliveryFromCLI(t *testing.T, command string) map[string]any {
+	t.Helper()
+	var out bytes.Buffer
+	run([]string{"sift", command}, &out, io.Discard)
+	var response map[string]any
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatalf("sift %s unmarshal: %v; output:\n%s", command, err, out.String())
+	}
+	if ok, _ := response["ok"].(bool); !ok {
+		t.Fatalf("sift %s RPC ok=false; output:\n%s", command, out.String())
+	}
+	result := response["result"].(map[string]any)
+	deliveries := result["channel_deliveries"].([]any)
+	if len(deliveries) != 1 {
+		t.Fatalf("sift %s channel_deliveries = %d rows, want 1", command, len(deliveries))
+	}
+	return deliveries[0].(map[string]any)
+}
+
+// TestRunPSDoctorOnlineExposeChannelDeliveries verifies the thin client
+// surfaces the durable Channel delivery/episode/alert/generated_not_delivered
+// projection over the real operator socket (full JSON round-trip) for both
+// `sift ps` and `sift doctor`, closing the CLI half of #715 note 4 / #782.
+func TestRunPSDoctorOnlineExposeChannelDeliveries(t *testing.T) {
+	home := freshHome(t)
+	startServerWithChannelFailure(t, home)
+
+	for _, command := range []string{"ps", "doctor"} {
+		row := channelDeliveryFromCLI(t, command)
+		for _, key := range []string{
+			"delivery_id", "channel_id", "operation_key", "state", "attempt_count",
+			"consecutive_failures", "episode_state", "last_error_class",
+			"alert_operation_key", "alert_state", "generated_not_delivered",
+		} {
+			if _, ok := row[key]; !ok {
+				t.Errorf("sift %s channel delivery missing key %q (row=%v)", command, key, row)
+			}
+		}
+		// JSON round-trip coerces integers to float64.
+		if row["attempt_count"] != float64(3) {
+			t.Errorf("sift %s attempt_count = %v, want 3", command, row["attempt_count"])
+		}
+		if row["consecutive_failures"] != float64(3) {
+			t.Errorf("sift %s consecutive_failures = %v, want 3", command, row["consecutive_failures"])
+		}
+		if row["state"] != "failed" {
+			t.Errorf("sift %s state = %v, want failed", command, row["state"])
+		}
+		if row["episode_state"] != "ended_failed" {
+			t.Errorf("sift %s episode_state = %v, want ended_failed", command, row["episode_state"])
+		}
+		if row["last_error_class"] != string(storage.ErrorRateLimited) {
+			t.Errorf("sift %s last_error_class = %v, want %s", command, row["last_error_class"], storage.ErrorRateLimited)
+		}
+		if row["alert_state"] != "pending" {
+			t.Errorf("sift %s alert_state = %v, want pending", command, row["alert_state"])
+		}
+		if row["generated_not_delivered"] != true {
+			t.Errorf("sift %s generated_not_delivered = %v, want true", command, row["generated_not_delivered"])
+		}
+	}
+}
