@@ -44,10 +44,12 @@ func main() {
 	if err := db.ActivateConfig(ctx, snapshot, controlplane.Version, now.UnixMilli()); err != nil {
 		fatal(err)
 	}
-	// All production Interrupt sources, including startup recovery, use this
-	// single T4 seam; EmitInterrupt keeps the provider call outside its write transaction.
-	t4 := brain.NewShell(db, snapshot.Config.Brain, brain.SubprocessProvider{Executable: snapshot.Config.Brain.Executable, Args: snapshot.Config.Brain.Args}, time.Now)
-	db.SetInterruptT4(t4.CallT4)
+	// All production Interrupt sources, including startup recovery, share this
+	// single Brain shell. T4 and T6 both run outside EmitInterrupt's write
+	// transaction; the deterministic acceptor keeps final severity/dispatch.
+	shell := brain.NewShell(db, snapshot.Config.Brain, brain.SubprocessProvider{Executable: snapshot.Config.Brain.Executable, Args: snapshot.Config.Brain.Args}, time.Now)
+	db.SetInterruptT4(shell.CallT4)
+	db.SetInterruptT6(shell.CallT6)
 	bootID, err := db.StartDaemonBoot(ctx, snapshot.Hash, controlplane.Version, controlplane.ProtocolMajor, os.Getpid(), now.UnixMilli())
 	if err != nil {
 		fatal(err)

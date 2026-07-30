@@ -94,6 +94,7 @@ type DB struct {
 	wakeupMu           sync.RWMutex
 	outboxWakeup       func()
 	interruptT4        InterruptT4Caller
+	interruptT6        InterruptT6Caller
 	channelPolicyMu    sync.RWMutex
 	channelAlertAfter  int
 	channelMaxAttempts int
@@ -142,6 +143,21 @@ func (d *DB) interruptT4Caller() InterruptT4Caller {
 	d.wakeupMu.RLock()
 	defer d.wakeupMu.RUnlock()
 	return d.interruptT4
+}
+
+// SetInterruptT6 installs the single production T6 dispatch caller used by
+// every EmitInterrupt path. Like T4 it runs before the write transaction. A
+// per-call cmd.T6 override takes precedence so tests can pin one call.
+func (d *DB) SetInterruptT6(caller InterruptT6Caller) {
+	d.wakeupMu.Lock()
+	defer d.wakeupMu.Unlock()
+	d.interruptT6 = caller
+}
+
+func (d *DB) interruptT6Caller() InterruptT6Caller {
+	d.wakeupMu.RLock()
+	defer d.wakeupMu.RUnlock()
+	return d.interruptT6
 }
 
 // Path returns the database file path this handle opened.

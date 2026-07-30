@@ -518,6 +518,12 @@ func (d *DB) emitInterruptHooks(ctx context.Context, cmd EmitInterruptCmd, befor
 	if err != nil {
 		return Interrupt{}, err
 	}
+	// T6 is advisory and, like T4, runs outside the five-write transaction. A
+	// per-call cmd.T6 override (tests) takes precedence over the production
+	// DB-level seam so the single caller is never invented at a call site.
+	if cmd.T6 == nil {
+		cmd.T6 = d.interruptT6Caller()
+	}
 	dispatch, err := admitInterruptT6(ctx, cmd, t.modality, severity, cmd.NowMS+cmd.ExpiresAfterMS)
 	if err != nil {
 		return Interrupt{}, err

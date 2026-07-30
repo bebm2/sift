@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -108,4 +109,128 @@ func TestEmitInterruptHoldsWithoutCompatibleChannelWithoutCallingT6(t *testing.T
 		t.Fatalf("held dispatch = %#v, called=%v", got, called)
 	}
 	assertCount(t, db, "outbox_operations", 1) // forge comment remains the first delivery.
+}
+
+func TestEmitInterruptUsesProductionT6SeamWhenCmdT6Nil(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	var seen *InterruptT6Input
+	db.SetInterruptT6(func(_ context.Context, in InterruptT6Input) (InterruptT6Output, error) {
+		cp := in
+		seen = &cp
+		return InterruptT6Output{ChannelID: in.DefaultChannelID, Delivery: "batch", SuggestedDowngrade: true}, nil
+	})
+	batchAt := int64(testNow + 100)
+	cmd := t6Command(testNow)
+	cmd.BatchAtMS = &batchAt
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}, Default: true}}
+	// cmd.T6 deliberately left nil so the production seam is the sole caller.
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen == nil || seen.DefaultChannelID != "ops" || len(seen.ChannelCandidates) != 1 || seen.ChannelCandidates[0] != "ops" {
+		t.Fatalf("production seam input = %#v", seen)
+	}
+	if got.Severity != SeverityLow || !got.SuggestedDowngrade || got.ChannelID != "ops" || got.Delivery != "batch" || got.NextDispatchAtMS == nil || *got.NextDispatchAtMS != batchAt {
+		t.Fatalf("dispatch = %#v", got)
+	}
+	// One Interrupt, one forge_comment operation, no second charge path.
+	assertCount(t, db, "interrupts", 1)
+	assertCount(t, db, "outbox_operations", 1)
+}
+
+func TestEmitInterruptProductionT6InvalidFallsBackDeterministically(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	invoked := false
+	db.SetInterruptT6(func(_ context.Context, in InterruptT6Input) (InterruptT6Output, error) {
+		invoked = true
+		// Unknown channel + non-immediate on a merge-review (high) candidate.
+		return InterruptT6Output{ChannelID: "not-a-candidate", Delivery: "batch"}, nil
+	})
+	cmd := t6Command(testNow)
+	cmd.GatePhase = GateMerge // normal => high
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}, Default: true}}
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !invoked {
+		t.Fatal("production T6 seam not invoked")
+	}
+	if got.Severity != SeverityHigh || got.ChannelID != "ops" || got.Delivery != "immediate" || got.NextDispatchAtMS == nil || *got.NextDispatchAtMS != testNow {
+		t.Fatalf("high fallback = %#v", got)
+	}
+}
+
+func TestEmitInterruptProductionT6ErrorFallsBackDeterministically(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	db.SetInterruptT6(func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{}, errors.New("t6 provider unavailable")
+	})
+	batchAt := int64(testNow + 100)
+	cmd := t6Command(testNow)
+	cmd.BatchAtMS = &batchAt
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}, Default: true}}
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Code review is normal; fallback delivery is batch into the daily summary.
+	if got.Severity != SeverityNormal || got.SuggestedDowngrade || got.ChannelID != "ops" || got.Delivery != "batch" || got.NextDispatchAtMS == nil || *got.NextDispatchAtMS != batchAt {
+		t.Fatalf("error fallback = %#v", got)
+	}
+}
+
+func TestEmitInterruptPerCallT6OverridesProductionSeam(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	prod := false
+	db.SetInterruptT6(func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+		prod = true
+		return InterruptT6Output{Delivery: "immediate", ChannelID: "ops", SuggestedDowngrade: false}, nil
+	})
+	batchAt := int64(testNow + 100)
+	cmd := t6Command(testNow)
+	cmd.BatchAtMS = &batchAt
+	cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual"}, Default: true}}
+	cmd.T6 = func(_ context.Context, in InterruptT6Input) (InterruptT6Output, error) {
+		return InterruptT6Output{ChannelID: in.DefaultChannelID, Delivery: "batch", SuggestedDowngrade: true}, nil
+	}
+	got, err := emitTestInterrupt(t, ctx, db, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prod {
+		t.Fatal("production seam must not run when cmd.T6 is set")
+	}
+	if got.Severity != SeverityLow || !got.SuggestedDowngrade || got.Delivery != "batch" || *got.NextDispatchAtMS != batchAt {
+		t.Fatalf("override dispatch = %#v", got)
+	}
 }
