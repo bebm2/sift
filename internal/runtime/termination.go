@@ -101,7 +101,7 @@ func (t Terminator) Terminate(ctx context.Context, id ProcessIdentity, cfg Termi
 	if !observation.Exists {
 		return TerminationResult{Absent: true, Cause: TerminationAbsent}, nil
 	}
-	if !sameIdentity(id, observation.ProcessIdentity) {
+	if !SameIdentity(id, observation.ProcessIdentity) {
 		return TerminationResult{Cause: TerminationIdentityUnknown}, nil
 	}
 	result := TerminationResult{}
@@ -146,7 +146,7 @@ func (t Terminator) absent(ctx context.Context, id ProcessIdentity, cfg Terminat
 		}
 		// A changed identity is not proof that the recorded process group is
 		// gone, so fail closed instead of treating PID reuse as absence.
-		if !sameIdentity(id, observation.ProcessIdentity) {
+		if !SameIdentity(id, observation.ProcessIdentity) {
 			return false, nil
 		}
 		if i+1 < cfg.AbsenceRechecks {
@@ -164,7 +164,12 @@ func validTermination(id ProcessIdentity, cfg TerminationConfig) error {
 	}
 	return nil
 }
-func sameIdentity(want, got ProcessIdentity) bool {
+
+// SameIdentity reports whether two process identities agree on every field that
+// Terminator or a probe process-check may compare: PID, PGID, start time,
+// executable and the control-nonce hash (constant time). A changed identity is
+// never treated as absence proof (PID reuse must fail closed).
+func SameIdentity(want, got ProcessIdentity) bool {
 	return want.PID == got.PID && want.PGID == got.PGID && want.StartedAtMS == got.StartedAtMS &&
 		want.Executable == got.Executable && len(want.ControlNonceHash) == len(got.ControlNonceHash) &&
 		subtle.ConstantTimeCompare([]byte(want.ControlNonceHash), []byte(got.ControlNonceHash)) == 1

@@ -36,10 +36,10 @@ func TestPlatformProcessInspectorRequiresMatchingControlNonce(t *testing.T) {
 	id.StartedAtMS = got.StartedAtMS
 	id.Executable = got.Executable
 	id.ControlNonceHash = got.ControlNonceHash
-	if !sameIdentity(id, got.ProcessIdentity) {
+	if !SameIdentity(id, got.ProcessIdentity) {
 		t.Fatal("complete platform observation did not match identity")
 	}
-	if sameIdentity(ProcessIdentity{PID: id.PID, PGID: got.PGID, StartedAtMS: got.StartedAtMS, Executable: got.Executable, ControlNonceHash: "wrong"}, got.ProcessIdentity) {
+	if SameIdentity(ProcessIdentity{PID: id.PID, PGID: got.PGID, StartedAtMS: got.StartedAtMS, Executable: got.Executable, ControlNonceHash: "wrong"}, got.ProcessIdentity) {
 		t.Fatal("wrong nonce matched process identity")
 	}
 }
