@@ -85,6 +85,30 @@ func seedSiftMergeOutbox(t *testing.T, db *DB, ctx context.Context, runID string
 	}
 }
 
+// seedT2DispatchAttempt inserts one valid T2 Brain dispatch call (project-bound)
+// and its provider attempt with known tokens. The composite
+// (id,selected_attempt_no)→brain_attempts FK is deferred, so both rows must
+// land in one transaction.
+func seedT2DispatchAttempt(t *testing.T, db *DB, ctx context.Context, projectID, runID, callID, attemptID string, nowMS int64) {
+	t.Helper()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO brain_calls(id,scope,subject_key,project_id,run_id,touchpoint,call_seq,prompt_version,output_schema_version,input_json,input_digest,status,selected_attempt_no,validated_output_json,started_at_ms,finished_at_ms) VALUES(?, 'run', ?, ?, ?, 'T2', 1, 'pv', 1, '{}', 'd', 'valid', 1, '{}', ?, ?)`,
+		callID, "run:"+runID, projectID, runID, nowMS, nowMS); err != nil {
+		t.Fatalf("seed brain call: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO brain_attempts(id,logical_call_id,provider_attempt,outcome,request_digest,input_tokens,output_tokens,raw_output_digest,started_at_ms,finished_at_ms) VALUES(?, ?, 1, 'valid', 'rd', 100, 200, 'rod', ?, ?)`,
+		attemptID, callID, nowMS, nowMS); err != nil {
+		t.Fatalf("seed brain attempt: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+}
+
 // TestV11GateBypassExcludedFromFalseRelease is the V11 metrics segment: a done
 // Run merged by a human (gate_bypassed=1) must NOT enter the false-release
 // denominator and MUST be counted in the gate-bypass rate (PRD §10.2).
@@ -316,6 +340,104 @@ func TestMetricsLLMCostAndDispatch(t *testing.T) {
 	}
 }
 
+// TestMetricsProjectScoped verifies MetricsQuery{ProjectID} scopes every series
+// that supports it and — the round-1 P0 regression — does not raise the
+// dual-WHERE SQL error in weightedAttention. All nine series must return.
+func TestMetricsProjectScoped(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	const now = testNow
+
+	// Project A: two done runs (one gate-bypassed), one Sift merge, one
+	// delivered code_review interrupt, and one valid T2 dispatch on runA1.
+	canonicalA := canonicalMetricsSnapshot(t, map[string]float64{
+		"design_approval": 4, "code_review": 10, "guardrail_violation": 5,
+		"agent_blocked": 5, "merge_conflict": 3, "failure_review": 5, "startup_stall": 5,
+	})
+	seedProjectWithSnapshot(t, db, ctx, "cfgA", "projA", canonicalA, now)
+	seedDoneRun(t, db, ctx, "runA1", "projA", "cfgA", "changeA1", false, now)
+	seedDoneRun(t, db, ctx, "runA2", "projA", "cfgA", "changeA2", true, now)
+	seedSiftMergeOutbox(t, db, ctx, "runA1", now)
+	seedInterruptWithDelivery(t, db, ctx, "intA1", "runA1", "code_review", "normal", now)
+	seedT2DispatchAttempt(t, db, ctx, "projA", "runA1", "bcA1", "baA1", now)
+
+	// Project B: one done run with its own Sift merge, delivered interrupt and
+	// dispatch, to prove the scoped numbers below are real scoping, not global.
+	if err := db.SeedProjectForTest(ctx, "cfgB", "projB", now); err != nil {
+		t.Fatal(err)
+	}
+	seedDoneRun(t, db, ctx, "runB1", "projB", "cfgB", "changeB1", false, now)
+	seedSiftMergeOutbox(t, db, ctx, "runB1", now)
+	seedInterruptWithDelivery(t, db, ctx, "intB1", "runB1", "design_approval", "normal", now)
+	seedT2DispatchAttempt(t, db, ctx, "projB", "runB1", "bcB1", "baB1", now)
+
+	// Project-scoped report for A: no SQL error, nine series populated.
+	scoped, err := db.Metrics(ctx, MetricsQuery{ProjectID: "projA"})
+	if err != nil {
+		t.Fatalf("project-scoped Metrics: %v", err)
+	}
+
+	// Weighted attention: only projA's code_review(10) interrupt, 2 merged → 5.
+	if scoped.WeightedAttentionPerChange.MergedChanges != 2 {
+		t.Fatalf("scoped merged changes = %v, want 2", scoped.WeightedAttentionPerChange.MergedChanges)
+	}
+	if scoped.WeightedAttentionPerChange.WeightedMinutes != 10 {
+		t.Fatalf("scoped weighted minutes = %v, want 10 (projA code_review only)", scoped.WeightedAttentionPerChange.WeightedMinutes)
+	}
+	if scoped.WeightedAttentionPerChange.DeliveredMetricIdentity != 1 {
+		t.Fatalf("scoped delivered identities = %v, want 1", scoped.WeightedAttentionPerChange.DeliveredMetricIdentity)
+	}
+	if scoped.WeightedAttentionPerChange.PerMergedChange != 5 {
+		t.Fatalf("scoped per merged change = %v, want 5", scoped.WeightedAttentionPerChange.PerMergedChange)
+	}
+
+	// False-release denominator scoped to projA Sift merges = 1.
+	if scoped.FalseReleaseRate.Denominator != 1 {
+		t.Fatalf("scoped false-release denominator = %v, want 1", scoped.FalseReleaseRate.Denominator)
+	}
+
+	// Gate bypass: 1 gate_bypassed / 2 done in projA = 0.5.
+	if scoped.GateBypassRate.Numerator != 1 || scoped.GateBypassRate.Denominator != 2 || scoped.GateBypassRate.Rate != 0.5 {
+		t.Fatalf("scoped gate bypass = %+v, want 1/2=0.5", scoped.GateBypassRate)
+	}
+
+	// HITL: 1 run with an interrupt / 2 runs in projA = 0.5.
+	if scoped.HITLRate.Numerator != 1 || scoped.HITLRate.Denominator != 2 || scoped.HITLRate.Rate != 0.5 {
+		t.Fatalf("scoped hitl = %+v, want 1/2=0.5", scoped.HITLRate)
+	}
+
+	// Dispatch accuracy scoped to projA T2 calls = 1.
+	if scoped.DispatchAccuracy.Denominator != 1 || scoped.DispatchAccuracy.Rate != 1 {
+		t.Fatalf("scoped dispatch = %+v, want denominator=1 rate=1", scoped.DispatchAccuracy)
+	}
+
+	// Gate confusion / attention quota are intentionally not project-scoped and
+	// llm cost token sum is not yet scoped (tracked as P2-2); they must still
+	// return without error. The llm merged-changes denominator IS scoped.
+	if scoped.GateMissRate.Coverage == "" || scoped.GateFalseBlockRate.Coverage == "" {
+		t.Fatalf("unscoped series lost coverage notes: %+v / %+v", scoped.GateMissRate, scoped.GateFalseBlockRate)
+	}
+	if scoped.LLMCostPerMergedChange.MergedChanges != 2 {
+		t.Fatalf("llm merged changes = %v, want 2 (denominator is scoped even though token sum is not)", scoped.LLMCostPerMergedChange.MergedChanges)
+	}
+
+	// Global report sees both projects: 3 merged, 2 Sift merges, 2 delivered
+	// identities — proving the scoped numbers above are real scoping.
+	global, err := db.Metrics(ctx, MetricsQuery{})
+	if err != nil {
+		t.Fatalf("global Metrics: %v", err)
+	}
+	if global.WeightedAttentionPerChange.MergedChanges != 3 {
+		t.Fatalf("global merged changes = %v, want 3", global.WeightedAttentionPerChange.MergedChanges)
+	}
+	if global.FalseReleaseRate.Denominator != 2 {
+		t.Fatalf("global false-release denominator = %v, want 2", global.FalseReleaseRate.Denominator)
+	}
+	if global.WeightedAttentionPerChange.DeliveredMetricIdentity != 2 {
+		t.Fatalf("global delivered identities = %v, want 2", global.WeightedAttentionPerChange.DeliveredMetricIdentity)
+	}
+}
+
 // TestTriggerStartedLatencyDistribution verifies the P50 anchors are read from
 // persisted events and the distribution is computed over both-anchored runs.
 func TestTriggerStartedLatencyDistribution(t *testing.T) {
@@ -361,6 +483,46 @@ func TestTriggerStartedLatencyDistribution(t *testing.T) {
 	// Sorted: 10s, 20s → min 10000, p50 (nearest-rank rank=1)=10000, p90 (rank=2)=20000, max 20000.
 	if dist.MinMS != 10000 || dist.P50MS != 10000 || dist.P90MS != 20000 || dist.MaxMS != 20000 {
 		t.Fatalf("distribution = %+v, want min=10000 p50=10000 p90=20000 max=20000", dist)
+	}
+}
+
+// TestTriggerStartedLatencyZeroAllowed verifies a run whose agent started at the
+// same instant the trigger was observed (LatencyMS==0) is included rather than
+// dropped by an off-by-one guard. Regression for the round-1 P1 fix.
+func TestTriggerStartedLatencyZeroAllowed(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	const now = testNow
+	if err := db.SeedProjectForTest(ctx, "cfg-z", "proj-z", now); err != nil {
+		t.Fatal(err)
+	}
+	// Zero-latency run: agent started at the same ms the trigger was observed.
+	if _, err := db.ExecForTest(ctx, `INSERT INTO runs(id,source_kind,project_id,config_snapshot_id,forge_kind,forge_host,forge_project_key,issue_id,status,max_attempts,created_at_ms,updated_at_ms) VALUES(?,'forge','proj-z','cfg-z','github','github.com','org/repo',?,'running',3,?,?)`,
+		"runZero", "issue-runZero", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecForTest(ctx, `INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?,'proj-z','intake.trigger_observed','forge',1,'{}',?,?)`,
+		"ev-trig-zero", "runZero", now, now); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"to": "running"})
+	if _, err := db.ExecForTest(ctx, `INSERT INTO events(id,run_id,project_id,type,source,payload_schema_version,payload_json,occurred_at_ms,recorded_at_ms) VALUES(?,?,'proj-z','run.transitioned','agent',1,?,?,?)`,
+		"ev-run-zero", "runZero", string(payload), now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	dist, err := db.TriggerStartedLatency(ctx, MetricsQuery{})
+	if err != nil {
+		t.Fatalf("latency: %v", err)
+	}
+	if dist.Count != 1 {
+		t.Fatalf("count = %v, want 1 (zero-latency sample must be included)", dist.Count)
+	}
+	if len(dist.Samples) != 1 || dist.Samples[0].LatencyMS != 0 {
+		t.Fatalf("samples = %+v, want one sample with LatencyMS=0", dist.Samples)
+	}
+	if dist.MinMS != 0 || dist.P50MS != 0 || dist.P90MS != 0 || dist.MaxMS != 0 {
+		t.Fatalf("distribution = %+v, want all zero for a single zero-latency sample", dist)
 	}
 }
 
