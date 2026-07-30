@@ -71,7 +71,7 @@ func TestGateFailureReviewPersistsExactBindingProvenance(t *testing.T) {
 	mustExec(t, db, `UPDATE runs SET change_head_sha=? WHERE id='run'`, head)
 	r := gateRecord(testNow)
 	r.HeadSHA = head
-	r.SnapshotJSON = []byte(`{"change":{"id":"change-01","mergeability":"unknown"},"identity":{"change_id":"change-01"},"schema_version":1}`)
+	r.SnapshotJSON = []byte(`{"change":{"id":"change-01","mergeability":"unknown"},"identity":{"change_id":"change-01","run_id":"run"},"schema_version":1}`)
 	r.VerdictJSON = []byte(`{"kind":"hitl","mergeability":"unknown","schema_version":1}`)
 	attempt := 1
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, FailureReviewRetryKind: FailureReviewGateRecheck,
@@ -108,7 +108,7 @@ func TestGateBindingFailureRollsBackProvenanceAndEmission(t *testing.T) {
 	mustExec(t, db, `CREATE TRIGGER fail_gate_binding BEFORE INSERT ON interrupt_command_effect_bindings BEGIN SELECT RAISE(ABORT,'injected gate binding failure'); END`)
 	r := gateRecord(testNow)
 	r.HeadSHA = head
-	r.SnapshotJSON = []byte(`{"change":{"id":"change-01","mergeability":"unknown"},"identity":{"change_id":"change-01"},"schema_version":1}`)
+	r.SnapshotJSON = []byte(`{"change":{"id":"change-01","mergeability":"unknown"},"identity":{"change_id":"change-01","run_id":"run"},"schema_version":1}`)
 	r.VerdictJSON = []byte(`{"kind":"hitl","mergeability":"unknown","schema_version":1}`)
 	attempt := 1
 	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, FailureReviewRetryKind: FailureReviewGateRecheck, Facts: map[string]string{"failure_class": "gate_recheck_failed", "failure_evidence_ref": "/gate/recheck", "recommended_action": "retry"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, ChangeID: "change-01", HeadSHA: head, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
@@ -126,6 +126,30 @@ func TestGateBindingFailureRollsBackProvenanceAndEmission(t *testing.T) {
 	}
 	if status != "queued" || version != 1 {
 		t.Fatalf("run transition leaked: %s/%d", status, version)
+	}
+}
+
+func TestGateFailureReviewRejectsForgedSnapshotRunIdentity(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedGateCandidateForTest(ctx, "run", "project", "cfg", "change-01", testNow); err != nil {
+		t.Fatal(err)
+	}
+	const head = "0123456789012345678901234567890123456789"
+	mustExec(t, db, `UPDATE runs SET change_head_sha=? WHERE id='run'`, head)
+	r := gateRecord(testNow)
+	r.HeadSHA = head
+	r.SnapshotJSON = []byte(`{"change":{"id":"change-01","mergeability":"unknown"},"identity":{"change_id":"change-01","run_id":"forged-run"},"schema_version":1}`)
+	attempt := 1
+	cmd := EmitInterruptCmd{RunID: "run", ExpectedRunVersion: 1, AttemptNo: &attempt, Reason: InterruptFailureReview, FailureReviewVariant: FailureReviewAttempt, FailureReviewRetryKind: FailureReviewGateRecheck, Facts: map[string]string{"failure_class": "gate_recheck_failed", "failure_evidence_ref": "/gate/recheck", "recommended_action": "retry"}, Generation: InterruptGeneration{AttemptNo: 1, Generation: 1, ChangeID: "change-01", HeadSHA: head, FailureDigest: strings.Repeat("a", 64)}, GatePhase: GateReview, GuardrailLevel: GuardrailNone, AttentionDailyQuota: interruptQuota(), Source: SourceSystem, NowMS: testNow}
+	if _, _, err := db.RecordGateEvaluationAndEmitInterrupt(ctx, r, cmd); err == nil || !strings.Contains(err.Error(), "failure review provenance mismatch") {
+		t.Fatalf("forged snapshot identity error = %v", err)
+	}
+	for _, table := range []string{"gate_input_snapshots", "gate_evaluations", "calibration_entries", "ledger_entries", "interrupts", "attention_admissions", "budget_entries", "events", "interrupt_deliveries", "interrupt_command_effect_bindings"} {
+		assertCount(t, db, table, 0)
 	}
 }
 

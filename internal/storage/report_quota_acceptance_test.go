@@ -128,6 +128,11 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 		}
 		assertCount(t, db, "report_quota_exhaustions", 1)
 		assertCount(t, db, "interrupts", 1)
+		assertCount(t, db, "report_emission_diagnostics", 1)
+		var diagnosticPayload string
+		if err := db.db.QueryRow(`SELECT e.payload_json FROM report_emission_diagnostics d JOIN events e ON e.id=d.event_id`).Scan(&diagnosticPayload); err != nil || !strings.Contains(diagnosticPayload, `"disposition":"structural_rejected"`) {
+			t.Fatalf("structural rejection diagnostic = %q, %v", diagnosticPayload, err)
+		}
 		mustExec(t, db, `DROP TRIGGER fail_quota_binding`)
 		if err := submitBlocker(ctx, db, "2123456789abcdef0123456789abcdef"); err == nil {
 			t.Fatal("quota replay unexpectedly succeeded")
@@ -148,8 +153,12 @@ func TestReportQuotaExhaustionCrashReplayAndConcurrency(t *testing.T) {
 					when = " WHEN NEW.type='interrupt.emitted'"
 				}
 				mustExec(t, db, "CREATE TRIGGER "+trigger+" BEFORE INSERT ON "+table+when+" BEGIN SELECT RAISE(ABORT, 'injected quota emission cut'); END")
-				if err := submitBlocker(ctx, db, "1123456789abcdef0123456789abcdef"); err == nil || !strings.Contains(err.Error(), "injected quota emission cut") {
+				err := submitBlocker(ctx, db, "1123456789abcdef0123456789abcdef")
+				if err == nil || (table == "interrupt_command_effect_bindings" && !strings.Contains(err.Error(), "report_interrupt_quota_exhausted")) || (table != "interrupt_command_effect_bindings" && !strings.Contains(err.Error(), "injected quota emission cut")) {
 					t.Fatalf("%s cut = %v", table, err)
+				}
+				if table == "interrupt_command_effect_bindings" {
+					assertCount(t, db, "report_emission_diagnostics", 1)
 				}
 				assertCount(t, db, "report_quota_exhaustions", 1)
 				assertCount(t, db, "interrupts", 1)
