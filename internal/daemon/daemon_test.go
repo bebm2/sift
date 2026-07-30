@@ -283,3 +283,34 @@ func daemonAdapterFactory(r forge.Runner) func(forge.Kind, string, forge.Runner,
 		return forge.NewProductionAdapter(k, cli, r, charger)
 	}
 }
+
+// TestAssembleWiresGateReEvaluationWorker verifies the gate_re_evaluation
+// worker (storage.md §8.1) is constructed by Assemble and runs inside
+// OutboxTick. The terminal protocol itself is covered by storage tests; this
+// only asserts the production wiring seam.
+func TestAssembleWiresGateReEvaluationWorker(t *testing.T) {
+	ctx := context.Background()
+	now := time.UnixMilli(1000)
+	db, err := storage.Open(ctx, storage.OpenConfig{Path: filepath.Join(t.TempDir(), "sift.db"), BinaryVersion: "test", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.SeedProjectForTest(ctx, "cfg", "p", now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Assemble(db, daemonTestConfig("p"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.GateReEvaluations == nil || d.GateReEvaluations.WorkerID != "siftd:gate_re_evaluation" {
+		t.Fatalf("gate_re_evaluation worker not wired: %+v", d.GateReEvaluations)
+	}
+	if d.GateReEvaluations.Produce == nil {
+		t.Fatal("gate_re_evaluation producer not configured")
+	}
+	// OutboxTick must run the worker without error when nothing is claimable.
+	if err := d.OutboxTick(ctx); err != nil {
+		t.Fatalf("OutboxTick: %v", err)
+	}
+}

@@ -18,6 +18,13 @@ func (d *DB) ExecForTest(ctx context.Context, query string, args ...any) (sql.Re
 	return d.db.ExecContext(ctx, query, args...)
 }
 
+// QueryRowForTest returns one row from the underlying handle. It is a
+// read-only escape hatch for cross-package tests; production reads use the
+// named projections.
+func (d *DB) QueryRowForTest(ctx context.Context, query string, args ...any) *sql.Row {
+	return d.db.QueryRowContext(ctx, query, args...)
+}
+
 // SeedProjectForTest inserts a config snapshot and project with minimal
 // valid rows.
 func (d *DB) SeedProjectForTest(ctx context.Context, cfgID, projectID string, nowMS int64) error {
