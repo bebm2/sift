@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -582,3 +583,89 @@ func (f *phaseForge) MergeChange(context.Context, forge.ProjectRef, string, stri
 }
 
 var _ forge.Client = (*phaseForge)(nil)
+
+// TestProduceReevaluationBuildsSucceededResult verifies the gate_re_evaluation
+// producer (storage.md §8.1) assembles the input outside the transaction, runs
+// the pure Gate function and returns canonical succeeded result bytes for a
+// ready/no_auto_merge verdict. It must not record an evaluation or emit a
+// successor; that is owned by the storage terminal protocol.
+func TestProduceReevaluationBuildsSucceededResult(t *testing.T) {
+	ctx := context.Background()
+	now := time.UnixMilli(1_700_000_000_000)
+	db, err := storage.Open(ctx, storage.OpenConfig{Path: filepath.Join(t.TempDir(), "sift.db"), BinaryVersion: "test", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.SeedProjectForTest(ctx, "cfg", "p", now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("a", 40)
+	if err := db.SeedGateCandidateForTest(ctx, "r", "p", "cfg", "42", now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetRunChangeHeadForTest(ctx, "r", "42", head); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedCertificationForTest(ctx, "feature", strings.Repeat("c", 64), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	client := phaseForge{path: "cmd/a.go", checks: "success"}
+	repo := initPolicyRepo(t)
+	brainCfg := config.Brain{Executable: "fake", DailyTokenLimit: 100, MaxInputBytes: 1 << 20, MaxRawOutputBytes: 1 << 20}
+	r := &gate.Reconciler{DB: db, Forge: &client, Brain: brain.NewShell(db, brainCfg, &brain.FakeProvider{Responses: []brain.FakeResponse{{ResultText: `{"risk_score":1,"risk_points":["small"],"rationale":"bounded"}`}}}, func() time.Time { return now }), ProjectID: "p", Project: forge.ProjectRef{Kind: forge.KindGitHub, Host: "github.com", ProjectKey: "org/repo-p"}, Repo: repo, Defaults: config.GateDefaults{ReviewPolicy: config.ReviewPolicyNever, RiskyReviewThreshold: 100, AutoMerge: false, ChecksPendingTimeout: time.Hour, FlakyRetryLimit: 1}, Attention: config.Attention{DayTimezone: "UTC", DailyQuota: config.DailyQuota{Low: 3, Normal: 3, High: 3}, MaxEscalations: 1}, Now: func() time.Time { return now }}
+
+	src, err := db.GateReevaluationSource(ctx, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := storage.GateReEvaluationPayload{
+		SourceInterruptID:    "int-01",
+		SourceCommandEventID: "event:gate:int-01:" + head + ":reeval:1",
+		SourceRunVersion:     src.Version,
+		RunID:                "r",
+		AttemptNo:            src.AttemptNo,
+		Generation:           src.Generation,
+		ChangeID:             "42",
+		HeadSHA:              head,
+		GateInputSnapshotID:  "snap-01",
+		GateInputHash:        strings.Repeat("a", 64),
+		GateVersion:          "gate/v1",
+		EffectBindingDigest:  strings.Repeat("b", 64),
+		OperationKey:         "gate:int-01:" + head + ":reeval:1",
+	}
+	result, err := r.ProduceReevaluation(ctx, payload, src)
+	if err != nil {
+		t.Fatalf("ProduceReevaluation: %v", err)
+	}
+	var env struct {
+		SchemaVersion int             `json:"schema_version"`
+		Kind          string          `json:"kind"`
+		Payload       json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(result, &env); err != nil {
+		t.Fatalf("result decode: %v", err)
+	}
+	if env.SchemaVersion != 1 || env.Kind != "succeeded" {
+		t.Fatalf("result envelope = %+v", env)
+	}
+	var p struct {
+		VerdictJSON string `json:"verdict_json"`
+	}
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.VerdictJSON, `"kind":"ready"`) || !strings.Contains(p.VerdictJSON, `"code":"no_auto_merge"`) {
+		t.Fatalf("verdict = %s, want ready/no_auto_merge", p.VerdictJSON)
+	}
+	// Re-canonicalizing the result must be byte-identical (the worker submits
+	// canonical bytes; storage rejects non-canonical).
+	var node any
+	if err := json.Unmarshal(result, &node); err != nil {
+		t.Fatal(err)
+	}
+	canon, _ := storage.CanonicalJSON(node)
+	if !bytes.Equal(canon, result) {
+		t.Fatalf("result is not canonical")
+	}
+}

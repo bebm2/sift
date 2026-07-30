@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 )
 
@@ -11,6 +12,31 @@ type GateCandidate struct {
 	RunID, ProjectID, TaskKind, ChangeID, BaseRef, HeadRef string
 	Version                                                int64
 	AttemptNo, Generation                                  int
+}
+
+// GateReevaluationSource resolves the frozen Run identity (project, task
+// kind, change, branch refs) for a gate_re_evaluation worker. It mirrors the
+// GateCandidate projection but for a single run, so the worker can route to
+// the matching Forge adapter and Gate reconciler without reconstructing these
+// refs from mutable state. A run missing its change or branch refs is not a
+// valid re-evaluation source.
+func (d *DB) GateReevaluationSource(ctx context.Context, runID string) (GateCandidate, error) {
+	if runID == "" {
+		return GateCandidate{}, errors.New("storage: run id is required")
+	}
+	var c GateCandidate
+	var changeID sql.NullString
+	err := d.db.QueryRowContext(ctx, `SELECT r.id,r.project_id,COALESCE(r.kind,''),r.change_id,r.version,
+		COALESCE((SELECT a.base_ref FROM attempts a WHERE a.run_id=r.id ORDER BY a.attempt_no DESC LIMIT 1),''),
+		COALESCE((SELECT a.branch_name FROM attempts a WHERE a.run_id=r.id ORDER BY a.attempt_no DESC LIMIT 1),''),
+		COALESCE((SELECT a.attempt_no FROM attempts a WHERE a.run_id=r.id ORDER BY a.attempt_no DESC LIMIT 1),0),
+		COALESCE((SELECT a.generation FROM attempts a WHERE a.run_id=r.id ORDER BY a.attempt_no DESC LIMIT 1),0)
+		FROM runs r WHERE r.id=?`, runID).Scan(&c.RunID, &c.ProjectID, &c.TaskKind, &changeID, &c.Version, &c.BaseRef, &c.HeadRef, &c.AttemptNo, &c.Generation)
+	if err != nil {
+		return GateCandidate{}, err
+	}
+	c.ChangeID = changeID.String
+	return c, nil
 }
 
 // FreezeGateChangeHead records the exact Change head that Gate is about to

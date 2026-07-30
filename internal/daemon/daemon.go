@@ -24,23 +24,24 @@ import (
 )
 
 type Daemon struct {
-	DB          *storage.DB
-	Pollers     []*intake.Poller
-	Evaluators  []*intake.T1Evaluator
-	Reconcilers []*intake.Reconciler
-	Comments    []*forgeworker.CommentWorker
-	Changes     []*forgeworker.ChangeWorker
-	Merges      []*forgeworker.MergeWorker
-	Channels    []*channelworker.Worker
-	Alerts      *forgeworker.AlertWorker
-	CommandAcks *forgeworker.CommandAckWorker
-	Successes   []*gate.SuccessReconciler
-	Gates       []*gate.Reconciler
-	Replies     []*intake.ReplyConsumer
-	Launch      *launchworker.Worker
-	Now         func() time.Time
-	intakeMu    sync.Mutex
-	outboxMu    sync.Mutex
+	DB                *storage.DB
+	Pollers           []*intake.Poller
+	Evaluators        []*intake.T1Evaluator
+	Reconcilers       []*intake.Reconciler
+	Comments          []*forgeworker.CommentWorker
+	Changes           []*forgeworker.ChangeWorker
+	Merges            []*forgeworker.MergeWorker
+	Channels          []*channelworker.Worker
+	Alerts            *forgeworker.AlertWorker
+	CommandAcks       *forgeworker.CommandAckWorker
+	GateReEvaluations *forgeworker.GateReEvaluationWorker
+	Successes         []*gate.SuccessReconciler
+	Gates             []*gate.Reconciler
+	Replies           []*intake.ReplyConsumer
+	Launch            *launchworker.Worker
+	Now               func() time.Time
+	intakeMu          sync.Mutex
+	outboxMu          sync.Mutex
 }
 
 // Assemble probes and records auto-merge capability, then creates one
@@ -129,6 +130,28 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 		// (CommandAckV1) carries no forge routing; the worker resolves the
 		// immutable target from the append-only command receipt.
 		d.CommandAcks = &forgeworker.CommandAckWorker{DB: db, Clients: forgeClients, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:command_ack"}
+	}
+	// gate_re_evaluation resolves the run's project, then delegates Forge/Brain
+	// assembly to the matching Gate reconciler (storage.md §8.1). It is wired
+	// after the per-project reconcilers are known.
+	projectReconcilers := map[string]*gate.Reconciler{}
+	for _, g := range d.Gates {
+		projectReconcilers[g.ProjectID] = g
+	}
+	d.GateReEvaluations = &forgeworker.GateReEvaluationWorker{
+		DB: db, Now: now, Lease: cfg.Outbox.LeaseTTL, WorkerID: "siftd:gate_re_evaluation",
+		Produce: func(ctx context.Context, payload storage.GateReEvaluationPayload) ([]byte, error) {
+			src, err := db.GateReevaluationSource(ctx, payload.RunID)
+			if err != nil {
+				return forgeworker.GateReEvaluationFailedResult("gate_input_assembly_failed", map[string]string{"code": "schema_invalid", "field": "run_id"}), nil
+			}
+			rec := projectReconcilers[src.ProjectID]
+			if rec == nil {
+				return forgeworker.GateReEvaluationFailedResult("gate_input_assembly_failed", map[string]string{"code": "schema_invalid", "field": "project_id"}), nil
+			}
+			return rec.ProduceReevaluation(ctx, payload, src)
+		},
+		Complete: db.CompleteGateReEvaluation,
 	}
 	return d, nil
 }
@@ -232,6 +255,11 @@ func (d *Daemon) OutboxTick(ctx context.Context) error {
 	if d.CommandAcks != nil {
 		if err := d.CommandAcks.RunOnce(ctx); err != nil {
 			return fmt.Errorf("command_ack: %w", err)
+		}
+	}
+	if d.GateReEvaluations != nil {
+		if err := d.GateReEvaluations.RunOnce(ctx); err != nil {
+			return fmt.Errorf("gate_re_evaluation: %w", err)
 		}
 	}
 	if d.Launch != nil {

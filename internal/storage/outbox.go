@@ -449,6 +449,14 @@ func digestJSON(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
 }
+
+// CanonicalJSON returns the canonical (sorted-key, no HTML escape, no trailing
+// newline) JSON encoding of v. It is the encoding used for every closed
+// outbox/gate payload and digest, so workers build result bytes with it.
+func CanonicalJSON(v any) ([]byte, error) { return canonicalJSON(v) }
+
+// SHA256Hex returns the lowercase hex SHA-256 of b.
+func SHA256Hex(b []byte) string { return sha256Hex(b) }
 func validOperationKind(k OperationKind) bool {
 	switch k {
 	case OperationForgeComment, OperationForgeLabels, OperationCreateChange, OperationMergeChange, OperationChannelPublish, OperationLaunchAgent, OperationCommandAck, OperationGateReEvaluation, OperationForgeAlert:
