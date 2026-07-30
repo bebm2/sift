@@ -117,6 +117,47 @@ func TestAlertWorkerClassifiesForgeFailures(t *testing.T) {
 	}
 }
 
+func TestAlertWorkerRetryReclaimUsesDistinctStableChargeKeys(t *testing.T) {
+	ctx := context.Background()
+	db := openWorkerDB(t)
+	enqueueChannelAlert(t, db, "change")
+	charger := &alertRecordingCharger{}
+	adapter, err := forge.NewProductionAdapter(forge.KindGitHub, "gh", func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if strings.Contains(strings.Join(args, " "), "--method POST") {
+			return []byte(`{"id":1}`), nil, nil
+		}
+		return []byte(`[]`), nil, nil
+	}, charger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := AlertWorker{DB: db, Client: adapter, WorkerID: "alert-1", Lease: time.Second, Now: func() time.Time { return time.UnixMilli(alertNow) }, Complete: func(context.Context, storage.ClaimedOperation, storage.CompleteOutcome) error {
+		return errors.New("crash after remote delivery")
+	}}
+	if err := first.RunOnce(ctx); err == nil {
+		t.Fatal("first completion must leave the attempt leased")
+	}
+	if len(charger.keys) != 2 {
+		t.Fatalf("first attempt charge keys = %#v, want lookup and comment", charger.keys)
+	}
+	firstBase := strings.TrimSuffix(charger.keys[0], ":1")
+	if charger.keys[1] != firstBase+":2" {
+		t.Fatalf("first attempt charge keys = %#v, want stable sequence", charger.keys)
+	}
+
+	second := AlertWorker{DB: db, Client: adapter, WorkerID: "alert-2", Lease: time.Second, Now: func() time.Time { return time.UnixMilli(alertNow + 2_000) }}
+	if err := second.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(charger.keys) != 4 {
+		t.Fatalf("charge keys after reclaim = %#v, want lookup and comment", charger.keys)
+	}
+	secondBase := strings.TrimSuffix(charger.keys[2], ":1")
+	if !regexp.MustCompile(`^forge-call:[0-9a-f]{32}$`).MatchString(secondBase) || secondBase == firstBase || charger.keys[3] != secondBase+":2" {
+		t.Fatalf("reclaimed attempt charge key = %#v, want distinct stable attempt base", charger.keys)
+	}
+}
+
 func TestAlertWorkerMarkerReplayDoesNotResend(t *testing.T) {
 	ctx := context.Background()
 	db := openWorkerDB(t)

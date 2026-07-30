@@ -2,9 +2,38 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestReportQuotaExhaustionProducesFrozenChannelDelivery(t *testing.T) {
+	db, ctx := seedReportQuotaRun(t, 1)
+	channelConfig := `{"attention":{"channels":[{"id":"ops","enabled":true,"type":"webhook","target_ref":"secret_ref:OPS","capabilities":["voice"],"renderer":"plain-v1","default":true}],"daily_quota":{"low":3,"normal":5,"high":5},"day_timezone":"UTC","daily_summary_at":"09:00","max_escalations":0,"critical_fuse":{"window":900000,"total_limit":5,"per_run_limit":2}},"report":{"burst":8,"events_per_minute":60,"interrupts_per_run_daily_quota":1}}`
+	mustExec(t, db, `INSERT INTO config_snapshots(id,config_hash,schema_version,canonical_json,source_present,loaded_at_ms,binary_version) VALUES ('cfg-report-channels','report-hash-channels',1,?,1,?, 'test')`, channelConfig, testNow)
+	mustExec(t, db, `UPDATE runs SET config_snapshot_id='cfg-report-channels' WHERE id='run'`)
+	if err := submitBlocker(ctx, db, "0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	if err := submitBlocker(ctx, db, "1123456789abcdef0123456789abcdef"); err == nil {
+		t.Fatal("quota exhaustion unexpectedly succeeded")
+	}
+	var payload string
+	if err := db.db.QueryRowContext(ctx, `SELECT payload_json FROM outbox_operations WHERE kind='channel_publish'`).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatal(err)
+	}
+	channel, ok := got["channel"].(map[string]any)
+	if !ok || channel["id"] != "ops" || channel["target_ref"] != "secret_ref:OPS" || channel["type"] != "webhook" {
+		t.Fatalf("frozen channel payload = %#v", got["channel"])
+	}
+	if got["delivery_id"] == "" || got["interrupt_id"] == "" || got["nonce"] == "" {
+		t.Fatalf("incomplete report-to-channel payload = %#v", got)
+	}
+}
 
 func TestReportQuotaCommandRetainsFrozenChannels(t *testing.T) {
 	cfg := reportRuntimeConfig{}
@@ -219,6 +248,45 @@ func TestSealedBatchMemberAuthorityCannotBeRetargeted(t *testing.T) {
 	}
 	if _, err := db.db.ExecContext(ctx, `DELETE FROM attention_batch_members WHERE batch_id=? AND interrupt_id=?`, batch, in.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("member delete error = %v", err)
+	}
+}
+
+func TestSealedBatchPayloadDigestAndAuthoritySurviveReseal(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+		t.Fatal(err)
+	}
+	at := int64(testNow + 1)
+	cmd := t6Command(testNow)
+	cmd.AttentionDailyQuota = map[InterruptSeverity]int{SeverityLow: 0, SeverityNormal: 0, SeverityHigh: 0}
+	cmd.Channels = []InterruptChannel{{ID: "ops", Type: "webhook", TargetRef: "secret_ref:OPS", Renderer: "plain-v1", Capabilities: []string{"visual"}}}
+	cmd.BatchAtMS = &at
+	if _, err := emitTestInterrupt(t, ctx, db, cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PrepareDueAttentionBatches(ctx, testNow+48*60*60*1000); err != nil {
+		t.Fatal(err)
+	}
+	var payload, digest, key string
+	if err := db.db.QueryRowContext(ctx, `SELECT payload_json,payload_digest,operation_key FROM attention_batches WHERE state='sealed'`).Scan(&payload, &digest, &key); err != nil {
+		t.Fatal(err)
+	}
+	if digest != digestJSON([]byte(payload)) || key == "" {
+		t.Fatalf("sealed payload identity = %q/%q", digest, key)
+	}
+	if err := db.PrepareDueAttentionBatches(ctx, testNow+48*60*60*1000+1); err != nil {
+		t.Fatal(err)
+	}
+	var payloadAgain, digestAgain string
+	if err := db.db.QueryRowContext(ctx, `SELECT payload_json,payload_digest FROM attention_batches WHERE state='sealed'`).Scan(&payloadAgain, &digestAgain); err != nil {
+		t.Fatal(err)
+	}
+	if payloadAgain != payload || digestAgain != digest {
+		t.Fatal("reseal changed immutable batch payload")
 	}
 }
 
