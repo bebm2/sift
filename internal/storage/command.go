@@ -303,7 +303,7 @@ func (d *DB) applyCommandEffectTx(ctx context.Context, tx *sql.Tx, env command.C
 	case command.ActionHold:
 		return d.commandHoldTx(ctx, tx, env, c, nowMS, nextNonce)
 	case command.ActionAsk:
-		return d.commandAskTx(ctx, tx, env, c, nowMS)
+		return d.commandAskTx(ctx, tx, env, c, row, nowMS, eventID)
 	case command.ActionApprove:
 		return d.commandApproveTx(ctx, tx, env, c, row, nowMS, eventID)
 	case command.ActionRetry:
@@ -353,17 +353,86 @@ func (d *DB) commandHoldTx(ctx context.Context, tx *sql.Tx, env command.CommandE
 	return err
 }
 
-func (d *DB) commandAskTx(ctx context.Context, tx *sql.Tx, env command.CommandEventEnvelopeV1, c command.CompiledCommandV1, nowMS int64) error {
-	// ask: same-tx task-layer clarification + Ledger semantic material. The Run
-	// stays waiting_human; the clarification is recorded, not auto-promoted to
-	// project/global Context.
+func (d *DB) commandAskTx(ctx context.Context, tx *sql.Tx, env command.CommandEventEnvelopeV1, c command.CompiledCommandV1, row *commandInterruptRow, nowMS int64, eventID string) error {
+	if row == nil {
+		return ErrRejectedStale
+	}
+	binding, err := loadInterruptEffectBindingTx(ctx, tx, c.InterruptID)
+	if err != nil {
+		return err
+	}
+	switch InterruptReason(row.Reason) {
+	case InterruptAgentBlocked:
+		// agent_blocked|ask full contract (command.md §4): insert Task Spec
+		// snapshot sourced by the command event, close/responded, terminalize
+		// the bound blocked attempt and create the next attempt/claim/launch.
+		return d.commandAgentBlockedAskTx(ctx, tx, env, c, row, binding, nowMS, eventID)
+	}
+	// ask is exposed only by agent_blocked (compile rejects every other
+	// reason's ask as rejected_option). A non-canonical ask that still reaches
+	// here is not wired: stay honest rather than inventing a close-only effect.
+	return ErrCommandEffectNotWired
+}
+
+// commandAgentBlockedAskTx wires the agent_blocked|ask row (command.md §4 /
+// storage.md §5.1, §12.3). It writes HumanDecision(ask) + the unmodified
+// SemanticMaterial, inserts an append-only Task Spec snapshot sourced by the
+// command event and updates the Run's current pointer without overwriting the
+// historical snapshot, closes the Interrupt responded, terminalizes the bound
+// blocked attempt and spawns the next pending attempt/claim/launch from the
+// clarification snapshot, then queues the Run. The clarification is task-layer
+// only; it is never auto-promoted to project/global Context.
+func (d *DB) commandAgentBlockedAskTx(ctx context.Context, tx *sql.Tx, env command.CommandEventEnvelopeV1, c command.CompiledCommandV1, row *commandInterruptRow, binding commandEffectBinding, nowMS int64, eventID string) error {
+	if binding.RunID == "" || binding.AttemptNo < 1 || binding.Generation < 1 {
+		return ErrCommandEffectNotWired
+	}
 	if _, err := recordHumanDecisionTx(ctx, tx, RecordHumanDecisionCmd{
 		Action: DecisionAsk, CommandEventID: env.EventKey, InterruptID: c.InterruptID,
 		SemanticMaterial: c.AskText, NowMS: nowMS,
 	}); err != nil {
 		return err
 	}
-	return closeInterruptTx(ctx, tx, c.InterruptID, c.ExpectedInterruptVersion, c.Nonce, "responded", nowMS)
+	// Append-only Task Spec snapshot sourced by the command event; update the
+	// Run's current pointer without overwriting the historical snapshot.
+	snapshotID, err := insertClarificationTaskSpecTx(ctx, tx, row.RunID, eventID, c.AskText, nowMS)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET current_task_spec_id=?,updated_at_ms=? WHERE id=?`, snapshotID, nowMS, row.RunID); err != nil {
+		return err
+	}
+	if err := closeInterruptTx(ctx, tx, c.InterruptID, c.ExpectedInterruptVersion, c.Nonce, "responded", nowMS); err != nil {
+		return err
+	}
+	// Terminalize the bound blocked attempt and spawn the next pending
+	// attempt/claim/launch from the clarification snapshot.
+	if _, err := d.spawnNextAttemptTx(ctx, tx, row.RunID, binding.AttemptNo, binding.Generation, nowMS, snapshotID); err != nil {
+		return err
+	}
+	return d.transition(ctx, tx, row.RunID, row.RunVersion, DomainCommand{To: RunQueued, Source: SourceOperator, Actor: actorName(env), OccurredAtMS: nowMS})
+}
+
+// insertClarificationTaskSpecTx inserts an append-only Task Spec snapshot
+// sourced by the command event for an agent_blocked|ask clarification
+// (storage.md §5.1). It never overwrites the historical snapshot: prior
+// attempts keep the snapshot they started from. The canonical body is the
+// task-layer clarification only; project/global Context is never promoted.
+// Returns the new snapshot id.
+func insertClarificationTaskSpecTx(ctx context.Context, tx *sql.Tx, runID, sourceEventID, clarification string, nowMS int64) (string, error) {
+	body, err := canonicalJSON(map[string]any{"schema_version": 1, "clarification": clarification})
+	if err != nil {
+		return "", err
+	}
+	var maxVersion int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM task_spec_snapshots WHERE run_id=?`, runID).Scan(&maxVersion); err != nil {
+		return "", err
+	}
+	id := newID()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_spec_snapshots (id,run_id,version,schema_version,canonical_json,content_digest,source_event_id,created_at_ms) VALUES (?,?,?,?,?,?,?,?)`,
+		id, runID, maxVersion+1, 1, string(body), sha256Hex(body), sourceEventID, nowMS); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (d *DB) commandApproveTx(ctx context.Context, tx *sql.Tx, env command.CommandEventEnvelopeV1, c command.CompiledCommandV1, row *commandInterruptRow, nowMS int64, eventID string) error {
@@ -495,7 +564,7 @@ func (d *DB) commandNewAttemptRetryTx(ctx context.Context, tx *sql.Tx, env comma
 	if err := closeInterruptTx(ctx, tx, c.InterruptID, c.ExpectedInterruptVersion, c.Nonce, "responded", nowMS); err != nil {
 		return err
 	}
-	if _, err := d.spawnNextAttemptTx(ctx, tx, row.RunID, binding.AttemptNo, binding.Generation, nowMS); err != nil {
+	if _, err := d.spawnNextAttemptTx(ctx, tx, row.RunID, binding.AttemptNo, binding.Generation, nowMS, ""); err != nil {
 		return err
 	}
 	return d.transition(ctx, tx, row.RunID, row.RunVersion, DomainCommand{To: RunQueued, Source: SourceOperator, Actor: actorName(env), OccurredAtMS: nowMS})
@@ -504,9 +573,12 @@ func (d *DB) commandNewAttemptRetryTx(ctx context.Context, tx *sql.Tx, env comma
 // spawnNextAttemptTx moves the bound attempt out of the live set (so the
 // single-live-phase index admits its successor) and creates the next pending
 // attempt, its claim and its launch operation from the bound attempt's frozen
-// assignment. It is the shared terminalize+spawn helper for human retry; the
-// caller owns the Run transition and the human-decision Ledger entry.
-func (d *DB) spawnNextAttemptTx(ctx context.Context, tx *sql.Tx, runID string, boundAttemptNo, boundGeneration int, nowMS int64) (int, error) {
+// assignment. It is the shared terminalize+spawn helper for human retry and
+// agent_blocked ask; the caller owns the Run transition and the human-decision
+// Ledger entry. taskSpecSnapshotID is empty for retry (the new attempt reuses
+// the bound attempt's frozen snapshot) or the clarification snapshot id for ask
+// (the new attempt starts from the command-event-sourced Task Spec).
+func (d *DB) spawnNextAttemptTx(ctx context.Context, tx *sql.Tx, runID string, boundAttemptNo, boundGeneration int, nowMS int64, taskSpecSnapshotID string) (int, error) {
 	if boundAttemptNo < 1 || boundGeneration < 1 {
 		return 0, ErrRejectedStale
 	}
@@ -514,8 +586,17 @@ func (d *DB) spawnNextAttemptTx(ctx context.Context, tx *sql.Tx, runID string, b
 		return 0, err
 	}
 	newNo := boundAttemptNo + 1
-	if _, err := tx.ExecContext(ctx, `INSERT INTO attempts (run_id,attempt_no,phase,generation,backend,agent_id,task_spec_snapshot_id,worktree_path,branch_name,base_ref,base_sha,isolation_state,created_at_ms,updated_at_ms) SELECT run_id,?,'pending',1,backend,agent_id,task_spec_snapshot_id,worktree_path,branch_name,base_ref,base_sha,'none',?,? FROM attempts WHERE run_id=? AND attempt_no=?`, newNo, nowMS, nowMS, runID, boundAttemptNo); err != nil {
-		return 0, err
+	if taskSpecSnapshotID == "" {
+		// Retry: the new attempt reuses the bound attempt's frozen snapshot
+		// (no Task Spec change).
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attempts (run_id,attempt_no,phase,generation,backend,agent_id,task_spec_snapshot_id,worktree_path,branch_name,base_ref,base_sha,isolation_state,created_at_ms,updated_at_ms) SELECT run_id,?,'pending',1,backend,agent_id,task_spec_snapshot_id,worktree_path,branch_name,base_ref,base_sha,'none',?,? FROM attempts WHERE run_id=? AND attempt_no=?`, newNo, nowMS, nowMS, runID, boundAttemptNo); err != nil {
+			return 0, err
+		}
+	} else {
+		// Ask: the new attempt starts from the clarification snapshot.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attempts (run_id,attempt_no,phase,generation,backend,agent_id,task_spec_snapshot_id,worktree_path,branch_name,base_ref,base_sha,isolation_state,created_at_ms,updated_at_ms) SELECT run_id,?,'pending',1,backend,agent_id,?,worktree_path,branch_name,base_ref,base_sha,'none',?,? FROM attempts WHERE run_id=? AND attempt_no=?`, newNo, taskSpecSnapshotID, nowMS, nowMS, runID, boundAttemptNo); err != nil {
+			return 0, err
+		}
 	}
 	key := LaunchOperationKey(runID, newNo, 1)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_claims (run_id,attempt_no,generation,launch_operation_key,created_at_ms,updated_at_ms) VALUES (?,?,1,?,?,?)`, runID, newNo, key, nowMS, nowMS); err != nil {
