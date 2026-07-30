@@ -4,9 +4,127 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
+
+// advanceOutcome is the per-cell state vector asserted by the AdvanceInterrupt
+// outcome matrices (interrupt.md §8.2 point 1–3, §9.2). Nullable string columns
+// are read via COALESCE so the empty value denotes NULL; next_dispatch_at_ms is
+// the only nullable integer and is compared as a sql.NullInt64.
+type advanceOutcome struct {
+	status, dispatchState, delivery, severity string
+	held, closeReason                         string
+	version, escalation, expiresAt            int64
+	nonce                                     string
+	nextDispatch                              sql.NullInt64
+	admissions, charges                       int
+	channelOps, members, authority            int
+}
+
+func readAdvanceOutcome(t *testing.T, db *DB, id string) advanceOutcome {
+	t.Helper()
+	var o advanceOutcome
+	if err := db.db.QueryRow(`SELECT status,dispatch_state,delivery,severity,COALESCE(held_reason,''),COALESCE(close_reason,''),version,nonce,escalation_count,expires_at_ms,next_dispatch_at_ms FROM interrupts WHERE id=?`, id).Scan(&o.status, &o.dispatchState, &o.delivery, &o.severity, &o.held, &o.closeReason, &o.version, &o.nonce, &o.escalation, &o.expiresAt, &o.nextDispatch); err != nil {
+		t.Fatalf("read outcome: %v", err)
+	}
+	for _, q := range []struct {
+		sql string
+		dst *int
+	}{
+		{`SELECT count(*) FROM attention_admissions WHERE interrupt_id=?`, &o.admissions},
+		{`SELECT count(*) FROM attention_admissions WHERE interrupt_id=? AND attention_charge_entry_id IS NOT NULL`, &o.charges},
+		{`SELECT count(*) FROM outbox_operations WHERE kind='channel_publish' AND interrupt_id=?`, &o.channelOps},
+		{`SELECT count(*) FROM attention_batch_members WHERE interrupt_id=?`, &o.members},
+		{`SELECT count(*) FROM attention_batch_member_authority WHERE interrupt_id=?`, &o.authority},
+	} {
+		if err := db.db.QueryRow(q.sql, id).Scan(q.dst); err != nil {
+			t.Fatalf("read accounting: %v", err)
+		}
+	}
+	return o
+}
+
+// assertAdvanceOutcome compares the full per-cell state vector. prevNonce plus
+// nonceRotated express the §8.2 invariant that only escalation rotates the
+// nonce: hold/auto-reject bump the version but keep the authority nonce.
+func assertAdvanceOutcome(t *testing.T, got, want advanceOutcome, prevNonce string, nonceRotated bool) {
+	t.Helper()
+	var problems []string
+	add := func(label, gotV, wantV string) {
+		if gotV != wantV {
+			problems = append(problems, fmt.Sprintf("%s=%q want %q", label, gotV, wantV))
+		}
+	}
+	add("status", got.status, want.status)
+	add("dispatch_state", got.dispatchState, want.dispatchState)
+	add("delivery", got.delivery, want.delivery)
+	add("severity", got.severity, want.severity)
+	add("held_reason", got.held, want.held)
+	add("close_reason", got.closeReason, want.closeReason)
+	if got.version != want.version {
+		problems = append(problems, fmt.Sprintf("version=%d want %d", got.version, want.version))
+	}
+	if got.escalation != want.escalation {
+		problems = append(problems, fmt.Sprintf("escalation_count=%d want %d", got.escalation, want.escalation))
+	}
+	if got.expiresAt != want.expiresAt {
+		problems = append(problems, fmt.Sprintf("expires_at_ms=%d want %d", got.expiresAt, want.expiresAt))
+	}
+	if nonceRotated {
+		if got.nonce == prevNonce || got.nonce == "" {
+			problems = append(problems, fmt.Sprintf("nonce=%q not rotated from %q", got.nonce, prevNonce))
+		}
+	} else if got.nonce != prevNonce {
+		problems = append(problems, fmt.Sprintf("nonce=%q want unchanged %q", got.nonce, prevNonce))
+	}
+	if got.nextDispatch != want.nextDispatch {
+		problems = append(problems, fmt.Sprintf("next_dispatch_at_ms=%v want %v", got.nextDispatch, want.nextDispatch))
+	}
+	if got.admissions != want.admissions {
+		problems = append(problems, fmt.Sprintf("admissions=%d want %d", got.admissions, want.admissions))
+	}
+	if got.charges != want.charges {
+		problems = append(problems, fmt.Sprintf("charges=%d want %d", got.charges, want.charges))
+	}
+	if got.channelOps != want.channelOps {
+		problems = append(problems, fmt.Sprintf("channel_operations=%d want %d", got.channelOps, want.channelOps))
+	}
+	if got.members != want.members {
+		problems = append(problems, fmt.Sprintf("batch_members=%d want %d", got.members, want.members))
+	}
+	if got.authority != want.authority {
+		problems = append(problems, fmt.Sprintf("batch_authority=%d want %d", got.authority, want.authority))
+	}
+	if len(problems) > 0 {
+		t.Fatalf("advance outcome mismatch:\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
+// assertStaleReplayRejected re-runs an advance with a stale CAS (the one the
+// supervisor just consumed) and asserts the single-CAS port rejects it and
+// mutates nothing (interrupt.md §8.2).
+func assertStaleReplayRejected(t *testing.T, db *DB, id string, staleVersion int64, staleNonce string, now int64) {
+	t.Helper()
+	pre := readAdvanceOutcome(t, db, id)
+	ok, err := db.AdvanceInterrupt(context.Background(), AdvanceInterruptCmd{InterruptID: id, ExpectedVersion: staleVersion, ExpectedNonce: staleNonce, Kind: AdvanceExpiry, NowMS: now})
+	if ok || err != ErrRejectedStale {
+		t.Fatalf("stale replay = %v, %v, want false/ErrRejectedStale", ok, err)
+	}
+	if post := readAdvanceOutcome(t, db, id); post != pre {
+		t.Fatalf("stale replay mutated state:\n  pre=%+v\n  post=%+v", pre, post)
+	}
+}
+
+func mustNextSummary(t *testing.T, now int64, zone, clock string) int64 {
+	t.Helper()
+	at, ok := NextDailySummaryAt(now, zone, clock)
+	if !ok {
+		t.Fatalf("next summary at %d (%s/%s)", now, zone, clock)
+	}
+	return at
+}
 
 func TestAdvanceInterruptPostEscalationSummaryExpiryBoundaries(t *testing.T) {
 	base := time.UnixMilli(testNow).UTC()
@@ -67,7 +185,7 @@ func TestAdvanceInterruptPostEscalationSummaryExpiryBoundaries(t *testing.T) {
 			} else if due.Valid {
 				t.Fatalf("held interrupt retained due %d", due.Int64)
 			}
-			var admissions, charges, operations int
+			var admissions, charges, operations, members, authority int
 			if err := db.db.QueryRow(`SELECT count(*) FROM attention_admissions WHERE interrupt_id=?`, in.ID).Scan(&admissions); err != nil {
 				t.Fatal(err)
 			}
@@ -77,8 +195,14 @@ func TestAdvanceInterruptPostEscalationSummaryExpiryBoundaries(t *testing.T) {
 			if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='channel_publish' AND interrupt_id=?`, in.ID).Scan(&operations); err != nil {
 				t.Fatal(err)
 			}
-			if admissions != 1 || charges != 1 || operations != 0 {
-				t.Fatalf("accounting admissions/charges/channel operations=%d/%d/%d", admissions, charges, operations)
+			if err := db.db.QueryRow(`SELECT count(*) FROM attention_batch_members WHERE interrupt_id=?`, in.ID).Scan(&members); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.db.QueryRow(`SELECT count(*) FROM attention_batch_member_authority WHERE interrupt_id=?`, in.ID).Scan(&authority); err != nil {
+				t.Fatal(err)
+			}
+			if admissions != 1 || charges != 1 || operations != 0 || members != 0 || authority != 0 {
+				t.Fatalf("accounting admissions/charges/operations/members/authority=%d/%d/%d/%d/%d", admissions, charges, operations, members, authority)
 			}
 		})
 	}
@@ -106,46 +230,74 @@ func TestAdvanceInterruptEscalationCountsReuseDowngrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []InterruptSeverity{SeverityNormal, SeverityHigh}
-	for step, severity := range want {
-		var version int64
-		var nonce string
+	var nonce string
+	if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&nonce); err != nil {
+		t.Fatal(err)
+	}
+	// Initial frozen dispatch: low (downgraded from normal) batch at the frozen
+	// summary due, one charged admission and no member/authority yet.
+	assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+		status: "open", dispatchState: "ready", delivery: "batch", severity: "low",
+		version: 1, escalation: 0, expiresAt: testNow + expiry, nextDispatch: sql.NullInt64{Int64: batchAt, Valid: true},
+		admissions: 1, charges: 1, channelOps: 0, members: 0, authority: 0,
+	}, nonce, false)
+	steps := []struct {
+		now          int64
+		severity     InterruptSeverity
+		delivery     string
+		escalation   int64
+		nonceRotated bool
+		due          sql.NullInt64
+	}{
+		{testNow + expiry, SeverityNormal, "batch", 1, true, sql.NullInt64{Int64: mustNextSummary(t, testNow+expiry, "UTC", "09:00"), Valid: true}},
+		{testNow + 2*expiry, SeverityHigh, "immediate", 2, true, sql.NullInt64{Int64: testNow + 2*expiry, Valid: true}},
+	}
+	var version int64 = 1
+	for step, s := range steps {
 		if err := db.db.QueryRow(`SELECT version,nonce FROM interrupts WHERE id=?`, in.ID).Scan(&version, &nonce); err != nil {
 			t.Fatal(err)
 		}
-		if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: version, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: testNow + int64(step+1)*expiry}); err != nil || !ok {
+		if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: version, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: s.now}); err != nil || !ok {
 			t.Fatalf("advance %d = %v, %v", step+1, ok, err)
 		}
-		var got string
-		if err := db.db.QueryRow(`SELECT severity FROM interrupts WHERE id=?`, in.ID).Scan(&got); err != nil || InterruptSeverity(got) != severity {
-			t.Fatalf("severity after %d = %q, %v; want %q", step+1, got, err, severity)
-		}
+		// Each escalation reuses the frozen downgrade, rotates nonce/version,
+		// advances expiry and recomputes the dispatch due without borrowing a
+		// second charge, creating a member or pre-publishing a channel op.
+		assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+			status: "open", dispatchState: "ready", delivery: s.delivery, severity: string(s.severity),
+			version: version + 1, escalation: s.escalation, expiresAt: s.now + expiry, nextDispatch: s.due,
+			admissions: 1, charges: 1, channelOps: 0, members: 0, authority: 0,
+		}, nonce, s.nonceRotated)
+		// The CAS the supervisor just consumed is now stale; replaying it must
+		// not re-escalate, re-charge or rotate the nonce again.
+		assertStaleReplayRejected(t, db, in.ID, version, nonce, s.now+1)
 	}
-	var version int64
-	var nonce string
+	// Reaching the cap holds without escalating past it or rotating the nonce.
 	if err := db.db.QueryRow(`SELECT version,nonce FROM interrupts WHERE id=?`, in.ID).Scan(&version, &nonce); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: version, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: testNow + 3*expiry}); err != nil || !ok {
 		t.Fatalf("max advance = %v, %v", ok, err)
 	}
-	var state, held string
-	if err := db.db.QueryRow(`SELECT dispatch_state,held_reason FROM interrupts WHERE id=?`, in.ID).Scan(&state, &held); err != nil || state != "held" || held != "max_escalations" {
-		t.Fatalf("max result = %s/%s, %v", state, held, err)
-	}
+	assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+		status: "open", dispatchState: "held", delivery: "held", severity: "high", held: "max_escalations",
+		version: version + 1, escalation: 2, expiresAt: testNow + 3*expiry, nextDispatch: sql.NullInt64{},
+		admissions: 1, charges: 1, channelOps: 0, members: 0, authority: 0,
+	}, nonce, false)
 }
 
 func TestAdvanceInterruptExpiryAndMaxOutcomeMatrix(t *testing.T) {
 	cases := []struct {
-		name                 string
-		onExpire, onMax      ExpireAction
-		max                  int
-		wantStatus, wantHeld string
+		name                              string
+		onExpire, onMax                   ExpireAction
+		max                               int
+		wantStatus, wantState             string
+		wantHeld, wantClose, wantDelivery string
 	}{
-		{"expire hold", ExpireHold, ExpireHold, 1, "open", "expiry"},
-		{"expire auto reject", ExpireAutoReject, ExpireHold, 1, "closed", ""},
-		{"max hold", ExpireEscalate, ExpireHold, 0, "open", "max_escalations"},
-		{"max auto reject", ExpireEscalate, ExpireAutoReject, 0, "closed", ""},
+		{"expire hold", ExpireHold, ExpireHold, 1, "open", "held", "expiry", "", "held"},
+		{"expire auto reject", ExpireAutoReject, ExpireHold, 1, "closed", "batched", "", "expired_auto_reject", "immediate"},
+		{"max hold", ExpireEscalate, ExpireHold, 0, "open", "held", "max_escalations", "", "held"},
+		{"max auto reject", ExpireEscalate, ExpireAutoReject, 0, "closed", "batched", "", "expired_auto_reject", "immediate"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,16 +326,101 @@ func TestAdvanceInterruptExpiryAndMaxOutcomeMatrix(t *testing.T) {
 			if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: 1, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: testNow + 10}); err != nil || !ok {
 				t.Fatalf("advance = %v, %v", ok, err)
 			}
-			var status, held, closeReason string
-			if err := db.db.QueryRow(`SELECT status,COALESCE(held_reason,''),COALESCE(close_reason,'') FROM interrupts WHERE id=?`, in.ID).Scan(&status, &held, &closeReason); err != nil {
+			// Per-cell full state vector: hold/auto-reject bump the version but
+			// never rotate the nonce, escalate nothing, leave expiry frozen and
+			// borrow no second charge, member or channel operation.
+			assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+				status: tc.wantStatus, dispatchState: tc.wantState, delivery: tc.wantDelivery, severity: "normal",
+				held: tc.wantHeld, closeReason: tc.wantClose,
+				version: 2, escalation: 0, expiresAt: testNow + 10, nextDispatch: sql.NullInt64{},
+				admissions: 1, charges: 1, channelOps: 1, members: 0, authority: 0,
+			}, nonce, false)
+			assertStaleReplayRejected(t, db, in.ID, 1, nonce, testNow+20)
+		})
+	}
+}
+
+// TestAdvanceInterruptReasonOutcomeMatrix closes the allowed/prohibited reason
+// × on-expire/on-max table (interrupt.md §8.2 point 3). startup_stall forbids
+// auto_reject on both clocks at creation and, even at the escalation cap, can
+// only end open+held; an allowed reason honours hold/escalate/auto_reject.
+func TestAdvanceInterruptReasonOutcomeMatrix(t *testing.T) {
+	const expiry = int64(48 * 60 * 60 * 1000)
+	cases := []struct {
+		name                              string
+		reason                            InterruptReason
+		onExpire, onMax                   ExpireAction
+		max                               int
+		rejectEmit                        bool
+		wantStatus, wantState             string
+		wantHeld, wantClose, wantDelivery string
+		wantSeverity                      string
+	}{
+		{"allowed expire hold", InterruptCodeReview, ExpireHold, ExpireHold, 1, false, "open", "held", "expiry", "", "held", "normal"},
+		{"allowed expire auto reject", InterruptCodeReview, ExpireAutoReject, ExpireHold, 1, false, "closed", "batched", "", "expired_auto_reject", "immediate", "normal"},
+		{"allowed max hold", InterruptCodeReview, ExpireEscalate, ExpireHold, 0, false, "open", "held", "max_escalations", "", "held", "normal"},
+		{"allowed max auto reject", InterruptCodeReview, ExpireEscalate, ExpireAutoReject, 0, false, "closed", "batched", "", "expired_auto_reject", "immediate", "normal"},
+		{"startup stall expire hold", InterruptStartupStall, ExpireHold, ExpireHold, 1, false, "open", "held", "expiry", "", "held", "high"},
+		{"startup stall max hold", InterruptStartupStall, ExpireEscalate, ExpireHold, 0, false, "open", "held", "max_escalations", "", "held", "high"},
+		{"startup stall expire auto reject prohibited", InterruptStartupStall, ExpireAutoReject, ExpireHold, 1, true, "", "", "", "", "", ""},
+		{"startup stall max auto reject prohibited", InterruptStartupStall, ExpireEscalate, ExpireAutoReject, 0, true, "", "", "", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _ := openTestDB(t)
+			ctx := context.Background()
+			if err := db.SeedProjectForTest(ctx, "cfg", "project", testNow); err != nil {
 				t.Fatal(err)
 			}
-			if status != tc.wantStatus || held != tc.wantHeld {
-				t.Fatalf("interrupt = %s/%s, want %s/%s", status, held, tc.wantStatus, tc.wantHeld)
+			if err := db.SeedForgeRunForTest(ctx, "run", "project", "cfg", "42", testNow); err != nil {
+				t.Fatal(err)
 			}
-			if status == "closed" && closeReason != "expired_auto_reject" {
-				t.Fatalf("close reason = %q", closeReason)
+			cmd := t6Command(testNow)
+			cmd.Reason = tc.reason
+			cmd.ExpiresAfterMS, cmd.OnExpire, cmd.OnMaxEscalations, cmd.MaxEscalations = expiry, tc.onExpire, tc.onMax, tc.max
+			// One channel covers both modality requirements: code_review is
+			// visual and startup_stall is text.
+			cmd.Channels = []InterruptChannel{{ID: "ops", Capabilities: []string{"visual", "text"}}}
+			if tc.reason == InterruptStartupStall {
+				insertTaskSpec(t, db, "spec", "run", 1)
+				insertAttempt(t, db, "run", 1, "spec")
+				attempt := 1
+				cmd.AttemptNo = &attempt
+				cmd.Generation = InterruptGeneration{AttemptNo: 1, Generation: 1}
+				cmd.Facts = map[string]string{"attempt_no": "1", "generation": "1", "diagnostic_cause": "termination_unconfirmed", "isolation_consequence": "worktree held", "recommended_action": "retry", "attempt_diagnostic_ref": "/attempt", "worktree_ref": "/worktree"}
+				cmd.Source = SourceRecovery
+			} else {
+				cmd.T6 = func(context.Context, InterruptT6Input) (InterruptT6Output, error) {
+					return InterruptT6Output{Delivery: "immediate", ChannelID: "ops"}, nil
+				}
 			}
+			in, err := emitTestInterrupt(t, ctx, db, cmd)
+			if tc.rejectEmit {
+				if err == nil {
+					t.Fatalf("emit must reject startup_stall with auto_reject policy")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var nonce string
+			if err := db.db.QueryRow(`SELECT nonce FROM interrupts WHERE id=?`, in.ID).Scan(&nonce); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := db.AdvanceInterrupt(ctx, AdvanceInterruptCmd{InterruptID: in.ID, ExpectedVersion: 1, ExpectedNonce: nonce, Kind: AdvanceExpiry, NowMS: testNow + expiry}); err != nil || !ok {
+				t.Fatalf("advance = %v, %v", ok, err)
+			}
+			// Both reasons emit as immediate (code_review via T6, startup_stall
+			// via its High base), so the initial channel operation persists and
+			// the outcome never borrows a second charge, member or operation.
+			assertAdvanceOutcome(t, readAdvanceOutcome(t, db, in.ID), advanceOutcome{
+				status: tc.wantStatus, dispatchState: tc.wantState, delivery: tc.wantDelivery, severity: tc.wantSeverity,
+				held: tc.wantHeld, closeReason: tc.wantClose,
+				version: 2, escalation: 0, expiresAt: testNow + expiry, nextDispatch: sql.NullInt64{},
+				admissions: 1, charges: 1, channelOps: 1, members: 0, authority: 0,
+			}, nonce, false)
+			assertStaleReplayRejected(t, db, in.ID, 1, nonce, testNow+expiry+1)
 		})
 	}
 }
