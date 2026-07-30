@@ -61,9 +61,9 @@ func (d *DB) ApplyRetryProbeResult(ctx context.Context, cmd RetryProbeResultCmd)
 func (d *DB) applyRetryProbeResultTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeResultCmd) (ApplyCommandEventResult, error) {
 	var runID, reason, status, nonce string
 	var version, runVersion int64
-	var attemptNo int
-	err := tx.QueryRowContext(ctx, `SELECT i.run_id,i.reason,i.status,i.nonce,i.version,r.version,i.attempt_no FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, cmd.InterruptID).
-		Scan(&runID, &reason, &status, &nonce, &version, &runVersion, &attemptNo)
+	var attemptNo, escalation, maxEscalations int
+	err := tx.QueryRowContext(ctx, `SELECT i.run_id,i.reason,i.status,i.nonce,i.version,r.version,i.attempt_no,i.escalation_count,i.max_escalations FROM interrupts i JOIN runs r ON r.id=i.run_id WHERE i.id=?`, cmd.InterruptID).
+		Scan(&runID, &reason, &status, &nonce, &version, &runVersion, &attemptNo, &escalation, &maxEscalations)
 	if err != nil {
 		return ApplyCommandEventResult{}, err
 	}
@@ -85,7 +85,7 @@ func (d *DB) applyRetryProbeResultTx(ctx context.Context, tx *sql.Tx, cmd RetryP
 	if cmd.Succeeded {
 		return d.probeSucceededTx(ctx, tx, cmd, runID, runVersion, nonce, version, attemptNo, eventKey, initialEventID)
 	}
-	return d.probeFailedTx(ctx, tx, cmd, nonce, version, eventKey, initialEventID)
+	return d.probeFailedTx(ctx, tx, cmd, nonce, version, escalation, maxEscalations, eventKey, initialEventID)
 }
 
 // probeSucceededTx runs the ADR-013 single CAS (specs/command.md §5). Evidence,
@@ -134,9 +134,17 @@ func (d *DB) probeSucceededTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeRes
 
 // probeFailedTx marks the probe failed, retains Interrupt/isolation, increments
 // version, rotates nonce and emits the absence_unconfirmed ack (specs/command.md
-// §5). At the escalation cap the caller holds via the expiry path; here we only
-// rotate and ack so a later candidate may retry again.
-func (d *DB) probeFailedTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeResultCmd, nonce string, version int64, eventKey, initialEventID string) (ApplyCommandEventResult, error) {
+// §5). When the Interrupt is already at its escalation cap the probe failure
+// applies the frozen capped hold directly ("or applies frozen capped hold"),
+// because startup_stall may never auto_reject: it stays open+held with no
+// resolution write and no second advance/write port. Below the cap the probe
+// failure reverts dispatch_state to the post-emit batched state so the unique
+// AdvanceInterrupt/expiry path can still escalate (interrupt.md §8.2). The
+// held/NULL state previously written here was both excluded from the expiry
+// scan and rejected by AdvanceInterrupt, so escalation could never run after a
+// probe failure; batched is escalate-able and, unlike ready, does not spuriously
+// re-dispatch because next_dispatch_at_ms stays NULL.
+func (d *DB) probeFailedTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeResultCmd, nonce string, version int64, escalation, maxEscalations int, eventKey, initialEventID string) (ApplyCommandEventResult, error) {
 	res, err := tx.ExecContext(ctx, `UPDATE attempt_probes SET state='failed',finished_at_ms=? WHERE id=? AND state IN ('pending','running')`, cmd.NowMS, cmd.ProbeID)
 	if err != nil {
 		return ApplyCommandEventResult{}, err
@@ -145,8 +153,18 @@ func (d *DB) probeFailedTx(ctx context.Context, tx *sql.Tx, cmd RetryProbeResult
 		return ApplyCommandEventResult{}, ErrRejectedStale
 	}
 	nextNonce := newToken()
-	if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET nonce=?,version=version+1,dispatch_state='held',held_reason=NULL,nonce_issued_at_ms=?,updated_at_ms=? WHERE id=? AND status='open' AND version=? AND nonce=?`, nextNonce, cmd.NowMS, cmd.NowMS, cmd.InterruptID, version, nonce); err != nil {
-		return ApplyCommandEventResult{}, err
+	if escalation >= maxEscalations {
+		// Frozen capped hold: startup_stall at cap must hold, never auto_reject.
+		// This mirrors holdAdvance("max_escalations") without a second advance.
+		if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET nonce=?,version=version+1,dispatch_state='held',held_reason='max_escalations',delivery='held',next_dispatch_at_ms=NULL,nonce_issued_at_ms=?,updated_at_ms=? WHERE id=? AND status='open' AND version=? AND nonce=?`, nextNonce, cmd.NowMS, cmd.NowMS, cmd.InterruptID, version, nonce); err != nil {
+			return ApplyCommandEventResult{}, err
+		}
+	} else {
+		// Below the cap: revert to the escalate-able post-emit batched state so
+		// the expiry tick / AdvanceInterrupt can drive escalation_count forward.
+		if _, err := tx.ExecContext(ctx, `UPDATE interrupts SET nonce=?,version=version+1,dispatch_state='batched',held_reason=NULL,nonce_issued_at_ms=?,updated_at_ms=? WHERE id=? AND status='open' AND version=? AND nonce=?`, nextNonce, cmd.NowMS, cmd.NowMS, cmd.InterruptID, version, nonce); err != nil {
+			return ApplyCommandEventResult{}, err
+		}
 	}
 	finalID, err := finalizeRetryOutcomeTx(ctx, tx, eventKey, initialEventID, command.OutcomeAbsenceUnconfirmed, "", cmd.InterruptID, nextNonce, cmd.NowMS, command.StageFinalProbeFailed)
 	if err != nil {
