@@ -31,11 +31,19 @@ func Run(ctx context.Context, bootstrapPath string) error {
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stopSignals()
 
+	// On Linux this makes the outer supervisor adopt descendants orphaned when
+	// the execution wrapper is killed. waitForReaper then reaps those zombies,
+	// so a non-init container cannot leave their PGID falsely alive forever.
+	if err := enableChildSubreaper(); err != nil {
+		return fmt.Errorf("wrapper: enable child subreaper: %w", err)
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("wrapper: locate supervisor executable: %w", err)
 	}
 	cmd := exec.Command(self, "--run", bootstrapPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("wrapper: start execution wrapper: %w", err)
@@ -62,6 +70,9 @@ func Run(ctx context.Context, bootstrapPath string) error {
 		}
 	}
 	if err := waitForReaper(reaperResult); err != nil {
+		return err
+	}
+	if err := persistRelayFailure(filepath.Dir(bootstrapPath)); err != nil {
 		return err
 	}
 	return waitErr
@@ -95,8 +106,13 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	if b.SchemaVersion != 2 || b.ProtocolMajor != controlplane.ProtocolMajor || b.ProtocolMinor != controlplane.ProtocolMinor || b.DaemonVersion != controlplane.Version || b.WrapperVersion != controlplane.Version {
 		return errors.New("wrapper: incompatible bootstrap")
 	}
-	if err := os.Remove(filepath.Join(b.RunDir, "reaper-result.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("wrapper: clear reaper result: %w", err)
+	for _, path := range []string{
+		filepath.Join(b.RunDir, "reaper-result.json"),
+		relayFailurePath(b.RunDir),
+	} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("wrapper: clear stale shutdown evidence: %w", err)
+		}
 	}
 	self, err := runtime.ProcessExecutable(os.Getpid())
 	if err != nil {
@@ -123,19 +139,23 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	if err := pauseForTest("before-permit-rpc"); err != nil {
 		return err
 	}
+	// Establish the authoritative PTY before accepting the one-shot permit.
 	// A lost response is not a new permit request: replay the exact candidate
 	// and params with a new envelope request ID until the bounded deadline.
-	if _, err := callPermit(ctx, b.RunDir, map[string]any{"kind": "wrapper_session", "session": session}, pp); err != nil {
-		return err
-	}
-	// The gate is adjacent to the sole launcher invocation; no permit replay can
-	// cross it after this point.
 	var gate runtime.PermitGate
 	log, err := os.OpenFile(filepath.Join(b.RunDir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
+	pty, err := runtime.NewPTY()
+	if err != nil {
+		return err
+	}
+	defer pty.Close()
+	if _, err := callPermit(ctx, b.RunDir, map[string]any{"kind": "wrapper_session", "session": session}, pp); err != nil {
+		return err
+	}
 	task := filepath.Join(b.RunDir, "task.json")
 	if _, err := writeJSON(task, map[string]any{"schema_version": 1, "task_spec_snapshot_id": b.TaskSpecSnapshotID, "task_spec": json.RawMessage(b.TaskSpec)}); err != nil {
 		return err
@@ -163,11 +183,30 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 		return errors.New("wrapper: unsupported task transport")
 	}
 	var in = stdin
-	launch := runtime.AgentLaunch{Executable: b.Agent.Executable, Args: args, Worktree: b.WorktreePath, RunDir: b.RunDir, Stdin: in, Stdout: log, Stderr: log}
+	launch := runtime.AgentLaunch{Executable: b.Agent.Executable, Args: args, Worktree: b.WorktreePath, RunDir: b.RunDir, Stdin: in, Stdout: pty.Slave, Stderr: pty.Slave}
 	cmd, err := gate.StartOnce(ctx, runtime.DirectLauncher{}, launch)
 	if err != nil {
 		return err
 	}
+	// Only the Agent child owns the slave after Start. The wrapper reads the
+	// master and keeps the persisted log ahead of the host observation stream.
+	if err := pty.CloseSlave(); err != nil {
+		return errors.Join(err, terminateAndReap(cmd, b.RunDir))
+	}
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relayPTY(pty.Master, log, os.Stdout) }()
+	relayConsumed := false
+	relayFinished := false
+	defer func() {
+		_ = pty.CloseMaster()
+		if relayConsumed {
+			return
+		}
+		select {
+		case <-relayDone:
+		case <-time.After(time.Second):
+		}
+	}()
 	ai := map[string]any{"pid": int64(cmd.Process.Pid), "started_at_ms": time.Now().UnixMilli(), "executable": b.Agent.Executable}
 	control["agent_identity"] = ai
 	control["updated_at_ms"] = time.Now().UnixMilli()
@@ -179,8 +218,33 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	if err := pauseForTest("before-started-rpc"); err != nil {
 		return err
 	}
-	if _, err = call(ctx, b.RunDir, "claim.started", map[string]any{"kind": "wrapper_started", "session": session, "permit": permit}, sp); err != nil {
-		return errors.Join(err, terminateAndReap(cmd, b.RunDir))
+	// claim.started may be held up by the daemon while the relay has already
+	// failed. Keep the handoff cancellable so a missing authoritative log never
+	// leaves the Agent running behind a blocked RPC.
+	startedCtx, cancelStarted := context.WithCancel(ctx)
+	startedDone := make(chan error, 1)
+	go func() {
+		_, startedErr := call(startedCtx, b.RunDir, "claim.started", map[string]any{"kind": "wrapper_started", "session": session, "permit": permit}, sp)
+		startedDone <- startedErr
+	}()
+	var startedErr error
+	select {
+	case startedErr = <-startedDone:
+	case relayErr := <-relayDone:
+		relayConsumed = true
+		relayFinished = true
+		if relayErr != nil {
+			cancelStarted()
+			return relayFailure(relayErr, b, instance, ai, digest)
+		}
+		startedErr = <-startedDone
+	case <-ctx.Done():
+		cancelStarted()
+		return errors.Join(ctx.Err(), terminateAndReap(cmd, b.RunDir))
+	}
+	cancelStarted()
+	if startedErr != nil {
+		return errors.Join(startedErr, terminateAndReap(cmd, b.RunDir))
 	}
 	stopHeartbeat := make(chan struct{})
 	defer close(stopHeartbeat)
@@ -190,8 +254,26 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	var waitErr error
 	select {
 	case waitErr = <-waited:
+	case relayErr := <-relayDone:
+		relayFinished = true
+		relayConsumed = true
+		if relayErr != nil {
+			return relayFailure(relayErr, b, instance, ai, digest)
+		}
+		select {
+		case waitErr = <-waited:
+		case <-ctx.Done():
+			return errors.Join(ctx.Err(), terminateProcessGroup(b.RunDir))
+		}
 	case <-ctx.Done():
 		return errors.Join(ctx.Err(), terminateProcessGroup(b.RunDir))
+	}
+	if !relayFinished {
+		if err := waitForPTYRelay(relayDone, pty.Master); err != nil {
+			relayConsumed = true
+			return relayFailure(err, b, instance, ai, digest)
+		}
+		relayConsumed = true
 	}
 	exitCode, signal := resultStatus(waitErr)
 	result := map[string]any{"schema_version": 1, "run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "wrapper_instance_id": instance, "agent_identity": ai, "exit_code": exitCode, "signal": signal, "finished_at_ms": time.Now().UnixMilli(), "final_head_sha": headSHA(b.WorktreePath), "control_digest": digest}
@@ -291,13 +373,21 @@ func ReapProcessGroup(pgid int, resultPath string) (err error) {
 		return fmt.Errorf("wrapper: kill process group: %w", err)
 	}
 	deadline := time.Now().Add(reaperGrace)
+	absentProbes := 0
 	for {
 		err := syscall.Kill(-pgid, 0)
 		if errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		if err != nil {
+			// A single absence probe is not publication evidence: a just-reaped
+			// group number can be reused. Keep the reaper pending until absence
+			// remains true across consecutive probes.
+			absentProbes++
+			if absentProbes == 3 {
+				return nil
+			}
+		} else if err != nil {
 			return fmt.Errorf("wrapper: probe process group: %w", err)
+		} else {
+			absentProbes = 0
 		}
 		if time.Now().After(deadline) {
 			return errors.New("wrapper: process group remained after SIGKILL")
@@ -309,6 +399,9 @@ func ReapProcessGroup(pgid int, resultPath string) (err error) {
 func waitForReaper(path string) error {
 	deadline := time.Now().Add(reaperGrace + terminationGrace)
 	for {
+		if err := reapExitedChildren(); err != nil {
+			return fmt.Errorf("wrapper: reap terminated group child: %w", err)
+		}
 		data, err := os.ReadFile(path)
 		if err == nil {
 			var result struct {
@@ -461,6 +554,104 @@ func heartbeat(b runtime.Bootstrap, instance string, stop <-chan struct{}) {
 		}
 	}
 }
+
+const agentLogRelayFailure = "agent_log_relay_failed"
+
+func relayFailurePath(runDir string) string { return filepath.Join(runDir, "relay-failure.json") }
+
+type relayError struct {
+	code string
+	err  error
+}
+
+func (e *relayError) Error() string { return e.err.Error() }
+func (e *relayError) Unwrap() error { return e.err }
+
+func relayFailure(err error, b runtime.Bootstrap, instance string, ai map[string]any, controlDigest string) error {
+	var relayErr *relayError
+	if errors.As(err, &relayErr) && relayErr.code == agentLogRelayFailure {
+		exitCode := 1
+		// This is deliberately a pre-termination diagnostic, not result.json.
+		// The outer supervisor publishes the terminal result only after the
+		// reaper has proved kill(-pgid, 0) == ESRCH.
+		result := map[string]any{"schema_version": 1, "run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "wrapper_instance_id": instance, "agent_identity": ai, "exit_code": exitCode, "signal": nil, "failure_reason": agentLogRelayFailure, "finished_at_ms": time.Now().UnixMilli(), "final_head_sha": headSHA(b.WorktreePath), "control_digest": controlDigest}
+		if _, writeErr := writeJSON(relayFailurePath(b.RunDir), result); writeErr != nil {
+			err = errors.Join(err, fmt.Errorf("wrapper: record agent log relay failure: %w", writeErr))
+		}
+	}
+	return errors.Join(err, terminateProcessGroup(b.RunDir))
+}
+
+func persistRelayFailure(runDir string) error {
+	path := relayFailurePath(runDir)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("wrapper: read agent log relay failure: %w", err)
+	}
+	if err := runtime.WriteControlFile(filepath.Join(runDir, "result.json"), data); err != nil {
+		return fmt.Errorf("wrapper: publish agent log relay failure: %w", err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("wrapper: remove agent log relay failure: %w", err)
+	}
+	return nil
+}
+
+func relayPTY(master *os.File, log io.Writer, host io.Writer) error {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := master.Read(buf)
+		if n > 0 {
+			if writeErr := writeAll(log, buf[:n]); writeErr != nil {
+				return &relayError{code: agentLogRelayFailure, err: fmt.Errorf("wrapper: write agent log: %w", writeErr)}
+			}
+			// The durable log is authoritative. A closed host stream or pane is
+			// observational only and must not alter the Agent result.
+			_, _ = host.Write(buf[:n])
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, syscall.EIO) || errors.Is(err, os.ErrClosed) {
+				return nil
+			}
+			return fmt.Errorf("wrapper: read PTY master: %w", err)
+		}
+	}
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func waitForPTYRelay(done <-chan error, master *os.File) error {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		// A descendant that retained the slave must not turn a fast Agent exit
+		// into a hung wrapper. Closing the master ends observation only; it does
+		// not decide process ownership or completion.
+		_ = master.Close()
+		return <-done
+	}
+}
+
 func resultStatus(err error) (*int, any) {
 	if err == nil {
 		n := 0

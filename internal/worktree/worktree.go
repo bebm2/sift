@@ -146,6 +146,7 @@ func ReadResult(path string) (attempt.Result, error) {
 		Signal            *string          `json:"signal"`
 		FinalHeadSHA      string           `json:"final_head_sha"`
 		ControlDigest     string           `json:"control_digest"`
+		FailureReason     string           `json:"failure_reason"`
 		Digest            string           `json:"digest"`
 		FinishedAt        string           `json:"finished_at"`
 		FinishedAtMS      int64            `json:"finished_at_ms"`
@@ -185,5 +186,5 @@ func ReadResult(path string) (attempt.Result, error) {
 	if wire.Signal != nil {
 		signal = *wire.Signal
 	}
-	return attempt.Result{ExitCode: wire.ExitCode, Signal: signal, FinalHeadSHA: wire.FinalHeadSHA, Digest: digest, FinishedAt: finished, Agent: agent}, nil
+	return attempt.Result{ExitCode: wire.ExitCode, Signal: signal, FailureReason: wire.FailureReason, FinalHeadSHA: wire.FinalHeadSHA, Digest: digest, FinishedAt: finished, Agent: agent}, nil
 }

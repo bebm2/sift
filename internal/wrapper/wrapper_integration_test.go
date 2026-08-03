@@ -20,6 +20,7 @@ import (
 
 	"github.com/miaoxiaoyong/sift/internal/controlplane"
 	runtimepkg "github.com/miaoxiaoyong/sift/internal/runtime"
+	"github.com/miaoxiaoyong/sift/internal/worktree"
 )
 
 func TestProductionWrapperCrashWindows(t *testing.T) {
@@ -96,6 +97,23 @@ func TestProductionWrapperCrashWindows(t *testing.T) {
 	}
 }
 
+func TestProductionWrapperPTYRelaysRawOutputToLogAndHost(t *testing.T) {
+	wrapperPath := buildWrapper(t)
+	root, runDir, bootstrap := validBootstrap(t, "/bin/sh", []string{"-c", `printf 'pty-raw\n'`})
+	server := newWrapperServer(t, root, "")
+	defer server.Close()
+	out, err := osexec.Command(wrapperPath, bootstrap).CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper failed: %v\n%s", err, out)
+	}
+	if got, want := string(out), "pty-raw\n"; got != want {
+		t.Fatalf("host stream = %q, want %q; log=%q", got, want, readFile(t, filepath.Join(runDir, "agent.log")))
+	}
+	if got, want := readFile(t, filepath.Join(runDir, "agent.log")), "pty-raw\n"; got != want {
+		t.Fatalf("agent.log = %q, want %q", got, want)
+	}
+}
+
 func TestProductionWrapperReplaysLostPermitResponseWithSameParameters(t *testing.T) {
 	wrapperPath := buildWrapper(t)
 	root, runDir, bootstrap := validBootstrap(t, "/bin/sh", []string{"-c", "echo spawned >> \"$SIFT_RUN_DIR/spawn-count\""})
@@ -137,6 +155,81 @@ func TestProductionWrapperReapsTERMIgnoringGroupAfterStartedFailure(t *testing.T
 		t.Fatal("wrapper unexpectedly succeeded")
 	}
 	assertGroupAbsent(t, pgid)
+}
+
+func TestProductionWrapperPTYRelayEOFThenSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups differ on Windows")
+	}
+	wrapperPath := buildWrapper(t)
+	root, runDir, bootstrap := validBootstrap(t, "/bin/sh", []string{"-c", `exec 1>&- 2>&-; : > "$SIFT_RUN_DIR/pty-eof"; (trap '' TERM; while :; do :; done) & echo $! > "$SIFT_RUN_DIR/descendant.pid"; trap '' TERM; while :; do :; done`})
+	server := newWrapperServer(t, root, "")
+	defer server.Close()
+	cmd := osexec.Command(wrapperPath, bootstrap)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := executionWrapperPGID(t, filepath.Join(runDir, "control.json"))
+	waitForWrapperFile(t, filepath.Join(runDir, "pty-eof"))
+	assertProcessInGroup(t, filepath.Join(runDir, "descendant.pid"), pgid)
+	// All processes closed the slave before the barrier above, so the relay has
+	// observed PTY EOF before the supervisor is signalled.
+	time.Sleep(100 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("wrapper unexpectedly succeeded")
+	}
+	assertGroupAbsent(t, pgid)
+	if _, err := os.Stat(filepath.Join(runDir, "result.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful result exists after signal: %v", err)
+	}
+}
+
+func TestProductionWrapperRecordsAgentLogRelayFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/dev/full is Linux-specific")
+	}
+	wrapperPath := buildWrapper(t)
+	root, runDir, bootstrap := validBootstrap(t, "/bin/sh", []string{"-c", `trap '' TERM; (trap '' TERM; while :; do :; done) & echo $! > "$SIFT_RUN_DIR/descendant.pid"; while test ! -f "$SIFT_RUN_DIR/log-trigger"; do sleep 0.01; done; printf log-trigger; while :; do :; done`})
+	if err := os.Symlink("/dev/full", filepath.Join(runDir, "agent.log")); err != nil {
+		t.Fatal(err)
+	}
+	server := newWrapperServerWithStartedBarrier(t, root)
+	defer server.Close()
+	cmd := osexec.Command(wrapperPath, bootstrap)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := executionWrapperPGID(t, filepath.Join(runDir, "control.json"))
+	assertProcessInGroup(t, filepath.Join(runDir, "descendant.pid"), pgid)
+	server.waitForStartedReceipt(t) // Agent has not yet been allowed to write.
+	if err := os.WriteFile(filepath.Join(runDir, "log-trigger"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// relayFailure records only a private pre-termination diagnostic. Its
+	// presence proves the relay has failed while claim.started remains blocked;
+	// result.json must still be unavailable to the production decoder.
+	waitForWrapperFile(t, relayFailurePath(runDir))
+	waitForPendingReaper(t, filepath.Join(runDir, "reaper-result.json"))
+	if _, err := worktree.ReadResult(filepath.Join(runDir, "result.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("terminal result was consumable before group reaping: %v", err)
+	}
+	server.confirmStarted()
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("wrapper unexpectedly succeeded")
+	}
+	assertGroupAbsent(t, pgid)
+	result, err := worktree.ReadResult(filepath.Join(runDir, "result.json"))
+	if err != nil {
+		t.Fatalf("read published relay failure result: %v", err)
+	}
+	if result.ExitCode == nil || *result.ExitCode == 0 || result.FailureReason != agentLogRelayFailure {
+		t.Fatalf("result = %+v, want non-success %q failure", result, agentLogRelayFailure)
+	}
 }
 
 func TestProductionWrapperReapsTERMIgnoringAgentOnTerminationSignal(t *testing.T) {
@@ -252,39 +345,137 @@ func TestProductionWrapperKeepsAgentInWrapperProcessGroup(t *testing.T) {
 		t.Skip("process groups differ on Windows")
 	}
 	wrapperPath := buildWrapper(t)
-	root, runDir, bootstrap := validBootstrap(t, "/bin/sh", []string{"-c", "sleep 2"})
-	server := newWrapperServer(t, root, "")
+	root, runDir, bootstrap := validBootstrap(t, "/bin/sh", []string{"-c", `if test -t 1; then echo yes > "$SIFT_RUN_DIR/pty-active"; else echo no > "$SIFT_RUN_DIR/pty-active"; fi; echo "$$" > "$SIFT_RUN_DIR/agent-pid"; while test ! -f "$SIFT_RUN_DIR/finish"; do sleep 0.01; done`})
+	server := newWrapperServerWithStartedBarrier(t, root)
 	defer server.Close()
 	cmd := osexec.Command(wrapperPath, bootstrap)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer cmd.Process.Kill()
+
+	waitForWrapperFile(t, filepath.Join(runDir, "pty-active"))
+	wrapperPID := executionWrapperPID(t, filepath.Join(runDir, "control.json"))
+	agentPID := readPIDFile(t, filepath.Join(runDir, "agent-pid"))
+	server.waitForStartedReceipt(t)
+	assertAgentTopology(t, wrapperPID, agentPID)
+	if got := strings.TrimSpace(readFile(t, filepath.Join(runDir, "pty-active"))); got != "yes" {
+		t.Fatalf("agent stdout is tty = %q, want yes", got)
+	}
+
+	heartbeat := filepath.Join(runDir, "heartbeat")
+	if _, err := os.Stat(heartbeat); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-start heartbeat was pre-stored: %v", err)
+	}
+	server.confirmStarted()
+	server.waitForStartedConfirmation(t) // server has written the response
+	waitForWrapperFile(t, heartbeat)     // wrapper returned from call and ran post-claim.started code
+	assertAgentTopology(t, wrapperPID, agentPID)
+	if err := os.WriteFile(filepath.Join(runDir, "finish"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wrapper failed: %v", err)
+	}
+}
+
+func waitForWrapperFile(t *testing.T, path string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(filepath.Join(runDir, "control.json"))
-		if err == nil && string(data) != "" {
-			var control struct {
-				AgentIdentity *struct {
-					PID int `json:"pid"`
-				} `json:"agent_identity"`
-			}
-			if json.Unmarshal(data, &control) == nil && control.AgentIdentity != nil {
-				wrapperPGID, err1 := syscall.Getpgid(executionWrapperPID(t, filepath.Join(runDir, "control.json")))
-				agentPGID, err2 := syscall.Getpgid(control.AgentIdentity.PID)
-				if err1 != nil || err2 != nil {
-					t.Fatalf("get process groups: %v %v", err1, err2)
-				}
-				if wrapperPGID != agentPGID {
-					t.Fatalf("agent pgid=%d, wrapper pgid=%d", agentPGID, wrapperPGID)
-				}
-				return
-			}
+		if _, err := os.Stat(path); err == nil {
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("wrapper did not publish agent identity")
+	t.Fatalf("file was not written: %s", path)
+}
+
+func waitForPendingReaper(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var result struct {
+				Pending bool `json:"pending"`
+			}
+			if json.Unmarshal(data, &result) == nil && result.Pending {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("reaper was not pending: %s", path)
+}
+
+func readPIDFile(t *testing.T, paths ...string) int {
+	t.Helper()
+	for _, path := range paths {
+		waitForNonEmptyFile(t, path)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(readFile(t, paths[0])))
+	if err != nil {
+		t.Fatalf("parse pid %s: %v", paths[0], err)
+	}
+	return pid
+}
+
+func waitForNonEmptyFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("file was not populated: %s", path)
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func assertAgentTopology(t *testing.T, wrapperPID, agentPID int) {
+	t.Helper()
+	out, err := osexec.Command("ps", "-o", "ppid=", "-o", "pgid=", "-p", strconv.Itoa(agentPID)).Output()
+	if err != nil {
+		t.Fatalf("read agent OS topology: %v", err)
+	}
+	facts := strings.Fields(string(out))
+	if len(facts) != 2 {
+		t.Fatalf("agent OS topology = %q, want PPID and PGID", out)
+	}
+	ppid, err := strconv.Atoi(facts[0])
+	if err != nil {
+		t.Fatalf("parse agent PPID: %v", err)
+	}
+	agentPGID, err := strconv.Atoi(facts[1])
+	if err != nil {
+		t.Fatalf("parse agent PGID: %v", err)
+	}
+	wrapperPGID, err := syscall.Getpgid(wrapperPID)
+	if err != nil {
+		t.Fatalf("get wrapper PGID: %v", err)
+	}
+	if ppid != wrapperPID {
+		t.Fatalf("agent PPID=%d, want wrapper PID=%d", ppid, wrapperPID)
+	}
+	if wrapperPGID != wrapperPID {
+		t.Fatalf("wrapper PGID=%d, want wrapper PID=%d", wrapperPGID, wrapperPID)
+	}
+	if agentPGID != wrapperPGID {
+		t.Fatalf("agent PGID=%d, wrapper PGID=%d", agentPGID, wrapperPGID)
+	}
+	if agentPID == agentPGID {
+		t.Fatalf("agent PID=%d unexpectedly leads its process group", agentPID)
+	}
 }
 
 func buildWrapper(t *testing.T) string {
@@ -346,13 +537,19 @@ func countLines(path string) int {
 }
 
 type wrapperServer struct {
-	listener        net.Listener
-	reject          string
-	waitPath        string
-	dropFirstPermit bool
-	permitParams    []json.RawMessage
-	mu              sync.Mutex
-	once            sync.Once
+	listener            net.Listener
+	reject              string
+	waitPath            string
+	dropFirstPermit     bool
+	permitParams        []json.RawMessage
+	startedReceipt      chan struct{}
+	startedRelease      chan struct{}
+	startedConfirmation chan struct{}
+	mu                  sync.Mutex
+	once                sync.Once
+	startedReceiptOnce  sync.Once
+	startedReleaseOnce  sync.Once
+	startedConfirmOnce  sync.Once
 }
 
 func newWrapperServer(t *testing.T, root, reject string) *wrapperServer {
@@ -367,13 +564,48 @@ func newWrapperServerWaitFor(t *testing.T, root, reject, waitPath string) *wrapp
 	return newWrapperServerWithPermitLoss(t, root, reject, waitPath, false)
 }
 
+func newWrapperServerWithStartedBarrier(t *testing.T, root string) *wrapperServer {
+	return newWrapperServerWithOptions(t, root, "", "", false, true)
+}
+
+func (s *wrapperServer) waitForStartedReceipt(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.startedReceipt:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not receive claim.started")
+	}
+}
+
+func (s *wrapperServer) confirmStarted() {
+	s.startedReleaseOnce.Do(func() { close(s.startedRelease) })
+}
+
+func (s *wrapperServer) waitForStartedConfirmation(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.startedConfirmation:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not confirm claim.started")
+	}
+}
+
 func newWrapperServerWithPermitLoss(t *testing.T, root, reject, waitPath string, dropFirstPermit bool) *wrapperServer {
+	return newWrapperServerWithOptions(t, root, reject, waitPath, dropFirstPermit, false)
+}
+
+func newWrapperServerWithOptions(t *testing.T, root, reject, waitPath string, dropFirstPermit, startedBarrier bool) *wrapperServer {
 	t.Helper()
 	l, err := net.Listen("unix", filepath.Join(root, "run.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := &wrapperServer{listener: l, reject: reject, waitPath: waitPath, dropFirstPermit: dropFirstPermit}
+	if startedBarrier {
+		s.startedReceipt = make(chan struct{})
+		s.startedRelease = make(chan struct{})
+		s.startedConfirmation = make(chan struct{})
+	}
 	go s.serve()
 	return s
 }
@@ -421,6 +653,12 @@ func (s *wrapperServer) serve() {
 					return // The daemon committed but its response was lost in transit.
 				}
 			}
+			var confirmStarted func()
+			if req.Method == "claim.started" && s.startedReceipt != nil {
+				s.startedReceiptOnce.Do(func() { close(s.startedReceipt) })
+				<-s.startedRelease
+				confirmStarted = func() { s.startedConfirmOnce.Do(func() { close(s.startedConfirmation) }) }
+			}
 			var response any = map[string]any{"ok": true, "result": map[string]any{}}
 			if req.Method == s.reject {
 				s.waitForPath()
@@ -428,7 +666,9 @@ func (s *wrapperServer) serve() {
 			}
 			b, _ := json.Marshal(response)
 			binary.BigEndian.PutUint32(h[:], uint32(len(b)))
-			_, _ = c.Write(append(h[:], b...))
+			if _, err := c.Write(append(h[:], b...)); err == nil && confirmStarted != nil {
+				confirmStarted()
+			}
 		}()
 	}
 }
