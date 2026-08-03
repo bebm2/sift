@@ -93,7 +93,12 @@ type Worker struct {
 	Backend  Backend
 	Backends BackendRouter
 	Agents   []config.Agent
-	hooks    workerHooks
+	// FrozenAgentsRequired is enabled by production wiring. Legacy fixtures may
+	// omit agent definitions from synthetic config snapshots, but production
+	// must never fall back to the daemon's current configuration.
+	FrozenAgentsRequired      bool
+	QualificationProbeTimeout time.Duration
+	hooks                     workerHooks
 }
 
 type workerHooks struct {
@@ -119,7 +124,29 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if err != nil || claim == nil {
 		return err
 	}
-	dispatch, err := w.DB.PrepareLaunchDispatch(ctx, *claim, randomID(), randomSecret(), randomSecret(), now().UnixMilli())
+	agent, err := w.DB.FrozenLaunchAgent(ctx, *claim, now().UnixMilli())
+	if err != nil {
+		if w.FrozenAgentsRequired {
+			return err
+		}
+		// Compatibility for old test-only database seeds which predate frozen
+		// agent definitions. Production sets FrozenAgentsRequired and cannot
+		// take this branch.
+		agentID, idErr := w.DB.LaunchAgentID(ctx, *claim, now().UnixMilli())
+		if idErr != nil {
+			return err
+		}
+		var ok bool
+		agent, ok = w.agent(agentID)
+		if !ok {
+			return err
+		}
+	}
+	qualification, err := runtime.BuildQualification(runtime.QualificationInput{AgentID: agent.ID, Args: agent.Args, TaskTransport: string(agent.TaskTransport), VersionArgs: agent.VersionArgs, Executable: agent.Executable, Context: ctx, ProbeTimeout: w.QualificationProbeTimeout})
+	if err != nil {
+		return fmt.Errorf("launch worker: build topology qualification: %w", err)
+	}
+	dispatch, err := w.DB.PrepareLaunchDispatchWithQualification(ctx, *claim, randomID(), randomSecret(), randomSecret(), qualification.Key, now().UnixMilli())
 	resumed := errors.Is(err, storage.ErrLaunchDispatchPrepared)
 	if err != nil && !resumed {
 		return err
@@ -146,20 +173,24 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		agent, ok := w.agent(dispatch.AgentID)
-		if !ok || !matchesDispatch(bootstrap, dispatch, agent, filepath.Dir(path)) {
+		if dispatch.AgentID != agent.ID || !matchesDispatch(bootstrap, dispatch, agent, qualification, filepath.Dir(path)) {
+			// A resumed prepared dispatch may carry an old key after the executable
+			// was replaced while its bootstrap survived. Never leave that key for
+			// recovery to treat as verified absence authority.
+			if clearErr := w.DB.ClearLaunchQualification(ctx, *claim, dispatch.TopologyQualificationKey, now().UnixMilli()); clearErr != nil {
+				return fmt.Errorf("launch worker: invalidate prepared qualification: %w", clearErr)
+			}
 			return errors.New("launch worker: prepared bootstrap does not match dispatch")
 		}
 	} else {
-		agent, ok := w.agent(dispatch.AgentID)
-		if !ok {
-			return fmt.Errorf("launch worker: configured agent %q not found", dispatch.AgentID)
+		if dispatch.AgentID != agent.ID {
+			return errors.New("launch worker: prepared dispatch agent changed")
 		}
 		runDir := filepath.Join(w.Root, "runs", dispatch.RunID, "attempts", fmt.Sprintf("%d", dispatch.AttemptNo))
 		if err := os.MkdirAll(runDir, 0700); err != nil {
 			return err
 		}
-		bootstrap := runtime.Bootstrap{SchemaVersion: 2, ProtocolMajor: controlplane.ProtocolMajor, ProtocolMinor: controlplane.ProtocolMinor, DaemonVersion: controlplane.Version, WrapperVersion: controlplane.Version, RunID: dispatch.RunID, AttemptNo: dispatch.AttemptNo, Generation: dispatch.Generation, DispatchID: dispatch.DispatchID, BootstrapNonce: dispatch.BootstrapNonce, RunToken: dispatch.RunToken, RunDir: runDir, WorktreePath: dispatch.WorktreePath, Agent: runtime.BootstrapAgent{ID: agent.ID, Executable: agent.Executable, Args: agent.Args, TaskTransport: string(agent.TaskTransport)}, TaskSpecSnapshotID: dispatch.TaskSpecID, TaskSpec: json.RawMessage(dispatch.TaskSpec)}
+		bootstrap := runtime.Bootstrap{SchemaVersion: 2, ProtocolMajor: controlplane.ProtocolMajor, ProtocolMinor: controlplane.ProtocolMinor, DaemonVersion: controlplane.Version, WrapperVersion: controlplane.Version, RunID: dispatch.RunID, AttemptNo: dispatch.AttemptNo, Generation: dispatch.Generation, DispatchID: dispatch.DispatchID, BootstrapNonce: dispatch.BootstrapNonce, RunToken: dispatch.RunToken, RunDir: runDir, WorktreePath: dispatch.WorktreePath, Agent: runtime.BootstrapAgent{ID: agent.ID, Executable: qualification.ExecutablePath, ExecutableSHA256: qualification.ExecutableSHA256, Args: agent.Args, TaskTransport: string(agent.TaskTransport)}, TaskSpecSnapshotID: dispatch.TaskSpecID, TaskSpec: json.RawMessage(dispatch.TaskSpec)}
 		b, err = json.Marshal(bootstrap)
 		if err != nil {
 			return err
@@ -193,6 +224,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err := w.hooks.beforeSpawn(); err != nil {
 			return err
 		}
+	}
+	// Recheck after all durable writes and immediately before the wrapper host
+	// accepts the launch. The wrapper performs the same check at its Launcher
+	// boundary, so replacement cannot run new bytes under this key.
+	if err := runtime.ValidateQualificationExecutable(qualification); err != nil {
+		if clearErr := w.DB.ClearLaunchQualification(ctx, *claim, qualification.Key, now().UnixMilli()); clearErr != nil {
+			return fmt.Errorf("launch worker: invalidate changed qualification: %w", clearErr)
+		}
+		return fmt.Errorf("launch worker: qualification executable changed: %w", err)
 	}
 	backend := config.Backend(dispatch.Backend)
 	if backend == "" {
@@ -249,13 +289,13 @@ func readBootstrap(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func matchesDispatch(b runtime.Bootstrap, d storage.LaunchDispatch, agent config.Agent, runDir string) bool {
+func matchesDispatch(b runtime.Bootstrap, d storage.LaunchDispatch, agent config.Agent, qualification runtime.Qualification, runDir string) bool {
 	return b.SchemaVersion == 2 && b.ProtocolMajor == controlplane.ProtocolMajor && b.ProtocolMinor == controlplane.ProtocolMinor &&
 		b.DaemonVersion == controlplane.Version && b.WrapperVersion == controlplane.Version &&
 		b.RunID == d.RunID && b.AttemptNo == d.AttemptNo && b.Generation == d.Generation &&
 		b.DispatchID == d.DispatchID && b.BootstrapNonce == d.BootstrapNonce && b.RunToken == d.RunToken &&
 		b.RunDir == runDir && b.WorktreePath == d.WorktreePath && b.TaskSpecSnapshotID == d.TaskSpecID &&
-		b.Agent.ID == agent.ID && b.Agent.Executable == agent.Executable && b.Agent.TaskTransport == string(agent.TaskTransport) &&
+		b.Agent.ID == agent.ID && b.Agent.Executable == qualification.ExecutablePath && b.Agent.ExecutableSHA256 == qualification.ExecutableSHA256 && b.Agent.TaskTransport == string(agent.TaskTransport) &&
 		bytes.Equal(b.TaskSpec, d.TaskSpec) && argsEqual(b.Agent.Args, agent.Args)
 }
 

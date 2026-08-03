@@ -60,7 +60,12 @@ func main() {
 	}
 	termination := &daemon.TerminationCoordinator{
 		DB: db, Terminator: runtime.Terminator{Inspector: runtime.PlatformProcessInspector{}, Signaler: runtime.UnixProcessSignaler{}}, Runtime: snapshot.Config.Runtime,
-		ControlRoot:         home.Path,
+		ControlRoot: home.Path,
+		TmuxPath:    tmuxDiagnostics.TmuxPath, TmuxSocketPath: runtime.TmuxSocketPath(filepath.Join(home.Path, "tmux.sock")),
+		ProcessGroupQualified: func(key string) bool {
+			ok, err := db.ProcessGroupQualified(ctx, key)
+			return err == nil && ok
+		},
 		AttentionDailyQuota: attentionQuota(snapshot.Config.Attention.DailyQuota), DayTimezone: snapshot.Config.Attention.DayTimezone, DailySummaryAt: snapshot.Config.Attention.DailySummaryAt, CriticalWindowMS: snapshot.Config.Attention.CriticalFuse.Window.Milliseconds(), CriticalTotalLimit: snapshot.Config.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: snapshot.Config.Attention.CriticalFuse.PerRunLimit, Channels: interruptChannels(snapshot.Config.Attention), Now: time.Now,
 	}
 	// startup_stall retry probe process-check shares the same process inspector
@@ -110,7 +115,7 @@ func main() {
 	workers.SetLaunchWorker(&launchworker.Worker{
 		DB: db, BootID: bootID, WorkerID: "siftd:launch_agent", Root: home.Path,
 		Lease: snapshot.Config.Runtime.SpawnOperationLeaseTTL, Now: time.Now,
-		Backends: backends, Agents: snapshot.Config.Agents,
+		Backends: backends, Agents: snapshot.Config.Agents, FrozenAgentsRequired: true,
 	})
 	s, err := controlplane.Start(home, db)
 	if err != nil {

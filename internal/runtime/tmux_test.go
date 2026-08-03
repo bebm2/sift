@@ -334,6 +334,41 @@ func TestTmuxCredentialIsolationAndLiteralWrapperArgv(t *testing.T) {
 	}
 }
 
+func TestObserveBackendSessionClassifiesHasSessionErrorsAndSanitizesEnv(t *testing.T) {
+	t.Setenv("SIFT_SENTINEL_CREDENTIAL", "must-not-reach-tmux")
+	for _, tc := range []struct {
+		name, mode string
+		want       BackendSessionState
+	}{
+		{"explicit_absence", "absent", SessionAbsent},
+		{"exit_1_empty_output", "empty", SessionUnknown},
+		{"timeout", "timeout", SessionUnknown},
+		{"permission", "permission", SessionUnknown},
+		{"protocol", "protocol", SessionUnknown},
+		{"server_unavailable", "server", SessionUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tmux")
+			script := "#!/bin/sh\n" +
+				"if [ -n \"${SIFT_SENTINEL_CREDENTIAL+x}\" ]; then echo credential-inherited >&2; exit 42; fi\n" +
+				"case \"" + tc.mode + "\" in absent) echo \"can't find session: sift-test\" >&2; exit 1;; empty) exit 1;; timeout) sleep 1; exit 1;; permission) echo permission denied >&2; exit 126;; protocol) echo bad protocol >&2; exit 1;; server) echo no server running >&2; exit 1;; esac\n"
+			if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if tc.mode == "timeout" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 10*time.Millisecond)
+				defer cancel()
+			}
+			got := ObserveBackendSession(ctx, path, filepath.Join(t.TempDir(), "socket"), "sift-test", strings.Repeat("a", 64))
+			if got.State != tc.want {
+				t.Fatalf("state = %q (%s), want %q", got.State, got.DiagnosticCode, tc.want)
+			}
+		})
+	}
+}
+
 func requireRealTmux(t *testing.T) string {
 	t.Helper()
 	tmux, err := exec.LookPath("tmux")
