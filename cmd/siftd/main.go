@@ -68,6 +68,7 @@ func main() {
 		},
 		AttentionDailyQuota: attentionQuota(snapshot.Config.Attention.DailyQuota), DayTimezone: snapshot.Config.Attention.DayTimezone, DailySummaryAt: snapshot.Config.Attention.DailySummaryAt, CriticalWindowMS: snapshot.Config.Attention.CriticalFuse.Window.Milliseconds(), CriticalTotalLimit: snapshot.Config.Attention.CriticalFuse.TotalLimit, CriticalPerRunLimit: snapshot.Config.Attention.CriticalFuse.PerRunLimit, Channels: interruptChannels(snapshot.Config.Attention), Now: time.Now,
 	}
+	termination.HookRecheck = daemon.HookRechecker(db, time.Now)
 	// startup_stall retry probe process-check shares the same process inspector
 	// and control root as termination. It runs on the supervisor tick and drives
 	// pending|running probes to the unique ApplyRetryProbeResult finalizer; it is
@@ -81,6 +82,9 @@ func main() {
 	if err := termination.RecoverStartup(ctx, bootID); err != nil {
 		fatal(err)
 	}
+	// Recover result evidence before deciding whether this is a clean
+	// activation. Capture remains before the launch gate and is audit-only.
+	daemon.CaptureHookBaselines(ctx, db, snapshot.Config, time.Now)
 	if err := db.CompleteStartupRecovery(ctx, bootID, time.Now().UnixMilli()); err != nil {
 		fatal(err)
 	}
@@ -124,6 +128,9 @@ func main() {
 	defer s.Close()
 	s.SetOperatorAction(func(ctx context.Context, method, runID string, version int64) error {
 		return termination.Operator(ctx, runID, version, method == "ops.retry")
+	})
+	s.SetHookBootstrap(func(ctx context.Context, projectID string) error {
+		return daemon.BootstrapHookBaseline(ctx, db, snapshot.Config, projectID, time.Now)
 	})
 	s.SetAttentionQuota(attentionQuotaStrings(snapshot.Config.Attention.DailyQuota))
 	if usesTmux(snapshot.Config) {
@@ -226,6 +233,11 @@ func startSchedulersWithFactory(ctx context.Context, db *storage.DB, workers *da
 	supervisor := factory.Supervisor(reportSchedulerError("supervisor", func(ctx context.Context) error {
 		if hooks.Supervisor != nil {
 			hooks.Supervisor()
+		}
+		// Recover also consumes normal wrapper completion evidence, not only
+		// startup recovery, and drains durable hook-audit receipts.
+		if err := termination.Recover(ctx); err != nil {
+			return err
 		}
 		if err := termination.Timeout(ctx); err != nil {
 			return err
