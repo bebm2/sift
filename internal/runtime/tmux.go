@@ -34,6 +34,12 @@ type HostLaunch struct {
 	DispatchID    string
 	WrapperPath   string
 	BootstrapPath string
+
+	// The lease fields are only used by a durable binding verifier. They fence
+	// the external tmux observation without becoming part of the session name.
+	OperationID      string
+	LeaseOwner       string
+	LeaseExpiresAtMS int64
 }
 
 // ValidateFor verifies that a host received a complete frozen dispatch and
@@ -69,8 +75,8 @@ func TmuxSessionName(runID string, attemptNo, generation int, dispatchID string)
 	return "sift-" + digest, nil
 }
 
-// TmuxSessionConflictError reports that an exact target already exists. This
-// slice never adopts it: durable reclaim convergence is a later operation.
+// TmuxSessionConflictError reports that an existing exact target cannot be
+// proven to be the live wrapper for the current frozen launch binding.
 type TmuxSessionConflictError struct {
 	Session string
 	Cause   error
@@ -96,21 +102,28 @@ func TmuxClientEnvironment() []string {
 }
 
 // TmuxBackend starts only the wrapper through tmux's argv interface.
+type DurableBindingVerifier func(context.Context, HostLaunch) error
+
 type TmuxBackend struct {
-	tmuxPath   string
-	wrapper    string
-	socketPath string
+	tmuxPath      string
+	wrapper       string
+	socketPath    string
+	verifyBinding DurableBindingVerifier
 }
 
 // NewTmuxBackend records startup-probed, absolute paths. socketPath is a
 // stable SIFT_HOME-scoped identity; its digest keeps the actual UNIX socket
 // below the platform pathname limit while preserving daemon-restart affinity.
-func NewTmuxBackend(tmuxPath, wrapperPath, socketPath string) (*TmuxBackend, error) {
+func NewTmuxBackend(tmuxPath, wrapperPath, socketPath string, verifier ...DurableBindingVerifier) (*TmuxBackend, error) {
 	if !filepath.IsAbs(tmuxPath) || !filepath.IsAbs(wrapperPath) || !filepath.IsAbs(socketPath) {
 		return nil, errors.New("runtime: tmux, wrapper, and tmux socket paths must be absolute")
 	}
 	sum := sha256.Sum256([]byte(socketPath))
-	return &TmuxBackend{tmuxPath: tmuxPath, wrapper: wrapperPath, socketPath: filepath.Join(os.TempDir(), "sift-tmux-"+hex.EncodeToString(sum[:12])+".sock")}, nil
+	var verify DurableBindingVerifier
+	if len(verifier) > 0 {
+		verify = verifier[0]
+	}
+	return &TmuxBackend{tmuxPath: tmuxPath, wrapper: wrapperPath, socketPath: filepath.Join(os.TempDir(), "sift-tmux-"+hex.EncodeToString(sum[:12])+".sock"), verifyBinding: verify}, nil
 }
 
 func (b *TmuxBackend) WrapperPath() string { return b.wrapper }
@@ -134,11 +147,45 @@ func (b *TmuxBackend) Spawn(ctx context.Context, launch HostLaunch) (*os.Process
 	cmd := b.command(ctx, "new-session", "-d", "-s", name, "-e", "SIFT_TMUX_BINDING="+digest, "--", launch.WrapperPath, launch.BootstrapPath)
 	if out, err := cmd.CombinedOutput(); err == nil {
 		return cmd.Process, nil
-	} else if b.sessionExists(ctx, name) {
-		return nil, &TmuxSessionConflictError{Session: name, Cause: err}
-	} else {
+	} else if !b.sessionExists(ctx, name) {
 		return nil, fmt.Errorf("runtime: create tmux session %q: %w: %s", name, err, string(out))
+	} else if b.verifyBinding == nil {
+		return nil, &TmuxSessionConflictError{Session: name, Cause: errors.New("tmux durable binding verifier is not configured")}
+	} else if err := b.validateExistingSession(ctx, name, digest); err != nil {
+		return nil, &TmuxSessionConflictError{Session: name, Cause: err}
 	}
+	if b.verifyBinding != nil {
+		if err := b.verifyBinding(ctx, launch); err != nil {
+			return nil, &TmuxSessionConflictError{Session: name, Cause: err}
+		}
+	}
+	// new-session may have succeeded even though its client lost the response,
+	// or another reclaim may have won the same deterministic binding. Once the
+	// exact session proves it is the current live binding, both cases have
+	// already accepted exactly one wrapper and must converge without respawn.
+	return nil, nil
+}
+
+// validateExistingSession proves that name is the single live pane created for
+// digest. Every target begins with the exact deterministic session name; no
+// prefix lookup, attach, or lifecycle observation is used to adopt a session.
+func (b *TmuxBackend) validateExistingSession(ctx context.Context, name, digest string) error {
+	binding, err := b.command(ctx, "show-environment", "-t", "="+name, "SIFT_TMUX_BINDING").Output()
+	if err != nil || string(binding) != "SIFT_TMUX_BINDING="+digest+"\n" {
+		return errors.New("tmux session binding does not match frozen launch")
+	}
+	panes, err := b.command(ctx, "list-panes", "-t", "="+name, "-s", "-F", "#{pane_dead}").Output()
+	if err != nil || string(panes) != "0\n" {
+		return errors.New("tmux session does not have exactly one live pane")
+	}
+	// A fresh session has window 0/pane 0. Requiring it here is deliberately
+	// fail-closed: a mutated target is never reclaimed, even if it retained the
+	// right environment value.
+	remain, err := b.command(ctx, "show-options", "-A", "-v", "-t", "="+name+":0.0", "remain-on-exit").Output()
+	if err != nil || string(remain) != "off\n" {
+		return errors.New("tmux session has remain-on-exit enabled or unknown")
+	}
+	return nil
 }
 
 func (b *TmuxBackend) command(ctx context.Context, args ...string) *exec.Cmd {
