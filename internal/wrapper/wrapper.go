@@ -125,7 +125,7 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	instance, session := secret(), secret()
 	wi := map[string]any{"pid": pid, "started_at_ms": started, "executable": self, "pgid": pid}
 	base := map[string]any{"run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "dispatch_id": b.DispatchID, "wrapper_instance_id": instance, "session_candidate": session, "wrapper_identity": wi}
-	if _, err := call(ctx, b.RunDir, "claim.acquire", map[string]any{"kind": "bootstrap", "nonce": b.BootstrapNonce}, base); err != nil {
+	if _, err := callReplay(ctx, b.RunDir, "claim.acquire", map[string]any{"kind": "bootstrap", "nonce": b.BootstrapNonce}, base); err != nil {
 		return err
 	}
 	nonce := secret()
@@ -136,6 +136,7 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	}
 	permit := secret()
 	pp := map[string]any{"run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "wrapper_instance_id": instance, "wrapper_identity": wi, "control_digest": digest, "control_nonce_hash": hash(nonce), "permit_candidate": permit}
+	dumpForTest("before-permit-rpc", map[string]any{"instance": instance, "session": session, "nonce": b.BootstrapNonce, "run_token": b.RunToken, "dispatch_id": b.DispatchID, "generation": b.Generation, "wrapper_identity": wi})
 	if err := pauseForTest("before-permit-rpc"); err != nil {
 		return err
 	}
@@ -154,6 +155,10 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	}
 	defer pty.Close()
 	if _, err := callPermit(ctx, b.RunDir, map[string]any{"kind": "wrapper_session", "session": session}, pp); err != nil {
+		return err
+	}
+	dumpForTest("after-permit-rpc", map[string]any{"instance": instance, "session": session, "permit": permit, "nonce": b.BootstrapNonce, "dispatch_id": b.DispatchID, "generation": b.Generation, "wrapper_identity": wi})
+	if err := pauseForTest("after-permit-rpc"); err != nil {
 		return err
 	}
 	task := filepath.Join(b.RunDir, "task.json")
@@ -237,6 +242,7 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 		return errors.Join(err, terminateAndReap(cmd, b.RunDir))
 	}
 	sp := map[string]any{"run_id": b.RunID, "attempt_no": b.AttemptNo, "generation": b.Generation, "wrapper_instance_id": instance, "agent_identity": ai, "control_digest": digest, "result_digest": nil}
+	dumpForTest("before-started-rpc", map[string]any{"instance": instance, "session": session, "permit": permit, "control_digest": digest, "generation": b.Generation, "dispatch_id": b.DispatchID, "agent_identity": ai})
 	if err := pauseForTest("before-started-rpc"); err != nil {
 		return err
 	}
@@ -246,7 +252,7 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	startedCtx, cancelStarted := context.WithCancel(ctx)
 	startedDone := make(chan error, 1)
 	go func() {
-		_, startedErr := call(startedCtx, b.RunDir, "claim.started", map[string]any{"kind": "wrapper_started", "session": session, "permit": permit}, sp)
+		_, startedErr := callReplay(startedCtx, b.RunDir, "claim.started", map[string]any{"kind": "wrapper_started", "session": session, "permit": permit}, sp)
 		startedDone <- startedErr
 	}()
 	var startedErr error
@@ -267,6 +273,10 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 	cancelStarted()
 	if startedErr != nil {
 		return errors.Join(startedErr, terminateAndReap(cmd, b.RunDir))
+	}
+	dumpForTest("after-started-rpc", map[string]any{"instance": instance, "session": session, "permit": permit, "control_digest": digest, "generation": b.Generation, "dispatch_id": b.DispatchID, "agent_identity": ai})
+	if err := pauseForTest("after-started-rpc"); err != nil {
+		return err
 	}
 	stopHeartbeat := make(chan struct{})
 	defer close(stopHeartbeat)
@@ -496,10 +506,17 @@ type rpcError struct{ code string }
 func (e *rpcError) Error() string { return "wrapper: RPC rejected: " + e.code }
 
 func callPermit(ctx context.Context, runDir string, auth, params map[string]any) (map[string]any, error) {
+	return callReplay(ctx, runDir, "claim.permit_spawn", auth, params)
+}
+
+// callReplay is deliberately limited to the three idempotent handoff verbs.
+// A response can disappear after their durable commit; retrying another RPC
+// here would turn transport loss into an unreviewed semantic retry policy.
+func callReplay(ctx context.Context, runDir, method string, auth, params map[string]any) (map[string]any, error) {
 	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	for {
-		result, err := call(ctx, runDir, "claim.permit_spawn", auth, params)
+		result, err := call(ctx, runDir, method, auth, params)
 		if err == nil {
 			return result, nil
 		}
