@@ -404,13 +404,14 @@ func detachedTopologyObservation(t *testing.T) runtimepkg.ProcessTopologyObserva
 	dir := t.TempDir()
 	wrapper, agent := filepath.Join(dir, "wrapper"), filepath.Join(dir, "agent")
 	agentPIDPath, descendantPIDPath := filepath.Join(dir, "agent.pid"), filepath.Join(dir, "descendant.pid")
-	if err := os.WriteFile(agent, []byte("#!/bin/sh\nsetsid sh -c 'echo $$ > \"$SIFT_DESCENDANT_PID\"; exec sleep 30' &\nchild=$!\necho \"$child\" > \"$SIFT_AGENT_PID\"\nwait \"$child\"\n"), 0755); err != nil {
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\necho \"$$\" > \"$SIFT_AGENT_PID\"\nsetsid sh -c 'echo $$ > \"$SIFT_DESCENDANT_PID\"; exec sleep 30' &\nchild=$!\nwait \"$child\"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n\"$SIFT_AGENT\" &\nagent=$!\nwait \"$agent\"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("setsid", wrapper)
+	cmd := exec.Command(wrapper)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(), "SIFT_AGENT="+agent, "SIFT_AGENT_PID="+agentPIDPath, "SIFT_DESCENDANT_PID="+descendantPIDPath)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -430,11 +431,13 @@ func detachedTopologyObservation(t *testing.T) runtimepkg.ProcessTopologyObserva
 		deadline := time.Now().Add(time.Second)
 		for time.Now().Before(deadline) {
 			if b, err := os.ReadFile(path); err == nil {
-				pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-				if err != nil {
-					t.Fatal(err)
+				raw := string(b)
+				if strings.HasSuffix(raw, "\n") {
+					pid, err := strconv.Atoi(strings.TrimSpace(raw))
+					if err == nil && pid > 0 {
+						return pid
+					}
 				}
-				return pid
 			}
 			time.Sleep(time.Millisecond)
 		}
