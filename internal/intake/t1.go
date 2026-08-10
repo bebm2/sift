@@ -2,6 +2,7 @@ package intake
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -26,6 +27,9 @@ type T1Evaluator struct {
 func (e *T1Evaluator) EvaluateIssue(ctx context.Context, project Project, issue forge.Issue) error {
 	item, err := e.DB.FindPendingIntake(ctx, project.ID, issue.ID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // already consumed or not yet intake'd
+		}
 		return err
 	}
 	input, err := brain.BuildT1Input(brain.T1Input{Forge: brain.T1Forge{Kind: string(project.Ref.Kind), Host: project.Ref.Host, ProjectKey: project.Ref.ProjectKey}, Issue: brain.T1Issue{ID: issue.ID, Title: issue.Title, Body: issue.Body, Author: issue.Author, URL: issue.URL, Labels: issue.Labels}, KnownCandidates: []brain.T1Candidate{}})

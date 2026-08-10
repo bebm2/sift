@@ -22,9 +22,7 @@ type rawIssue struct {
 	Author struct {
 		Username string `json:"username"`
 	} `json:"author"`
-	Labels []struct {
-		Name string `json:"name"`
-	} `json:"labels"`
+	Labels []json.RawMessage `json:"labels"`
 	UpdatedAt time.Time        `json:"updated_at"`
 	Pull      *json.RawMessage `json:"pull_request"`
 }
@@ -56,8 +54,16 @@ func (a *Adapter) issue(x rawIssue) (Issue, error) {
 		}
 	}
 	labels := []string{}
-	for _, l := range x.Labels {
-		labels = append(labels, l.Name)
+	for _, raw := range x.Labels {
+		var name string
+		if json.Unmarshal(raw, &name) == nil {
+			labels = append(labels, name)
+		} else {
+			var obj struct{ Name string `json:"name"` }
+			if json.Unmarshal(raw, &obj) == nil {
+				labels = append(labels, obj.Name)
+			}
+		}
 	}
 	return Issue{ID: id, Title: x.Title, Body: x.Body, Author: author, URL: link, State: state, Labels: sortDedupe(labels)}, nil
 }
