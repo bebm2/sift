@@ -258,7 +258,7 @@ func (a *Adapter) base(p ProjectRef) string {
 	if a.Kind == KindGitHub {
 		return "/repos/" + pathPart(p.ProjectKey)
 	}
-	return "/projects/" + pathPart(p.ProjectKey)
+	return "/projects/" + url.PathEscape(p.ProjectKey)
 }
 func pagePath(p string, n int) string {
 	sep := "?"
