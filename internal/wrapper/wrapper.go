@@ -539,7 +539,7 @@ func callReplay(ctx context.Context, runDir, method string, auth, params map[str
 
 func call(ctx context.Context, runDir, method string, auth, params map[string]any) (map[string]any, error) {
 	var dialer net.Dialer
-	c, err := dialer.DialContext(ctx, "unix", filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(runDir))), "run.sock"))
+	c, err := dialer.DialContext(ctx, "unix", filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(runDir)))), "run.sock"))
 	if err != nil {
 		return nil, err
 	}

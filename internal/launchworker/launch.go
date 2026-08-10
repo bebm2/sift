@@ -199,6 +199,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err := runtime.WriteControlFile(path, b); err != nil {
 			return err
 		}
+		fmt.Fprintf(os.Stderr, "sift launch: wrote bootstrap %s (%d bytes)\n", path, len(b))
 		if w.hooks.afterBootstrapWrite != nil {
 			if err := w.hooks.afterBootstrapWrite(); err != nil {
 				return err
@@ -254,6 +255,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if _, err := host.Spawn(ctx, launch); err != nil {
 			return fmt.Errorf("launch worker: spawn wrapper: %w", err)
 		}
+		fmt.Fprintf(os.Stderr, "sift launch: spawned backend=%s\n", backend)
 	} else if w.Backend != nil {
 		// The legacy single-host seam remains process-only for pre-router tests.
 		launch.Backend = string(config.BackendProcess)
