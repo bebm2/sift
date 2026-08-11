@@ -1,7 +1,7 @@
 ---
 status: active
 created: 2026-08-04
-last_updated: 2026-08-10
+last_updated: 2026-08-11
 summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 ---
 
@@ -20,7 +20,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 | M5 Attention/Command/Report/Brain/指标 | ✅ 完成 | PASS WITH NOTES | Interrupt 全功能、Command、Report、Channel、九项指标 |
 | M6 tmux + 完整故障矩阵 | ✅ 完成 | PASS WITH NOTES | tmux 第二后端、PTY、V2/V4 双后端全矩阵、阶段门归档 |
 | **M7 真实 Agent + PoC 取证** | 🔬 **PoC 已验证** | — | **Pi Brain+Agent 双 forge 端到端跑通** |
-| **M8 发布** | 🔄 **§8.1 已启动** | — | 单归档 + 版本/安装/握手（#903）；托管、升级、Homebrew 待续 |
+| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 已合入 main(#907/#908/#909/#910)：GoReleaser 归档+安装+握手、launchd/systemd/foreground+Homebrew、发布文档、doctor §8.10 终态。**A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后** |
 
 ## M7 PoC 验证成果(本轮)
 
@@ -67,10 +67,13 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 - **M7 完整门禁**:≥3 并行 Run + P50<60s 测量、手机端审批证据、凭证存储 spike
 - **#883 性能 profile**:M7 真实负载绑定
 - **wrapper handoff 精调**:`waiting_human` 上的 `kill`/`retry`/`approve` 操作验证
-- 既有 flake:`TestProductionTmuxWrapperCrashWindows` race 下偶发(非阻断)
+- **M8 A10 干净机验收**:干净 macOS + systemd Linux 从发布归档安装跑通 + 四组合冒烟证据(人工门禁,待 M7)
+- **M8 live 跨版本升级**:不丢 DB 状态 + 较新 schema 拒旧 daemon(待 M7 真实数据;契约级回归已随 #903)
+- **M8 backlog**:doctor `checks` 按 id 升序(P2 F4,#904 留存);GoReleaser v2 安装命令/doctor 退出码双述(P2,#906 留存);Homebrew tap 实际发布(需 GitHub Release)
+- ✅ **main CI 曾为红**(8bb8b93 run.sock 4x-Dir 改了生产布局但遗留 5 个夹具在旧布局,致 wrapper/crash-harness 套件 CI 失败)→ #903 `d2f6aef` 修复,main 现已绿
 
 ## 下一步
 
-1. **M7 剩余验收**:人工前置(并行 Run 环境、手机设备、凭证策略)
-2. **M8 §8.1 已完成（#903）**:release 版本（ldflags 注入）+ GoReleaser 四组合单归档/manifest/校验和 + `~/.sift/bin/<version>/` 原子安装 + doctor 握手可见性；契约见 [`specs/release.md`](specs/release.md)
-3. **M8 后续**:托管（launchd/systemd，§8.2）、Homebrew tap、干净机验收与文档（§8.3）
+1. **M7 剩余验收**:人工前置(并行 Run 环境、手机设备、凭证策略)——这是版本退出的关键 Human Gate
+2. **M8 A10 干净机验收**:M7 通过后,从发布归档在干净 macOS/systemd-Linux 安装跑通(§8.3)
+3. M7+A10 满足后进入【7 完成】:核对 PRD/WBS 退出条件,输出发布建议

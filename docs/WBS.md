@@ -553,22 +553,24 @@ summary: Sift PoC 的里程碑、工作分解与验收标准
 
 #### 8.3 干净机验收与文档
 
-- 干净 macOS 与 systemd Linux 各从发布归档安装并跑通完整闭环/恢复
-- 四种 OS/架构组合均保留安装与二进制冒烟证据
-- `dev/release.md`：manifest、构建矩阵、CGO 门禁、升级与干净机流程
-- `guides/installation.md` 与 `runbooks/troubleshooting.md`
+- `dev/release.md`：manifest、构建矩阵、CGO 门禁、升级与干净机流程 ✅（#906）
+- `guides/installation.md` 与 `runbooks/troubleshooting.md` ✅（#906）
+- 干净 macOS 与 systemd Linux 各从发布归档安装并跑通完整闭环/恢复 — **A10 人工门禁，待 M7 通过后**
+- 四种 OS/架构组合均保留安装与二进制冒烟证据 — **A10 人工门禁，待 M7 通过后**
 
 #### 8.4 doctor 最终姿态
 
-- 报 `unsafe-local` 与 TM6 每条未闭合暴露面，不把资格写成沙箱闭合
-- 按 DESIGN §8.10 全量检查 runtime、SQLite、Agent CLI/资格、相关 forge CLI、可选 tmux、policy schema/漂移、hooks、目录/socket 权限、版本、隔离、outbox 与推送故障
-- macOS/Linux 安全姿态分别呈现
+- 报 `unsafe-local` 与 TM6 每条未闭合暴露面，不把资格写成沙箱闭合 ✅（#904）
+- 按 DESIGN §8.10 全量检查 runtime、SQLite、Agent CLI/资格、相关 forge CLI、可选 tmux、policy schema/漂移、hooks、目录/socket 权限、版本、隔离、outbox 与推送故障 ✅（#904）
+- macOS/Linux 安全姿态分别呈现 ✅（#904）
+- 版本/协议不一致的 fail-closed 报告（CLI↔daemon binary-major、wrapper protocol-major 实探测、canonical SemVer 校验、负 protocol_minor 拒绝、response envelope 校验）✅（#904，经 7 轮审修闭环；仅 P2 `checks` id 升序留 backlog）
 
 ### M8 门禁
 
-- V15 全部通过
-- A10 两台干净机证据齐全
-- 原子升级不丢数据库状态，较新 schema 拒绝旧 daemon
+- **§8.1–§8.4 自动化核心已合入 main**（#907/#908/#909/#910）：归档+安装+握手、托管单元、发布文档、doctor 终态。CI 四组合构建 + schema-drift + release-snapshot-smoke + vet+test 全绿。
+- V15 发布归档构建段通过（`release snapshot smoke` CI job）；**V15 最终闭合 = A10 干净机运行证据，属人工门禁，待 M7 通过后**。
+- A10 两台干净机证据齐全 — **人工门禁，待 M7 通过后**。
+- 原子升级不丢数据库状态，较新 schema 拒绝旧 daemon — live 跨版本验证属人工门禁（待 M7 真实数据）；契约/单元级回归已随 #903。
 
 ---
 
