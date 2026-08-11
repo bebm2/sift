@@ -69,7 +69,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 - **wrapper handoff 精调**:`waiting_human` 上的 `kill`/`retry`/`approve` 操作验证
 - **M8 A10 干净机验收**:干净 macOS + systemd Linux 从发布归档安装跑通 + 四组合冒烟证据(人工门禁,待 M7)
 - **M8 live 跨版本升级**:不丢 DB 状态 + 较新 schema 拒旧 daemon(待 M7 真实数据;契约级回归已随 #903)
-- **M8 backlog**:doctor `checks` 按 id 升序(P2 F4,#904 留存);GoReleaser v2 安装命令/doctor 退出码双述(P2,#906 留存);Homebrew tap 实际发布(需 GitHub Release)
+- **M8 backlog**:Homebrew tap 实际发布(需 GitHub Release 产物)。✅ 其余 M8 P2(doctor `checks` id 升序 F4、GoReleaser v2 安装命令、doctor 退出码去重)已随 #911/#912 关闭
 - ✅ **main CI 曾为红**(8bb8b93 run.sock 4x-Dir 改了生产布局但遗留 5 个夹具在旧布局,致 wrapper/crash-harness 套件 CI 失败)→ #903 `d2f6aef` 修复,main 现已绿
 
 ## 下一步
