@@ -101,6 +101,71 @@ func installDoctorWrapperVersion(t *testing.T, version string, protocolMajor int
 // TestVersionFlag makes `sift --version` report the release version. The
 // wrapper prints the same value via --version and the daemon via the RPC
 // envelope / doctor; the release handshake compares them (WBS M8 §8.1).
+func TestHumanOverviewAndHelp(t *testing.T) {
+	freshHome(t)
+	var overviewOut bytes.Buffer
+	if code := run([]string{"sift"}, &overviewOut, io.Discard); code != 0 {
+		t.Fatalf("overview exit code = %d", code)
+	}
+	if !strings.Contains(overviewOut.String(), "Sift ") || !strings.Contains(overviewOut.String(), "sift doctor --offline") {
+		t.Fatalf("overview = %q", overviewOut.String())
+	}
+	if strings.Contains(overviewOut.String(), "sift init") {
+		t.Fatalf("overview advertises unimplemented init: %q", overviewOut.String())
+	}
+
+	var helpOut bytes.Buffer
+	if code := run([]string{"sift", "help"}, &helpOut, io.Discard); code != 0 {
+		t.Fatalf("help exit code = %d", code)
+	}
+	if !strings.Contains(helpOut.String(), "命令参考") || strings.Contains(helpOut.String(), "init") {
+		t.Fatalf("help = %q", helpOut.String())
+	}
+	var helpErr bytes.Buffer
+	if code := run([]string{"sift", "help", "init"}, io.Discard, &helpErr); code != 2 {
+		t.Fatalf("help init exit code = %d, want 2", code)
+	}
+}
+
+func TestHumanDoctorRendersStatusesAndExitCodes(t *testing.T) {
+	result := map[string]any{
+		"exit_code": 0,
+		"checks": []any{
+			map[string]any{"id": "ok-check", "level": "ok", "message": "ready"},
+			map[string]any{"id": "warning-check", "level": "warning", "message": "attention"},
+			map[string]any{"id": "error-check", "level": "error", "message": "failed"},
+		},
+	}
+	for _, wantCode := range []int{0, 1, 2} {
+		result["exit_code"] = wantCode
+		var out bytes.Buffer
+		if code := emitDoctor(&out, io.Discard, result, false); code != wantCode {
+			t.Fatalf("doctor exit code = %d, want %d", code, wantCode)
+		}
+		for _, icon := range []string{"✓", "⚠", "✗"} {
+			if !strings.Contains(out.String(), icon) {
+				t.Fatalf("doctor output %q lacks %s", out.String(), icon)
+			}
+		}
+		if !strings.Contains(out.String(), "Sift 诊断") || !strings.Contains(out.String(), "退出码") {
+			t.Fatalf("doctor output = %q", out.String())
+		}
+	}
+}
+
+func TestDoctorJSONEnvironment(t *testing.T) {
+	freshHome(t)
+	t.Setenv("SIFT_JSON", "1")
+	var out bytes.Buffer
+	if code := run([]string{"sift", "doctor", "--offline"}, &out, io.Discard); code != 2 {
+		t.Fatalf("doctor exit code = %d, want 2", code)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("SIFT_JSON output is not JSON: %v; output=%q", err, out.String())
+	}
+}
+
 func TestVersionFlag(t *testing.T) {
 	var out bytes.Buffer
 	if code := run([]string{"sift", "--version"}, &out, io.Discard); code != 0 {
@@ -434,7 +499,7 @@ func TestDoctorResultContract(t *testing.T) {
 func TestRunDoctorOfflineExitsWithError(t *testing.T) {
 	freshHome(t) // no sift.db -> sqlite check errors
 	var out bytes.Buffer
-	code := run([]string{"sift", "doctor", "--offline"}, &out, io.Discard)
+	code := run([]string{"sift", "doctor", "--offline", "--json"}, &out, io.Discard)
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; output:\n%s", code, out.String())
 	}
@@ -457,7 +522,7 @@ func TestRunDoctorOfflineExitsWithWarning(t *testing.T) {
 	installDoctorWrapper(t)
 	home := freshHome(t)
 	withDatabase(t, home)
-	code := run([]string{"sift", "doctor", "--offline"}, &bytes.Buffer{}, io.Discard)
+	code := run([]string{"sift", "doctor", "--offline", "--json"}, &bytes.Buffer{}, io.Discard)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -481,7 +546,7 @@ func TestRunDoctorOnlineExitsWithWarning(t *testing.T) {
 	waitSocket(t, filepath.Join(home, "siftd.sock"))
 
 	var out bytes.Buffer
-	code := run([]string{"sift", "doctor"}, &out, io.Discard)
+	code := run([]string{"sift", "doctor", "--json"}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
 	}
@@ -506,7 +571,7 @@ func TestRunDoctorOnlineExitsWithWarning(t *testing.T) {
 func TestRunDoctorOnlineExitsOneWhenDaemonUnavailable(t *testing.T) {
 	freshHome(t) // no daemon, no token, no socket
 	var stderr bytes.Buffer
-	code := run([]string{"sift", "doctor"}, io.Discard, &stderr)
+	code := run([]string{"sift", "doctor", "--json"}, io.Discard, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -548,7 +613,7 @@ func TestDoctorHandshakeErrorConsistencyDaemonVersionMismatchExitsTwo(t *testing
 	go func() { _ = s.Serve(ctx) }()
 	waitSocket(t, filepath.Join(home, "siftd.sock"))
 
-	cmd := exec.Command(cli, "doctor")
+	cmd := exec.Command(cli, "doctor", "--json")
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("mismatched doctor exited 0; output:\n%s", output)
@@ -626,7 +691,7 @@ func TestDoctorRejectsInvalidResponseEnvelope(t *testing.T) {
 			home := freshHome(t)
 			serveFakeDoctorResponse(t, home, tc.response)
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"sift", "doctor"}, &stdout, &stderr); code == 0 {
+			if code := run([]string{"sift", "doctor", "--json"}, &stdout, &stderr); code == 0 {
 				t.Fatalf("doctor exit code = 0; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 			if stdout.Len() != 0 {
@@ -662,7 +727,7 @@ func TestDoctorOnlineResultContract(t *testing.T) {
 				return fakeDoctorSuccess(req.RequestID, tc.result)
 			})
 			var stdout, stderr bytes.Buffer
-			if got := run([]string{"sift", "doctor"}, &stdout, &stderr); got != tc.want {
+			if got := run([]string{"sift", "doctor", "--json"}, &stdout, &stderr); got != tc.want {
 				t.Fatalf("doctor exit code = %d, want %d; stdout=%q stderr=%q", got, tc.want, stdout.String(), stderr.String())
 			}
 		})
@@ -713,7 +778,7 @@ func TestDoctorHandshakeErrorConsistency(t *testing.T) {
 			home := freshHome(t)
 			serveFakeDoctorResponse(t, home, tc.response)
 			var stdout, stderr bytes.Buffer
-			if got := run([]string{"sift", "doctor"}, &stdout, &stderr); got != tc.want {
+			if got := run([]string{"sift", "doctor", "--json"}, &stdout, &stderr); got != tc.want {
 				t.Fatalf("doctor exit code = %d, want %d; stdout=%q stderr=%q", got, tc.want, stdout.String(), stderr.String())
 			}
 			if tc.consume {
@@ -757,7 +822,7 @@ func TestDoctorProtocolMinorNegative(t *testing.T) {
 			home := freshHome(t)
 			serveFakeDoctorResponse(t, home, tc.response)
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"sift", "doctor"}, &stdout, &stderr); code == 0 {
+			if code := run([]string{"sift", "doctor", "--json"}, &stdout, &stderr); code == 0 {
 				t.Fatalf("doctor exit code = 0; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 			if stdout.Len() != 0 {
@@ -849,7 +914,7 @@ func TestDoctorWrapperUniqueOnline(t *testing.T) {
 	waitSocket(t, filepath.Join(home, "siftd.sock"))
 
 	var out bytes.Buffer
-	if code := run([]string{"sift", "doctor"}, &out, io.Discard); code != 1 {
+	if code := run([]string{"sift", "doctor", "--json"}, &out, io.Discard); code != 1 {
 		t.Fatalf("exit code = %d, want 1 (unsafe-local warning only); output:\n%s", code, out.String())
 	}
 	var response map[string]any
@@ -1093,7 +1158,11 @@ func startServerWithChannelFailure(t *testing.T, home string) {
 func channelDeliveryFromCLI(t *testing.T, command string) map[string]any {
 	t.Helper()
 	var out bytes.Buffer
-	run([]string{"sift", command}, &out, io.Discard)
+	args := []string{"sift", command}
+	if command == "doctor" {
+		args = append(args, "--json")
+	}
+	run(args, &out, io.Discard)
 	var response map[string]any
 	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
 		t.Fatalf("sift %s unmarshal: %v; output:\n%s", command, err, out.String())
