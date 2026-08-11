@@ -32,10 +32,11 @@ created: 2026-08-11
 | **ux-1** | `internal/cli/render` 渲染包（tty 检测、状态图标、分节、表格，stdlib）+ `sift help`/`--help`/`-h`/`sift help <cmd>` 中文命令参考 + `sift` 无参数→友好概览（版本/配置在否/下一步）+ `doctor`/`doctor --offline` 人话化（`--json` 保留） | gpt-5.6-luna |
 | **ux-2** | 查询命令人话化：`ps`/`timeline`/`logs`（用 render 包，`--json` 各留） | deepseek-v4-flash |
 | **ux-3** | 查询命令人话化续：`metrics`/`worktree`/`kill`/`retry`/`report`/`attach` | deepseek-v4-flash |
-| **ux-4** | **`sift init` 交互向导** + `sift project add` / `sift agent add`：探测 forge CLI+登录态（`gh auth status`）、探测已装 agent（claude/codex/cursor/pi 可执行）、引导绑定仓库（`git remote` 自动探测 owner/repo）、原子写 config（备份+chmod 600）、幂等、flags 非交互 | gpt-5.6-terra（引擎/深推理） |
+| **ux-4** | **`sift init` 交互向导** + `sift project add` / `sift agent add`：探测 forge CLI+登录态（`gh auth status`）、探测已装 agent（claude/codex/cursor/pi 可执行）、引导绑定仓库（`git remote` 自动探测 owner/repo）、原子写 config（备份+chmod 600）、幂等、flags 非交互。**末尾提供「安装后台服务并现在启动？」** | gpt-5.6-terra（引擎/深推理） |
 | **ux-5** | 友好错误（可行动下一步，不甩 JSON/stack）+ `daemon` 启动/状态人话 + README/getting-started 与新 UX 对齐（协调 #915） | gpt-5.6-sol（文档）+ luna（代码） |
+| **ux-6** | **服务生命周期**：`sift service start\|stop\|reload`（per-backend：launchd kickstart/bootout、systemd start/stop；reload V1=重启，诚实标注、SIGHUP 真热重载留后续）；`sift service install` **一致自启**（systemd 升级为 `enable --now`，不只 daemon-reload）；`sift service status` 人话化。安装器不自动起（未配置无意义、curl\|bash 非交互）→ 由 `sift init` 引导启动 | gpt-5.6-terra（launchd/systemd 语义） |
 
-依赖：ux-1 先行（渲染包是 ux-2/ux-3 的地基）；ux-4 可与 ux-2/ux-3 并行（不同文件）；ux-5 收尾。
+依赖：ux-1 先行（渲染包是 ux-2/ux-3 的地基）；ux-4/ux-6 均改 `cmd/sift/main.go`，与 ux-2/ux-3 **串行**避免冲突（ux-1 合后逐片推进）；ux-5 收尾。优先级：ux-6（用户当下所需）紧随 ux-1。
 
 ## 非目标
 
