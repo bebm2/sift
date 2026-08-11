@@ -20,7 +20,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 | M5 Attention/Command/Report/Brain/指标 | ✅ 完成 | PASS WITH NOTES | Interrupt 全功能、Command、Report、Channel、九项指标 |
 | M6 tmux + 完整故障矩阵 | ✅ 完成 | PASS WITH NOTES | tmux 第二后端、PTY、V2/V4 双后端全矩阵、阶段门归档 |
 | **M7 真实 Agent + PoC 取证** | 🔬 **PoC 已验证** | — | **Pi Brain+Agent 双 forge 端到端跑通** |
-| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 已合入 main(#907/#908/#909/#910)：GoReleaser 归档+安装+握手、launchd/systemd/foreground+Homebrew、发布文档、doctor §8.10 终态。**A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后** |
+| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 合入 main(#907–#910)；**Release v0.1.0 已发布**（四组合归档 + checksums，`curl\|bash` 一键安装实测通过 #913/#914）。A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后 |
 
 ## M7 PoC 验证成果(本轮)
 
@@ -69,7 +69,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 - **wrapper handoff 精调**:`waiting_human` 上的 `kill`/`retry`/`approve` 操作验证
 - **M8 A10 干净机验收**:干净 macOS + systemd Linux 从发布归档安装跑通 + 四组合冒烟证据(人工门禁,待 M7)
 - **M8 live 跨版本升级**:不丢 DB 状态 + 较新 schema 拒旧 daemon(待 M7 真实数据;契约级回归已随 #903)
-- **M8 backlog**:Homebrew tap 实际发布(需 GitHub Release 产物)。✅ 其余 M8 P2(doctor `checks` id 升序 F4、GoReleaser v2 安装命令、doctor 退出码去重)已随 #911/#912 关闭
+- **M8 backlog**:✅ `curl\|bash` 一键安装已上线（Release v0.1.0，#913/#914）；Homebrew tap 实际发布为可选（formula 草稿已在 #905，需时再推 tap repo）。✅ 其余 M8 P2(doctor `checks` id 升序 F4、GoReleaser v2 命令、退出码去重)已随 #911/#912 关闭。安装器 F6(缺 manifest 成员 fail-open, P2)留 backlog。
 - ✅ **main CI 曾为红**(8bb8b93 run.sock 4x-Dir 改了生产布局但遗留 5 个夹具在旧布局,致 wrapper/crash-harness 套件 CI 失败)→ #903 `d2f6aef` 修复,main 现已绿
 
 ## 下一步
