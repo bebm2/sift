@@ -38,6 +38,16 @@ created: 2026-08-11
 
 依赖：ux-1 先行（渲染包是 ux-2/ux-3 的地基）；ux-4/ux-6 均改 `cmd/sift/main.go`，与 ux-2/ux-3 **串行**避免冲突（ux-1 合后逐片推进）；ux-5 收尾。优先级：ux-6（用户当下所需）紧随 ux-1。
 
+## 架构决策：CLI 对 server 的依赖与 config 生效策略
+
+**依赖矩阵（实测）**：查询/控制命令（`ps`/`timeline`/`logs`/`metrics`/`kill`/`retry`/`attach`/`worktree`/`report`/`doctor`在线/`hooks-bootstrap`）走 `run.sock` 的 `ops.*` RPC，**严格依赖 daemon**；设置/本地命令（`init`/`service`/`install`/`doctor --offline`/`--version`/`daemon`）**daemon-independent**。
+
+**`sift init` = daemon-independent 但 daemon-aware**：本地探测（`gh auth status`/`executable --version`/`git remote`）+ 写 `config.yaml`，全程不需 server。首跑**不必先起 daemon**（流程①：init→service install+start，daemon 启动读 config，`cmd/sift/daemon.go:37` 仅启动时 `config.Load`）；服务先行也可（流程②：install+start 零配置 idle→init 改 config→reload）。init 检测到运行中 socket 时提示「daemon 运行中，reload 生效？」。
+
+**config 生效（daemon 运行中变更）**：
+- **采用**：文件为 config 事实源 + `reload`（V1 = restart，诚实标注，M3 paused recovery 保证安全）→ V2 加 SIGHUP 真热重载（冻结 snapshot 语义可控：只作用新工作）。
+- **放弃**：server API 写 config——operator socket 新增敏感写面、文件+API 双写致事实源漂移、本质是 reload 换触发方式却多一层协议；本地单用户零暴露面下不必要。
+
 ## 非目标
 
 - 不改 control-plane RPC 协议/schema（V14/V15 不变）。
