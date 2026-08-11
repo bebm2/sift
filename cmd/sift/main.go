@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -469,7 +471,7 @@ func commandHelp(command string, stdout, stderr io.Writer) int {
 		"report":          {"向运行提交报告", "sift report <kind> --key KEY --payload JSON", "sift report review --key run-123 --payload '{}'"},
 		"hooks-bootstrap": {"为项目安装 Git hooks", "sift hooks-bootstrap <project-id>", "sift hooks-bootstrap project-1"},
 		"install":         {"安装 Sift 发布包", "sift install <archive.tar.gz>", "sift install sift.tar.gz"},
-		"service":         {"管理系统服务", "sift service <install|uninstall|status|restart>", "sift service status"},
+		"service":         {"管理后台服务", "sift service <install|uninstall|start|stop|restart|reload|status>", "sift service status"},
 	}
 	entry, ok := entries[command]
 	if !ok {
@@ -513,7 +515,7 @@ func nullableStringCLI(s string) any {
 // reports the foreground fallback rather than failing (DESIGN §11).
 func runService(args []string, home config.Home, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
-		report(stderr, fmt.Errorf("usage: sift service <install|uninstall|status|restart>"))
+		report(stderr, fmt.Errorf("usage: sift service <install|uninstall|start|stop|restart|reload|status>"))
 		return 2
 	}
 	action, err := hosting.ActionFromString(args[0])
@@ -531,29 +533,97 @@ func runService(args []string, home config.Home, stdout, stderr io.Writer) int {
 		report(stderr, err)
 		return 1
 	}
-	if err := hosting.Write(plan); err != nil {
-		report(stderr, err)
-		return 1
+	migratedLegacy := false
+	if spec.Backend == hosting.BackendLaunchd && (action == hosting.ActionInstall || action == hosting.ActionRestart || action == hosting.ActionReload) {
+		migratedLegacy, err = migrateLegacyLaunchd(stdout)
+		if err != nil {
+			report(stderr, err)
+			return 1
+		}
 	}
-	if plan.WriteFile != "" {
+	// The documented upgrade path is install-archive -> restart. If the old
+	// agent was the only loaded unit, migration removed its plist; load the new
+	// plist before kickstart so restart reaches the existing daemon.
+	if migratedLegacy && (action == hosting.ActionRestart || action == hosting.ActionReload) {
+		if _, statErr := os.Stat(spec.UnitPath); os.IsNotExist(statErr) {
+			installPlan, planErr := spec.Plan(hosting.ActionInstall)
+			if planErr != nil {
+				report(stderr, planErr)
+				return 1
+			}
+			if err := hosting.Write(installPlan); err != nil {
+				report(stderr, err)
+				return 1
+			}
+			if _, err := hosting.Exec(installPlan); err != nil && !errors.Is(err, hosting.ErrNoBackend) {
+				report(stderr, err)
+				return 1
+			}
+		}
+	}
+	installed := false
+	if action == hosting.ActionStatus && spec.Backend != hosting.BackendForeground {
+		_, err := os.Stat(spec.UnitPath)
+		installed = err == nil
+		if os.IsNotExist(err) {
+			renderServiceStatus(stdout, spec, "", false)
+			return 0
+		}
+		if err != nil {
+			report(stderr, fmt.Errorf("stat service unit %s: %w", spec.UnitPath, err))
+			return 1
+		}
+	}
+	// launchctl bootout must happen before removing the plist. A stopped agent
+	// returns exit 3 / "No such process", which is already the desired state.
+	if action != hosting.ActionUninstall {
+		if err := hosting.Write(plan); err != nil {
+			report(stderr, err)
+			return 1
+		}
+	}
+	out, execErr := hosting.Exec(plan)
+	if (action == hosting.ActionUninstall || action == hosting.ActionStop) && hosting.IsAlreadyUnloaded(execErr) {
+		// "No such process" is the successful idempotent case; do not render
+		// launchctl's diagnostic as though the CLI had failed.
+		out, execErr = nil, nil
+	}
+	if action == hosting.ActionUninstall && (execErr == nil || errors.Is(execErr, hosting.ErrNoBackend)) {
+		if err := hosting.Write(plan); err != nil {
+			report(stderr, err)
+			return 1
+		}
+	}
+	if execErr == nil && plan.WriteFile != "" {
 		if plan.Content != nil {
 			fmt.Fprintf(stdout, "wrote %s unit: %s\n", spec.Backend, plan.WriteFile)
 		} else {
 			fmt.Fprintf(stdout, "removed %s unit: %s\n", spec.Backend, plan.WriteFile)
 		}
 	}
-	out, execErr := hosting.Exec(plan)
-	if len(out) > 0 {
-		stdout.Write(out)
-	}
 	switch {
 	case execErr == nil:
-		fmt.Fprintf(stdout, "%s: %s\n", spec.Backend, plan.Summary)
+		if len(out) > 0 && action != hosting.ActionStatus {
+			_, _ = stdout.Write(out)
+		}
+		if action == hosting.ActionStatus {
+			renderServiceStatus(stdout, spec, string(out), installed)
+		} else {
+			fmt.Fprintf(stdout, "%s: %s\n", spec.Backend, plan.Summary)
+			if action == hosting.ActionReload {
+				fmt.Fprintln(stdout, "reload 当前等价于 restart（热重载 SIGHUP 未实现，留后续）")
+			}
+		}
 		return 0
 	case errors.Is(execErr, hosting.ErrNoBackend):
 		// No supervisor: the foreground hint is the supported path, not an
 		// error. Print it and exit 0 so `sift service install` is portable.
 		printForegroundReport(stdout, plan)
+		return 0
+	case action == hosting.ActionStatus:
+		// Both launchctl list and systemctl status use non-zero exits for a
+		// stopped unit. The retained unit file still means installed.
+		renderServiceStatus(stdout, spec, string(out), installed)
 		return 0
 	default:
 		report(stderr, execErr)
@@ -561,17 +631,113 @@ func runService(args []string, home config.Home, stdout, stderr io.Writer) int {
 	}
 }
 
-// printForegroundReport writes the no-supervisor report for a plan: the
-// summary, the hosting §5 status verdict when the plan carries one (so
-// `sift service status` reports present|absent for the operator socket,
-// verifiable with `[ -S "$SIFT_HOME/siftd.sock" ]`, instead of only a hint),
-// and the human hint.
-func printForegroundReport(stdout io.Writer, plan hosting.Plan) {
-	fmt.Fprintf(stdout, "%s\n", plan.Summary)
-	if plan.Status != "" {
-		fmt.Fprintf(stdout, "  operator socket %s: %s\n", plan.SocketPath, plan.Status)
+// migrateLegacyLaunchd removes the v0.1.0 label before installing the current
+// one. Without this, both labels can supervise daemons that contend for the
+// same SIFT_HOME lock after an upgrade.
+func migrateLegacyLaunchd(stdout io.Writer) (bool, error) {
+	oldUnit, err := hosting.LegacyLaunchdUnitPath()
+	if err != nil {
+		return false, err
 	}
-	fmt.Fprintf(stdout, "  %s\n", plan.Hint)
+	_, statErr := os.Stat(oldUnit)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return false, fmt.Errorf("stat legacy launchd unit %s: %w", oldUnit, statErr)
+	}
+	legacyFile := statErr == nil
+	_, probeErr := hosting.Exec(hosting.LegacyLaunchdStatusPlan())
+	legacyLoaded := probeErr == nil
+	if !legacyFile && !legacyLoaded {
+		return false, nil
+	}
+	if !errors.Is(probeErr, hosting.ErrNoBackend) {
+		_, bootoutErr := hosting.Exec(hosting.LegacyLaunchdBootoutPlan())
+		if bootoutErr != nil && !hosting.IsAlreadyUnloaded(bootoutErr) {
+			return false, bootoutErr
+		}
+	}
+	if err := hosting.Write(hosting.Plan{Action: hosting.ActionUninstall, WriteFile: oldUnit}); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(stdout, "迁移：已移除旧 label %s\n", hosting.LegacyLabel)
+	return true, nil
+}
+
+// renderServiceStatus keeps platform command output out of the default CLI
+// surface while retaining the facts an operator needs: supervisor backend,
+// running state, PID when available, and the control socket path.
+func renderServiceStatus(stdout io.Writer, spec hosting.Spec, output string, installed bool) {
+	state, pid := "未运行", ""
+	if !installed {
+		state = "未安装"
+	} else if serviceRunning(spec.Backend, output) {
+		state = "运行中"
+		pid = servicePID(spec.Backend, output)
+	}
+	level := "error"
+	if state == "运行中" {
+		level = "ok"
+	}
+	fmt.Fprintf(stdout, "%s %s（%s", render.Status(level), state, spec.Backend)
+	if pid != "" {
+		fmt.Fprintf(stdout, "，PID %s", pid)
+	}
+	fmt.Fprintf(stdout, "，socket %s）\n", filepath.Join(spec.HomePath, "siftd.sock"))
+}
+
+var launchdPIDPattern = regexp.MustCompile(`(?m)^\s*"PID"\s*=\s*([0-9]+|-)\s*;`)
+
+func serviceRunning(backend hosting.Backend, output string) bool {
+	switch backend {
+	case hosting.BackendLaunchd:
+		return servicePID(backend, output) != ""
+	case hosting.BackendSystemd:
+		return strings.Contains(output, "Active: active (running)") && servicePID(backend, output) != ""
+	default:
+		return false
+	}
+}
+
+func servicePID(backend hosting.Backend, output string) string {
+	switch backend {
+	case hosting.BackendLaunchd:
+		match := launchdPIDPattern.FindStringSubmatch(output)
+		if len(match) != 2 || match[1] == "-" {
+			return ""
+		}
+		pid, err := strconv.ParseUint(match[1], 10, 32)
+		if err != nil || pid == 0 {
+			return ""
+		}
+		return match[1]
+	case hosting.BackendSystemd:
+		fields := strings.Fields(output)
+		for i, field := range fields {
+			if field == "PID:" && i+1 < len(fields) {
+				pid, err := strconv.ParseUint(fields[i+1], 10, 32)
+				if err == nil && pid > 0 {
+					return fields[i+1]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// printForegroundReport writes the no-supervisor report and uses the socket
+// verdict for its status action.
+func printForegroundReport(stdout io.Writer, plan hosting.Plan) {
+	if plan.Action == hosting.ActionStatus {
+		level, state := "error", "未运行"
+		if plan.Status == "present" {
+			level, state = "ok", "运行中"
+		}
+		fmt.Fprintf(stdout, "%s %s（foreground，socket %s: %s）\n", render.Status(level), state, plan.SocketPath, plan.Status)
+		return
+	}
+	fmt.Fprintf(stdout, "%s\n  %s\n", plan.Summary, plan.Hint)
+	if plan.Action == hosting.ActionReload {
+		fmt.Fprintln(stdout, "reload 当前等价于 restart（热重载 SIGHUP 未实现，留后续）")
+	}
 }
 
 var reportKinds = map[string]bool{"progress": true, "goal": true, "blocker": true, "completed": true}

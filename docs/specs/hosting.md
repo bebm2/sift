@@ -32,7 +32,7 @@ summary: 用户级托管单元（launchd/systemd/foreground）的生成、安装
 
 | 平台 | 后端 | 单元位置 | 自启语义 |
 |------|------|----------|----------|
-| macOS | launchd user agent | `~/Library/LaunchAgents/com.miaoxiaoyong.sift.plist` | `RunAtLoad` + `KeepAlive=true`（登录即起、崩溃即重启）；`ThrottleInterval=10` 防崩溃紧循环 |
+| macOS | launchd user agent | `~/Library/LaunchAgents/cn.hexai.sift.plist` | `RunAtLoad` + `KeepAlive=true`（登录即起、崩溃即重启）；`ThrottleInterval=10` 防崩溃紧循环 |
 | Linux | systemd user unit | `$XDG_CONFIG_HOME/systemd/user/sift.service`（默认 `~/.config/systemd/user/sift.service`） | `Restart=on-failure` + `RestartSec=10`；`loginctl enable-linger $USER` 后可在未登录时常驻 |
 | 其它 / 无 supervisor | foreground | 无单元文件 | 用户在前台 / tmux / screen 直接跑 `sift daemon`；V0 **不承诺**自动常驻 |
 
@@ -52,7 +52,7 @@ summary: 用户级托管单元（launchd/systemd/foreground）的生成、安装
 
 | 字段 | 值 | 理由 |
 |------|----|------|
-| `Label` | `com.miaoxiaoyong.sift` | 稳定句柄；`launchctl kickstart -k gui/<uid>/<Label>` 原子重启 |
+| `Label` | `cn.hexai.sift` | 稳定句柄；`launchctl kickstart -k gui/<uid>/<Label>` 原子重启 |
 | `ProgramArguments` | `[<home>/bin/current/sift, daemon]` | 跟随 `current` |
 | `RunAtLoad` | `true` | 登录即起 |
 | `KeepAlive` | `true` | 崩溃自启（§4） |
@@ -82,7 +82,8 @@ summary: 用户级托管单元（launchd/systemd/foreground）的生成、安装
 **原子升级后重启（DESIGN §11 升级段落）：**
 
 1. `sift install <new-archive>`：把新版本两二进制 + manifest 装到 `bin/<new-release>/`，校验后原子切换 `current → <new-release>`（release.md §3，temp+rename，绝不逐文件覆盖）。
-2. `sift service restart`：
+2. 从 v0.1.0 升级的 macOS 用户执行 `sift service restart`（或 `sift service install`）时会一次性迁移 launchd label：卸载旧的 `com.miaoxiaoyong.sift` agent 并删除旧 plist，再使用 `cn.hexai.sift`。旧 label 不存在时该步骤幂等，因此按本节升级路径不会留下重复 agent。
+3. `sift service restart`：
    - launchd：`launchctl kickstart -k gui/<uid>/<Label>`（原子重启，按 label）。
    - systemd：`systemctl --user restart sift.service`。
    - foreground：提示用户停止并重新运行（无 supervisor）。
@@ -92,17 +93,20 @@ summary: 用户级托管单元（launchd/systemd/foreground）的生成、安装
 ## 5. CLI（`sift service`）
 
 ```
-sift service <install|uninstall|status|restart>
+sift service <install|uninstall|start|stop|restart|reload|status>
 ```
 
 | 动作 | 行为 |
 |------|------|
-| `install` | 生成单元文件（temp+rename 原子写）→ 探测平台工具存在则加载（launchd `launchctl load`；systemd `daemon-reload` + `enable --now`）；工具缺失则打印 foreground 提示并 exit 0（可移植）。**要求已 `sift install` 一个 release**：单元必须指向真实二进制。 |
+| `install` | 生成单元文件（temp+rename 原子写）→ 探测平台工具存在则加载并启动（launchd `launchctl load`；systemd `daemon-reload` + `enable --now`）；工具缺失则打印 foreground 提示并 exit 0（可移植）。**要求已 `sift install` 一个 release**：单元必须指向真实二进制。 |
 | `uninstall` | 停 / 卸载单元（launchd `bootout`/`unload`；systemd `disable --now`）→ 删除单元文件（幂等）。 |
-| `status` | launchd `launchctl list <Label>` / systemd `systemctl --user status`；foreground 报告 operator socket 存在性。 |
+| `start` | launchd 加载保留的 plist；systemd `systemctl --user start sift.service`；foreground 提示在终端运行 `sift daemon`。 |
+| `stop` | launchd `bootout`（防 `KeepAlive` 立即拉起）；systemd `systemctl --user stop sift.service`；foreground 提示停止该前台进程。 |
+| `reload` | V1 等价于 `restart`，明确输出 SIGHUP 热重载尚未实现。 |
+| `status` | 默认人话输出 `✓ 运行中` / `✗ 未运行` / `✗ 未安装`，包含 backend、可用时的 PID 和 operator socket；底层查询为 launchd `launchctl list <Label>` / systemd `systemctl --user status`，foreground 实探 socket。 |
 | `restart` | 见 §4 升级后重启。 |
 
-`sift service install` 把 ExecStart 指向 `bin/current/sift`，故**升级路径 = `sift install` + `sift service restart`**，二者解耦（install 不碰单元，restart 不碰版本目录）。
+`sift service install` 把 ExecStart 指向 `bin/current/sift`，故**升级路径 = `sift install` + `sift service restart`**，二者解耦（install 不碰版本目录；restart 会按上面的兼容迁移规则处理旧 launchd label）。
 
 ## 6. Homebrew formula 草稿
 

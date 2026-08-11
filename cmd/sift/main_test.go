@@ -226,6 +226,98 @@ func TestServiceRejectsUnknownAction(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyLaunchdRemovesLoadedAgentAndPlist(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, "Library", "LaunchAgents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	legacy, err := hosting.LegacyLaunchdUnitPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(root, "launchctl.log")
+	launchctl := filepath.Join(bin, "launchctl")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + log + "\"\ncase \"$1\" in list) exit 0;; bootout) exit 0;; esac\n"
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var out bytes.Buffer
+	if migrated, err := migrateLegacyLaunchd(&out); err != nil {
+		t.Fatal(err)
+	} else if !migrated {
+		t.Fatal("migration reported no legacy agent")
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy plist still exists: %v", err)
+	}
+	if got, err := os.ReadFile(log); err != nil {
+		t.Fatal(err)
+	} else if !strings.Contains(string(got), "list "+hosting.LegacyLabel) || !strings.Contains(string(got), "bootout") {
+		t.Fatalf("launchctl calls = %q", got)
+	}
+	if !strings.Contains(out.String(), hosting.LegacyLabel) {
+		t.Fatalf("migration output = %q", out.String())
+	}
+}
+
+func TestRenderServiceStatusHumanizesBackendPIDAndSocket(t *testing.T) {
+	spec := hosting.Spec{Backend: hosting.BackendLaunchd, HomePath: "/tmp/sift"}
+	var out bytes.Buffer
+	renderServiceStatus(&out, spec, "{\n\t\"PID\" = 123;\n\t\"LastExitStatus\" = 0;\n\t\"Label\" = \"cn.hexai.sift\";\n}\n", true)
+	if got := out.String(); !strings.Contains(got, "✓ 运行中") || !strings.Contains(got, "launchd") || !strings.Contains(got, "PID 123") || !strings.Contains(got, "/tmp/sift/siftd.sock") {
+		t.Errorf("launchd status = %q, want humanized backend, pid, and socket", got)
+	}
+
+	spec.Backend = hosting.BackendSystemd
+	out.Reset()
+	renderServiceStatus(&out, spec, "   Active: active (running) since now\n Main PID: 456 (sift)\n", true)
+	if got := out.String(); !strings.Contains(got, "✓ 运行中") || !strings.Contains(got, "systemd") || !strings.Contains(got, "PID 456") {
+		t.Errorf("systemd status = %q, want humanized backend and pid", got)
+	}
+
+	for _, output := range []string{
+		"{\n\t\"PID\" = -;\n\t\"LastExitStatus\" = 0;\n}\n",
+		"{\n\t\"LastExitStatus\" = 0;\n}\n",
+	} {
+		if serviceRunning(hosting.BackendLaunchd, output) || servicePID(hosting.BackendLaunchd, output) != "" {
+			t.Errorf("launchd output %q incorrectly reports a running service", output)
+		}
+	}
+
+	// launchctl list and systemctl status both exit non-zero for this state.
+	// The retained unit file, not that exit code, establishes installation.
+	for _, tc := range []struct {
+		backend hosting.Backend
+		output  string
+	}{
+		{hosting.BackendLaunchd, "Boot-out failed: 3: No such process"},
+		{hosting.BackendSystemd, "   Active: inactive (dead)\n Main PID: 0 (code=exited)"},
+	} {
+		spec.Backend = tc.backend
+		out.Reset()
+		renderServiceStatus(&out, spec, tc.output, true)
+		if got := out.String(); !strings.Contains(got, "✗ 未运行") || strings.Contains(got, "未安装") {
+			t.Errorf("installed stopped %s status = %q, want 未运行", tc.backend, got)
+		}
+	}
+
+	out.Reset()
+	renderServiceStatus(&out, spec, "", false)
+	if got := out.String(); !strings.Contains(got, "✗ 未安装") {
+		t.Errorf("missing unit status = %q, want 未安装", got)
+	}
+}
+
 // TestServiceInstallRequiresRelease asserts the hosting units refuse to point
 // at nothing: with no release installed under bin/current, install reports a
 // clear error and exits non-zero instead of writing a unit to a missing binary.
