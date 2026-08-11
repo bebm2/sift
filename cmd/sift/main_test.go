@@ -6,10 +6,14 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -50,6 +54,42 @@ func withDatabase(t *testing.T, home string) {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installDoctorWrapper(t *testing.T) {
+	t.Helper()
+	installDoctorWrapperVersion(t, controlplane.Version, controlplane.ProtocolMajor)
+}
+
+// installDoctorWrapperVersion installs a wrapper fixture next to the test
+// binary reporting the given release version and wire protocol major, so
+// in-process doctor probes observe a controlled wrapper pairing.
+func installDoctorWrapperVersion(t *testing.T, version string, protocolMajor int) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(filepath.Dir(executable), "sift-agent-wrapper")
+	old, readErr := os.ReadFile(wrapper)
+	oldInfo, statErr := os.Stat(wrapper)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	if statErr != nil && !os.IsNotExist(statErr) {
+		t.Fatal(statErr)
+	}
+	t.Cleanup(func() {
+		if readErr == nil {
+			_ = os.WriteFile(wrapper, old, oldInfo.Mode().Perm())
+			return
+		}
+		_ = os.Remove(wrapper)
+	})
+	content := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n'; fi\nif [ \"$1\" = \"--protocol-major\" ]; then printf '%d\\n'; fi\n", version, protocolMajor)
+	if err := os.WriteFile(wrapper, []byte(content), 0o700); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -216,7 +256,7 @@ func TestDaemonResolvesWrapperAlongsideSiftExecutable(t *testing.T) {
 		}
 		_ = os.Remove(wrapper)
 	})
-	content := []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '" + controlplane.Version + "'; fi\n")
+	content := []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '" + controlplane.Version + "'; fi\nif [ \"$1\" = \"--protocol-major\" ]; then printf '%d\\n' '" + fmt.Sprint(controlplane.ProtocolMajor) + "'; fi\n")
 	if err := os.WriteFile(wrapper, content, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +305,10 @@ func TestHookBootstrapRequestRequiresExplicitProject(t *testing.T) {
 	}
 }
 
-func TestDoctorExitCode(t *testing.T) {
+// TestDoctorResultContract verifies that only the closed 0/1/2 exit-code
+// domain is healthy. The direct offline representation is int; the decoded
+// online representation is float64.
+func TestDoctorResultContract(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		result any
@@ -277,10 +320,12 @@ func TestDoctorExitCode(t *testing.T) {
 		{"online float clean", map[string]any{"exit_code": float64(0)}, 0},
 		{"online float warning", map[string]any{"exit_code": float64(1)}, 1},
 		{"online float error", map[string]any{"exit_code": float64(2)}, 2},
-		{"missing exit_code", map[string]any{"checks": nil}, 0},
-		{"malformed exit_code", map[string]any{"exit_code": "2"}, 0},
-		{"not a map", []any{"checks"}, 0},
-		{"nil", nil, 0},
+		{"missing exit_code", map[string]any{"checks": nil}, 2},
+		{"wrong exit_code type", map[string]any{"exit_code": "2"}, 2},
+		{"fractional exit_code", map[string]any{"exit_code": float64(1.5)}, 2},
+		{"out of range exit_code", map[string]any{"exit_code": float64(3)}, 2},
+		{"not a map", []any{"checks"}, 2},
+		{"nil", nil, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := doctorExitCode(tc.result); got != tc.want {
@@ -316,6 +361,7 @@ func TestRunDoctorOfflineExitsWithError(t *testing.T) {
 // with a healthy database the only remaining finding is the always-on
 // unsafe-local warning.
 func TestRunDoctorOfflineExitsWithWarning(t *testing.T) {
+	installDoctorWrapper(t)
 	home := freshHome(t)
 	withDatabase(t, home)
 	code := run([]string{"sift", "doctor", "--offline"}, &bytes.Buffer{}, io.Discard)
@@ -328,6 +374,7 @@ func TestRunDoctorOfflineExitsWithWarning(t *testing.T) {
 // daemon returns the doctor result in response.Result, and the process must
 // exit with the daemon-computed exit_code (1, unsafe-local warning).
 func TestRunDoctorOnlineExitsWithWarning(t *testing.T) {
+	installDoctorWrapper(t)
 	home := freshHome(t)
 	withDatabase(t, home)
 	s, err := controlplane.Start(config.Home{Path: home})
@@ -372,6 +419,368 @@ func TestRunDoctorOnlineExitsOneWhenDaemonUnavailable(t *testing.T) {
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("daemon unavailable")) {
 		t.Fatalf("stderr = %q, want daemon unavailable message", stderr.String())
+	}
+}
+
+// TestDoctorHandshakeErrorConsistencyDaemonVersionMismatchExitsTwo drives the real CLI binary over the
+// real operator socket against a daemon compiled at a different release. The
+// daemon handshake stays fail-closed (unsupported_binary), and the CLI must
+// surface that rejection as a synthesized version:daemon error — built from
+// the observed response envelope, never by consuming an incompatible success
+// result — and exit 2 (config.md §7, control-plane.md §3.4). The CLI is
+// built with the release version stamped (internal/version.Release, which
+// controlplane.Version derives from), so the wire handshake observes a
+// genuine client/daemon binary-major mismatch — no direct operatorRequest
+// call and no fabricated boot row.
+func TestDoctorHandshakeErrorConsistencyDaemonVersionMismatchExitsTwo(t *testing.T) {
+	home := freshHome(t)
+	withDatabase(t, home)
+
+	cli := filepath.Join(t.TempDir(), "sift")
+	_, file, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
+	build := exec.Command("go", "build", "-o", cli, "-ldflags", "-X github.com/miaoxiaoyong/sift/internal/version.Release=2.0.0", "./cmd/sift")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build mismatched CLI: %v\n%s", err, output)
+	}
+
+	s, err := controlplane.Start(config.Home{Path: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Serve(ctx) }()
+	waitSocket(t, filepath.Join(home, "siftd.sock"))
+
+	cmd := exec.Command(cli, "doctor")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("mismatched doctor exited 0; output:\n%s", output)
+	}
+	if code := cmd.ProcessState.ExitCode(); code != 2 {
+		t.Fatalf("exit code = %d, want 2; output:\n%s", code, output)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("unmarshal doctor output: %v; output:\n%s", err, output)
+	}
+	if ok, _ := result["ok"].(bool); ok {
+		t.Fatalf("doctor consumed a success response across a major boundary; output:\n%s", output)
+	}
+	if result["exit_code"] != float64(2) {
+		t.Fatalf("doctor exit_code = %v, want 2", result["exit_code"])
+	}
+	for _, check := range result["checks"].([]any) {
+		m := check.(map[string]any)
+		if m["id"] != "version:daemon" {
+			continue
+		}
+		if m["level"] != "error" {
+			t.Fatalf("version:daemon = %v, want error", m)
+		}
+		details, _ := m["details"].(map[string]any)
+		if details["cli_version"] != "2.0.0" {
+			t.Fatalf("cli_version = %v, want the CLI release 2.0.0", details["cli_version"])
+		}
+		if details["daemon_version"] != controlplane.Version || details["daemon_protocol_major"] != float64(controlplane.ProtocolMajor) {
+			t.Fatalf("daemon details = %v, want the actual daemon values observed on the wire", details)
+		}
+		return
+	}
+	t.Fatal("missing version:daemon error")
+}
+
+// TestDoctorWrapperUniqueOnline drives the online doctor end to end and
+// asserts version:wrapper appears exactly once, graded ok by the actual
+// daemon-side wrapper probe.
+// TestDoctorRejectsInvalidResponseEnvelope proves a malicious or stale Unix
+// socket peer cannot make doctor consume either result or error before the
+// response envelope, request ID, wire protocol, and server version are
+// validated. The valid unsupported_* handshake rejection remains covered by
+// TestDoctorDaemonVersionMismatchExitsTwo.
+func TestDoctorRejectsInvalidResponseEnvelope(t *testing.T) {
+	const poison = "untrusted-response-content"
+	for _, tc := range []struct {
+		name     string
+		response func(controlplane.Request) map[string]any
+	}{
+		{
+			name: "wrong request id",
+			response: func(req controlplane.Request) map[string]any {
+				return fakeDoctorError("00000000000000000000000000000000", controlplane.ProtocolMajor, controlplane.ProtocolMinor, controlplane.Version, "unsupported_binary", poison)
+			},
+		},
+		{
+			name: "incompatible response envelope",
+			response: func(req controlplane.Request) map[string]any {
+				return fakeDoctorError(req.RequestID, controlplane.ProtocolMajor+1, controlplane.ProtocolMinor, "not-a-canonical-semver", "unsupported_binary", poison)
+			},
+		},
+		{
+			name: "ok result error combination",
+			response: func(req controlplane.Request) map[string]any {
+				response := fakeDoctorError(req.RequestID, controlplane.ProtocolMajor, controlplane.ProtocolMinor, controlplane.Version, "unsupported_binary", poison)
+				response["ok"] = true
+				response["result"] = map[string]any{"exit_code": 0, "poison": poison}
+				return response
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := freshHome(t)
+			serveFakeDoctorResponse(t, home, tc.response)
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"sift", "doctor"}, &stdout, &stderr); code == 0 {
+				t.Fatalf("doctor exit code = 0; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("doctor consumed invalid response into stdout: %q", stdout.String())
+			}
+			if bytes.Contains(append(stdout.Bytes(), stderr.Bytes()...), []byte(poison)) {
+				t.Fatalf("doctor consumed untrusted result/error: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestDoctorOnlineResultContract exercises the success result over the Unix
+// socket. A legal envelope does not make an absent, malformed, fractional, or
+// out-of-range doctor exit_code trustworthy.
+func TestDoctorOnlineResultContract(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result map[string]any
+		want   int
+	}{
+		{"clean", map[string]any{"exit_code": 0}, 0},
+		{"warning", map[string]any{"exit_code": 1}, 1},
+		{"error", map[string]any{"exit_code": 2}, 2},
+		{"missing exit_code", map[string]any{}, 2},
+		{"wrong exit_code type", map[string]any{"exit_code": "0"}, 2},
+		{"fractional exit_code", map[string]any{"exit_code": 1.5}, 2},
+		{"out of range exit_code", map[string]any{"exit_code": 3}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := freshHome(t)
+			serveFakeDoctorResponse(t, home, func(req controlplane.Request) map[string]any {
+				return fakeDoctorSuccess(req.RequestID, tc.result)
+			})
+			var stdout, stderr bytes.Buffer
+			if got := run([]string{"sift", "doctor"}, &stdout, &stderr); got != tc.want {
+				t.Fatalf("doctor exit code = %d, want %d; stdout=%q stderr=%q", got, tc.want, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestDoctorHandshakeErrorConsistency only allows unsupported_* errors when
+// the corresponding response version is actually incompatible. A compatible
+// peer cannot synthesize a daemon mismatch; matching real handshake rejections
+// still become the closed version:daemon error and exit 2.
+func TestDoctorHandshakeErrorConsistency(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response func(controlplane.Request) map[string]any
+		want     int
+		consume  bool
+	}{
+		{
+			name: "compatible protocol cannot claim unsupported protocol",
+			response: func(req controlplane.Request) map[string]any {
+				return fakeDoctorError(req.RequestID, controlplane.ProtocolMajor, controlplane.ProtocolMinor, controlplane.Version, "unsupported_protocol", "forged")
+			},
+			want: 1,
+		},
+		{
+			name: "compatible binary cannot claim unsupported binary",
+			response: func(req controlplane.Request) map[string]any {
+				return fakeDoctorError(req.RequestID, controlplane.ProtocolMajor, controlplane.ProtocolMinor, controlplane.Version, "unsupported_binary", "forged")
+			},
+			want: 1,
+		},
+		{
+			name: "incompatible protocol with matching error becomes mismatch",
+			response: func(req controlplane.Request) map[string]any {
+				return fakeDoctorError(req.RequestID, controlplane.ProtocolMajor+1, controlplane.ProtocolMinor, controlplane.Version, "unsupported_protocol", "protocol mismatch")
+			},
+			want: 2, consume: true,
+		},
+		{
+			name: "incompatible binary with matching error becomes mismatch",
+			response: func(req controlplane.Request) map[string]any {
+				return fakeDoctorError(req.RequestID, controlplane.ProtocolMajor, controlplane.ProtocolMinor, "2.0.0", "unsupported_binary", "binary mismatch")
+			},
+			want: 2, consume: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := freshHome(t)
+			serveFakeDoctorResponse(t, home, tc.response)
+			var stdout, stderr bytes.Buffer
+			if got := run([]string{"sift", "doctor"}, &stdout, &stderr); got != tc.want {
+				t.Fatalf("doctor exit code = %d, want %d; stdout=%q stderr=%q", got, tc.want, stdout.String(), stderr.String())
+			}
+			if tc.consume {
+				if !bytes.Contains(stdout.Bytes(), []byte(`"id": "version:daemon"`)) {
+					t.Fatalf("missing synthesized version:daemon error: %q", stdout.String())
+				}
+			} else if stdout.Len() != 0 {
+				t.Fatalf("doctor consumed compatible forged handshake error: %q", stdout.String())
+			}
+		})
+	}
+}
+
+// TestDoctorProtocolMinorNegative proves the client-side mirror of the V0
+// closed contract: a fake peer answering with protocol_minor=-1 is not an
+// "older compatible" daemon. Neither its success result nor its ordinary
+// error may be consumed; only the canonical unsupported_protocol handshake
+// rejection remains observable.
+func TestDoctorProtocolMinorNegative(t *testing.T) {
+	const poison = "negative-minor-content"
+	for _, tc := range []struct {
+		name     string
+		response func(controlplane.Request) map[string]any
+	}{
+		{
+			name: "success result with negative minor",
+			response: func(req controlplane.Request) map[string]any {
+				response := fakeDoctorSuccess(req.RequestID, map[string]any{"exit_code": 0, "poison": poison})
+				response["protocol_minor"] = -1
+				return response
+			},
+		},
+		{
+			name: "ordinary error with negative minor",
+			response: func(req controlplane.Request) map[string]any {
+				return fakeDoctorError(req.RequestID, controlplane.ProtocolMajor, -1, controlplane.Version, "unauthorized", poison)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := freshHome(t)
+			serveFakeDoctorResponse(t, home, tc.response)
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"sift", "doctor"}, &stdout, &stderr); code == 0 {
+				t.Fatalf("doctor exit code = 0; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("doctor consumed negative-minor response into stdout: %q", stdout.String())
+			}
+			if bytes.Contains(append(stdout.Bytes(), stderr.Bytes()...), []byte(poison)) {
+				t.Fatalf("doctor consumed untrusted result/error: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func fakeDoctorSuccess(requestID string, result map[string]any) map[string]any {
+	return map[string]any{
+		"protocol_major": controlplane.ProtocolMajor,
+		"protocol_minor": controlplane.ProtocolMinor,
+		"server_version": controlplane.Version,
+		"request_id":     requestID,
+		"ok":             true,
+		"result":         result,
+	}
+}
+
+func fakeDoctorError(requestID string, protocolMajor, protocolMinor int, serverVersion, code, message string) map[string]any {
+	return map[string]any{
+		"protocol_major": protocolMajor,
+		"protocol_minor": protocolMinor,
+		"server_version": serverVersion,
+		"request_id":     requestID,
+		"ok":             false,
+		"error": map[string]any{
+			"code": code, "message": message, "retryable": false, "details": map[string]any{},
+		},
+	}
+}
+
+func serveFakeDoctorResponse(t *testing.T, home string, response func(controlplane.Request) map[string]any) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(home, "operator.token"), []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(home, "siftd.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var header [4]byte
+		if _, err := io.ReadFull(conn, header[:]); err != nil {
+			return
+		}
+		body := make([]byte, binary.BigEndian.Uint32(header[:]))
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return
+		}
+		var request controlplane.Request
+		if err := json.Unmarshal(body, &request); err != nil {
+			return
+		}
+		out, err := json.Marshal(response(request))
+		if err != nil {
+			return
+		}
+		binary.BigEndian.PutUint32(header[:], uint32(len(out)))
+		if _, err := conn.Write(header[:]); err == nil {
+			_, _ = conn.Write(out)
+		}
+	}()
+}
+
+func TestDoctorWrapperUniqueOnline(t *testing.T) {
+	installDoctorWrapper(t)
+	home := freshHome(t)
+	withDatabase(t, home)
+
+	s, err := controlplane.Start(config.Home{Path: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Serve(ctx) }()
+	waitSocket(t, filepath.Join(home, "siftd.sock"))
+
+	var out bytes.Buffer
+	if code := run([]string{"sift", "doctor"}, &out, io.Discard); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (unsafe-local warning only); output:\n%s", code, out.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := response["result"].(map[string]any)
+	var wrappers []map[string]any
+	for _, check := range result["checks"].([]any) {
+		m := check.(map[string]any)
+		if m["id"] == "version:wrapper" {
+			wrappers = append(wrappers, m)
+		}
+	}
+	if len(wrappers) != 1 {
+		t.Fatalf("version:wrapper count = %d, want exactly 1: %v", len(wrappers), wrappers)
+	}
+	check := wrappers[0]
+	if check["level"] != "ok" {
+		t.Fatalf("version:wrapper = %v, want ok", check)
+	}
+	details, _ := check["details"].(map[string]any)
+	if details["wrapper_version"] != controlplane.Version || details["wrapper_protocol_major"] != float64(controlplane.ProtocolMajor) {
+		t.Fatalf("details = %v, want actual probed wrapper values", details)
 	}
 }
 

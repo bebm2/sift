@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,13 +27,22 @@ type doctorCheck struct {
 	Details map[string]any `json:"details"`
 }
 
+// doctorExecutable locates the running sift binary whose sibling wrapper is
+// probed; it is a variable so tests can point the probe at a fabricated
+// install directory.
+var doctorExecutable = os.Executable
+
 func doctor(ctx context.Context, offline bool, home config.Home) map[string]any {
+	return doctorWithVersions(ctx, offline, home, Version, ProtocolMajor, nil)
+}
+
+func doctorWithVersions(ctx context.Context, offline bool, home config.Home, clientVersion string, clientProtocolMajor int, liveDaemon *storage.DoctorDaemonVersion) map[string]any {
 	// Dependency probes are independent checks; a slow or unavailable command
 	// must not consume the entire budget for the later SQLite and projection checks.
 	ctx, cancel := context.WithTimeout(ctx, 15*deadline)
 	defer cancel()
 	checks := []doctorCheck{runtimeCheck(), versionCheck(), permissionCheck(home.Path, "home", 0o700, true)}
-	if daemon, err := os.Executable(); err == nil {
+	if daemon, err := doctorExecutable(); err == nil {
 		checks = append(checks, wrapperVersionChecks(ctx, daemon)...)
 	}
 	var cfg *config.Config
@@ -45,13 +55,16 @@ func doctor(ctx context.Context, offline bool, home config.Home) map[string]any 
 	}
 	dbPath := filepath.Join(home.Path, "sift.db")
 	checks = append(checks, sqliteCheck(ctx, dbPath))
+	checks = append(checks, versionChecks(ctx, dbPath, clientVersion, clientProtocolMajor, liveDaemon)...)
+	checks = append(checks, outboxChecks(ctx, dbPath)...)
 	if cfg != nil {
 		checks = append(checks, hookChecks(ctx, dbPath, cfg)...)
 		checks = append(checks, projectPolicyChecks(ctx, cfg)...)
 	}
 	checks = append(checks, attemptChecks(ctx, dbPath)...)
 	checks = append(checks, homePermissions(home.Path, offline)...)
-	checks = append(checks, unsafeLocalCheck())
+	checks = append(checks, platformPostureChecks()...)
+	checks = append(checks, tm6ExposureChecks()...)
 
 	exitCode := 0
 	for _, check := range checks {
@@ -84,8 +97,10 @@ func versionCheck() doctorCheck {
 	}
 }
 
-// wrapperVersionChecks surfaces the wrapper/daemon release-version handshake
-// to the doctor (WBS §8.1). The daemon refuses to start on a mismatch, so this
+// wrapperVersionChecks surfaces the wrapper/daemon release-version and
+// protocol-major handshake to the doctor (WBS §8.1). It is the only emitter
+// of version:wrapper and grades solely on the actual daemon-side probe:
+// details carry the observed wrapper values, never client-reported input. The daemon refuses to start on a mismatch, so this
 // is the visibility side of the invariant; the offline doctor (run from the
 // sift binary in the same install directory) is the path that sees it.
 // daemonPath is the running sift binary (os.Executable); it is a parameter so
@@ -104,10 +119,22 @@ func wrapperVersionChecks(ctx context.Context, daemonPath string) []doctorCheck 
 		return []doctorCheck{{ID: "version:wrapper", Level: "warning", Message: "cannot probe the installed wrapper", Details: map[string]any{"wrapper_path": wrapper, "release_version": version.Release, "error": err.Error()}}}
 	}
 	reported := strings.TrimSpace(string(out))
-	if reported != version.Release {
-		return []doctorCheck{errorCheck("version:wrapper", fmt.Errorf("%w: sift %s, wrapper %s", runtimepkg.ErrWrapperVersion, version.Release, reported))}
+	protocolOut, _, err := runtimepkg.ProbeVersion(ctx, wrapper, []string{"--protocol-major"}, 0)
+	if err != nil {
+		return []doctorCheck{{ID: "version:wrapper", Level: "warning", Message: "cannot probe the installed wrapper protocol major", Details: map[string]any{"wrapper_path": wrapper, "release_version": version.Release, "wrapper_version": reported, "error": err.Error()}}}
 	}
-	return []doctorCheck{{ID: "version:wrapper", Level: "ok", Message: "wrapper matches the release version", Details: map[string]any{"wrapper_path": wrapper, "release_version": version.Release, "wrapper_version": reported}}}
+	reportedMajor, err := strconv.Atoi(strings.TrimSpace(string(protocolOut)))
+	if err != nil {
+		return []doctorCheck{{ID: "version:wrapper", Level: "error", Message: fmt.Sprintf("%v: sift %d, wrapper %s", runtimepkg.ErrWrapperProtocolMajor, ProtocolMajor, strings.TrimSpace(string(protocolOut))), Details: map[string]any{"wrapper_path": wrapper, "daemon_version": version.Release, "daemon_protocol_major": ProtocolMajor, "wrapper_version": reported, "wrapper_protocol_major": strings.TrimSpace(string(protocolOut))}}}
+	}
+	details := map[string]any{"wrapper_path": wrapper, "daemon_version": version.Release, "release_version": version.Release, "daemon_protocol_major": ProtocolMajor, "wrapper_version": reported, "wrapper_protocol_major": reportedMajor}
+	if reported != version.Release {
+		return []doctorCheck{{ID: "version:wrapper", Level: "error", Message: fmt.Sprintf("%v: sift %s, wrapper %s", runtimepkg.ErrWrapperVersion, version.Release, reported), Details: details}}
+	}
+	if reportedMajor != ProtocolMajor {
+		return []doctorCheck{{ID: "version:wrapper", Level: "error", Message: fmt.Sprintf("%v: sift %d, wrapper %d", runtimepkg.ErrWrapperProtocolMajor, ProtocolMajor, reportedMajor), Details: details}}
+	}
+	return []doctorCheck{{ID: "version:wrapper", Level: "ok", Message: "wrapper matches the release version and protocol major", Details: details}}
 }
 
 func executableChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
@@ -435,6 +462,103 @@ func permissionCheck(path, name string, want os.FileMode, required bool) doctorC
 		return errorCheck("permissions:"+name, fmt.Errorf("%s is not a regular file", path))
 	}
 	return doctorCheck{ID: "permissions:" + name, Level: "ok", Message: "permissions are owner-only", Details: map[string]any{"path": path, "mode": fmt.Sprintf("%04o", info.Mode().Perm())}}
+}
+
+// versionChecks emits the single version:daemon check: it pairs the client's
+// self-reported envelope values with the daemon's actual version record (live
+// values online, the durable boot row offline). The wrapper is deliberately
+// not paired here; version:wrapper is emitted exactly once by
+// wrapperVersionChecks from the actual daemon-side probe, never from client
+// input.
+func versionChecks(ctx context.Context, dbPath, clientVersion string, clientProtocolMajor int, liveDaemon *storage.DoctorDaemonVersion) []doctorCheck {
+	var daemon storage.DoctorDaemonVersion
+	var active bool
+	var dbErr error
+	if liveDaemon != nil {
+		daemon, active = *liveDaemon, true
+	} else {
+		daemon, active, dbErr = storage.ReadDoctorDaemonVersion(ctx, dbPath)
+	}
+	checks := []doctorCheck{}
+	if dbErr != nil {
+		checks = append(checks, errorCheck("version:daemon", dbErr))
+		return checks
+	}
+	if !active {
+		checks = append(checks, doctorCheck{ID: "version:daemon", Level: "ok", Message: "no active daemon version record", Details: map[string]any{"cli_version": clientVersion, "protocol_major": clientProtocolMajor}})
+		return checks
+	}
+	if daemon.ProtocolMajor != clientProtocolMajor || majorVersion(daemon.BinaryVersion) != majorVersion(clientVersion) {
+		checks = append(checks, doctorCheck{ID: "version:daemon", Level: "error", Message: "CLI and daemon protocol major versions differ", Details: map[string]any{"cli_version": clientVersion, "cli_protocol_major": clientProtocolMajor, "daemon_version": daemon.BinaryVersion, "daemon_protocol_major": daemon.ProtocolMajor}})
+		return checks
+	}
+	checks = append(checks, doctorCheck{ID: "version:daemon", Level: "ok", Message: "CLI and daemon protocol major versions match", Details: map[string]any{"cli_version": clientVersion, "cli_protocol_major": clientProtocolMajor, "daemon_version": daemon.BinaryVersion, "daemon_protocol_major": daemon.ProtocolMajor}})
+	return checks
+}
+
+func majorVersion(version string) string {
+	if i := strings.IndexByte(version, '.'); i >= 0 {
+		return version[:i]
+	}
+	return version
+}
+
+func outboxChecks(ctx context.Context, dbPath string) []doctorCheck {
+	outbox, err := storage.ReadDoctorOutbox(ctx, dbPath)
+	if err != nil {
+		return []doctorCheck{errorCheck("outbox:backlog", err), errorCheck("outbox:push-failures", err)}
+	}
+	backlog := doctorCheck{ID: "outbox:backlog", Level: "ok", Message: "outbox has no pending operations", Details: map[string]any{"pending_count": outbox.Pending}}
+	if outbox.Pending > 0 {
+		backlog.Level, backlog.Message = "warning", "outbox operations remain pending"
+	}
+	pushFailures := make([]storage.DoctorOutboxFailure, 0, len(outbox.Failed))
+	for _, failure := range outbox.Failed {
+		if isRemoteDeliveryKind(failure.Kind) {
+			pushFailures = append(pushFailures, failure)
+		}
+	}
+	generic := doctorCheck{ID: "outbox:failures", Level: "ok", Message: "outbox has no terminal failures", Details: map[string]any{"failed_count": len(outbox.Failed), "failures": outbox.Failed}}
+	if len(outbox.Failed) > 0 {
+		generic.Level, generic.Message = "error", "outbox contains terminal failures"
+	}
+	push := doctorCheck{ID: "outbox:push-failures", Level: "ok", Message: "outbox has no terminal delivery failures", Details: map[string]any{"failed_count": len(pushFailures), "failures": pushFailures}}
+	if len(pushFailures) > 0 {
+		push.Level, push.Message = "error", "outbox contains terminal delivery failures"
+	}
+	return []doctorCheck{backlog, generic, push}
+}
+
+func isRemoteDeliveryKind(kind string) bool {
+	switch storage.OperationKind(kind) {
+	case storage.OperationForgeComment, storage.OperationForgeLabels, storage.OperationCreateChange,
+		storage.OperationMergeChange, storage.OperationRerunChecks, storage.OperationChannelPublish,
+		storage.OperationCommandAck, storage.OperationForgeAlert:
+		return true
+	default:
+		return false
+	}
+}
+
+func platformPostureChecks() []doctorCheck {
+	checks := make([]doctorCheck, 0, 2)
+	for _, platform := range []string{"darwin", "linux"} {
+		checks = append(checks, doctorCheck{ID: "security-posture:" + platform, Level: "warning", Message: platform + " V0 posture is unsafe-local; agent isolation is not implemented", Details: map[string]any{"platform": platform, "current_platform": runtime.GOOS == platform, "security_posture": "unsafe-local", "agent_isolation": "not-implemented"}})
+	}
+	return checks
+}
+
+func tm6ExposureChecks() []doctorCheck {
+	return []doctorCheck{
+		unsafeLocalCheck(),
+		{ID: "tm6:sift-home", Level: "warning", Message: "same-UID agents can read ~/.sift/ despite owner-only permissions", Details: map[string]any{"exposure": "~/.sift/ configuration, database, and local state", "v0_status": "unclosed"}},
+		{ID: "tm6:forge-cli-credentials", Level: "warning", Message: "same-UID agents can use already logged-in forge CLIs", Details: map[string]any{"exposure": "gh/glab credentials", "v0_status": "unclosed"}},
+		{ID: "tm6:operator-token-and-socket", Level: "warning", Message: "same-UID agents can read operator.token and call kill or retry over the operator socket", Details: map[string]any{"exposure": "operator.token and siftd.sock", "v0_status": "unclosed"}},
+		{ID: "tm6:shared-git", Level: "warning", Message: "shared .git, other worktrees, and non-Sift git writes remain reachable by same-UID agents", Details: map[string]any{"exposure": "shared .git and worktrees", "v0_status": "unclosed", "sift_git_control": "hooks disabled and fingerprinted"}},
+		{ID: "tm6:process-group-escape", Level: "warning", Message: "an agent or descendant can leave the wrapper process group", Details: map[string]any{"exposure": "process supervision", "v0_status": "unclosed", "mitigation": "qualification limits automatic retry"}},
+		{ID: "tm6:run-token", Level: "warning", Message: "same-UID processes can read the run token from owner-only control.json", Details: map[string]any{"exposure": "run token", "v0_status": "unclosed"}},
+		{ID: "tm6:bootstrap-credential", Level: "warning", Message: "another same-UID agent can race the short bootstrap credential window", Details: map[string]any{"exposure": "attempt bootstrap credential", "v0_status": "unclosed", "mitigation": "single-use claim binding"}},
+	}
 }
 
 func unsafeLocalCheck() doctorCheck {

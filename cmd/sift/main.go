@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/miaoxiaoyong/sift/internal/config"
@@ -81,20 +82,81 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if command == "attach" {
 		return runAttach(response, home, stdout, stderr)
 	}
+	if command == "doctor" {
+		return runDoctor(response, stdout, stderr)
+	}
 	if err := printJSON(stdout, response); err != nil {
 		report(stderr, err)
 		return 1
-	}
-	if command == "doctor" {
-		if !response.OK {
-			return 1
-		}
-		return doctorExitCode(response.Result)
 	}
 	if !response.OK {
 		return 1
 	}
 	return 0
+}
+
+// runDoctor renders the online doctor response and maps it to the process
+// exit status (config.md §7). The daemon handshake is fail-closed
+// (control-plane.md §3.4, release.md §4): an incompatible CLI receives
+// unsupported_protocol/unsupported_binary instead of a result. OperatorRequest
+// validates the response envelope, request id, protocol, and server binary
+// major before this function receives it; an unvalidated response is never
+// allowed to influence doctor output. A validated handshake rejection surfaces
+// as the version:daemon error the mismatch implies and exits 2.
+func runDoctor(response controlplane.Response, stdout, stderr io.Writer) int {
+	if !response.EnvelopeValidated() {
+		report(stderr, fmt.Errorf("invalid daemon response for doctor"))
+		return 1
+	}
+	if !response.OK {
+		if response.Error != nil && (response.Error.Code == "unsupported_protocol" || response.Error.Code == "unsupported_binary") {
+			return emitDoctor(stdout, stderr, doctorMismatchResult(response))
+		}
+		if err := printJSON(stdout, response); err != nil {
+			report(stderr, err)
+		}
+		return 1
+	}
+	if err := printJSON(stdout, response); err != nil {
+		report(stderr, err)
+		return 1
+	}
+	return doctorExitCode(response.Result)
+}
+
+// doctorMismatchResult synthesizes the doctor result for a handshake-rejected
+// or envelope-incompatible online doctor: a single version:daemon error check
+// pairing the CLI's own values with the daemon values observed on the wire.
+func doctorMismatchResult(response controlplane.Response) map[string]any {
+	message := "CLI and daemon binary major versions differ"
+	if response.Error != nil && response.Error.Code == "unsupported_protocol" {
+		message = "CLI and daemon wire protocol versions differ"
+	}
+	return map[string]any{
+		"offline":          false,
+		"exit_code":        2,
+		"security_posture": "unsafe-local",
+		"checks": []any{map[string]any{
+			"id":      "version:daemon",
+			"level":   "error",
+			"message": message,
+			"details": map[string]any{
+				"cli_version":           version.Release,
+				"cli_protocol_major":    controlplane.ProtocolMajor,
+				"daemon_version":        response.ServerVersion,
+				"daemon_protocol_major": response.ProtocolMajor,
+			},
+		}},
+	}
+}
+
+// majorVersion extracts the release major for the client-side envelope check;
+// the daemon applies the same rule in its handshake.
+func majorVersion(release string) string {
+	if i := strings.IndexByte(release, '.'); i >= 0 {
+		return release[:i]
+	}
+	return release
 }
 
 // emitDoctor prints the offline doctor result and maps its exit_code to the
@@ -110,20 +172,24 @@ func emitDoctor(stdout, stderr io.Writer, result map[string]any) int {
 // doctorExitCode extracts the process exit status from a doctor result. The
 // doctor computes exit_code as 0 (clean), 1 (warning) or 2 (error); this only
 // projects it. The offline result carries a Go int, the online result arrives
-// from JSON as a float64. A missing or malformed value defaults to 0, matching
-// a healthy result that must always set it.
+// from JSON as a float64. Any absent, malformed, fractional, or out-of-range
+// value is untrustworthy and therefore fails closed as an error.
 func doctorExitCode(result any) int {
 	m, ok := result.(map[string]any)
 	if !ok {
-		return 0
+		return 2
 	}
 	switch code := m["exit_code"].(type) {
 	case int:
-		return code
+		if code >= 0 && code <= 2 {
+			return code
+		}
 	case float64:
-		return int(code)
+		if code >= 0 && code <= 2 && code == float64(int(code)) {
+			return int(code)
+		}
 	}
-	return 0
+	return 2
 }
 
 func request(command string, args []string) (string, map[string]any, error) {
@@ -205,7 +271,7 @@ type attachResponse struct {
 }
 
 func runAttach(response controlplane.Response, home config.Home, stdout, stderr io.Writer) int {
-	if !response.OK || response.ProtocolMajor != controlplane.ProtocolMajor || response.ProtocolMinor > controlplane.ProtocolMinor || response.ServerVersion == "" {
+	if !response.OK || response.ProtocolMajor != controlplane.ProtocolMajor || response.ProtocolMinor < 0 || response.ProtocolMinor > controlplane.ProtocolMinor || !version.IsValidSemver(response.ServerVersion) {
 		report(stderr, fmt.Errorf("invalid daemon response for attach"))
 		return 1
 	}

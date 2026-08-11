@@ -22,6 +22,9 @@ const (
 // injected through ldflags (internal/version.Release), separate from the wire
 // protocol version (ProtocolMajor/Minor) and from the config file protocol
 // version (config.Version). control-plane.md §3.4 defines the handshake.
+// It is a variable so integration tests can rewrite version.Release to
+// assemble a genuinely different client release; the wire contract
+// (ProtocolMajor/Minor) stays constant.
 var Version = version.Release
 
 var requestID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -59,7 +62,13 @@ type Response struct {
 	OK            bool   `json:"ok"`
 	Result        any    `json:"result,omitempty"`
 	Error         *Error `json:"error,omitempty"`
+
+	envelopeValidated bool
 }
+
+// EnvelopeValidated reports whether this response passed client-side envelope,
+// request-id, protocol, and binary-major validation.
+func (r Response) EnvelopeValidated() bool { return r.envelopeValidated }
 
 func failure(id, code, message string, retryable bool) Response {
 	return Response{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, ServerVersion: Version, RequestID: id, Error: &Error{Code: code, Message: message, Retryable: retryable, Details: map[string]any{}}, OK: false}
@@ -95,10 +104,21 @@ func matchesToken(actual, presented string) bool {
 }
 
 func validateEnvelope(r Request) (string, string) {
-	if r.ProtocolMajor != ProtocolMajor || r.ProtocolMinor > ProtocolMinor {
+	// The handshake is fail-closed for every method, including the read-only
+	// ops.doctor (release.md §4, control-plane.md §3.4): an incompatible
+	// client is rejected here, and the CLI surfaces that rejection as the
+	// version:daemon doctor error instead of the daemon relaxing the gate.
+	// V0 is a closed contract (control-plane.md §3.2): protocol_minor must be
+	// 0. Reject anything above the server minor without guessing compatibility,
+	// and reject negative values just as fail-closed instead of treating them
+	// as silently compatible.
+	if r.ProtocolMajor != ProtocolMajor || r.ProtocolMinor < 0 || r.ProtocolMinor > ProtocolMinor {
 		return "unsupported_protocol", "protocol version is not supported"
 	}
-	if len(r.ClientVersion) < 3 || r.ClientVersion[0] != '0' || r.ClientVersion[1] != '.' {
+	if !version.IsValidSemver(r.ClientVersion) {
+		return "unsupported_binary", "binary version is invalid"
+	}
+	if majorVersion(r.ClientVersion) != majorVersion(Version) {
 		return "unsupported_binary", "binary major version differs"
 	}
 	if !requestID.MatchString(r.RequestID) {
