@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/miaoxiaoyong/sift/internal/config"
 	"github.com/miaoxiaoyong/sift/internal/controlplane"
 	"github.com/miaoxiaoyong/sift/internal/hosting"
+	"github.com/miaoxiaoyong/sift/internal/schema"
 	"github.com/miaoxiaoyong/sift/internal/storage"
 	"github.com/miaoxiaoyong/sift/internal/version"
 )
@@ -1065,12 +1067,37 @@ func TestRequestMetricsMaps(t *testing.T) {
 // TestRequestTimelineMaps verifies the timeline command builds the closed
 // ops.timeline param set with keyset/type filters.
 func TestRequestTimelineMaps(t *testing.T) {
-	method, params, err := request("timeline", []string{"--run", "run-1", "--type", "report.progress", "--after-seq", "5", "--limit", "10"})
+	method, params, err := request("timeline", []string{"--run", "run-1", "--type", "report.progress", "--after-seq", "5", "--after-ms", "1700000000000", "--limit", "10"})
 	if err != nil || method != "ops.timeline" {
 		t.Fatalf("timeline = %q %v err=%v", method, params, err)
 	}
-	if params["run_id"] != "run-1" || params["type"] != "report.progress" || params["after_seq"] != int64(5) || params["limit"] != 10 {
+	if params["run_id"] != "run-1" || params["type"] != "report.progress" || params["after_seq"] != int64(5) || params["after_occurred_at_ms"] != int64(1_700_000_000_000) || params["limit"] != 10 {
 		t.Fatalf("timeline params = %v", params)
+	}
+	// A lone --after-seq is the legacy cursor: it must succeed and build the
+	// legacy param set without after_occurred_at_ms (server resolves the seq).
+	method, params, err = request("timeline", []string{"--after-seq", "5"})
+	if err != nil || method != "ops.timeline" {
+		t.Fatalf("timeline --after-seq alone = %q %v err=%v", method, params, err)
+	}
+	if params["after_seq"] != int64(5) || params["after_occurred_at_ms"] != nil {
+		t.Fatalf("timeline --after-seq alone params = %v", params)
+	}
+}
+
+// TestRequestTimelineLegacyAfterSeq verifies the legacy CLI contract: a lone
+// --after-seq is accepted and produces a request without the
+// after_occurred_at_ms half, letting the server resolve the seq cursor (B3).
+func TestRequestTimelineLegacyAfterSeq(t *testing.T) {
+	method, params, err := request("timeline", []string{"--after-seq", "9"})
+	if err != nil || method != "ops.timeline" {
+		t.Fatalf("timeline --after-seq alone = %q %v err=%v", method, params, err)
+	}
+	if params["after_seq"] != int64(9) {
+		t.Fatalf("after_seq = %v, want int64(9)", params["after_seq"])
+	}
+	if _, ok := params["after_occurred_at_ms"]; ok {
+		t.Fatalf("lone --after-seq must not send after_occurred_at_ms: %v", params)
 	}
 }
 
@@ -1109,7 +1136,7 @@ func TestRunMetricsOnline(t *testing.T) {
 	home := freshHome(t)
 	startServerWithDB(t, home)
 	var out bytes.Buffer
-	code := run([]string{"sift", "metrics"}, &out, io.Discard)
+	code := run([]string{"sift", "metrics", "--json"}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
 	}
@@ -1126,12 +1153,28 @@ func TestRunMetricsOnline(t *testing.T) {
 	}
 }
 
+// TestRunMetricsHumanOnline pins the humanized default over a real daemon:
+// the JSON envelope is replaced by Chinese section labels (ux-3).
+func TestRunMetricsHumanOnline(t *testing.T) {
+	home := freshHome(t)
+	startServerWithDB(t, home)
+	var out bytes.Buffer
+	if code := run([]string{"sift", "metrics"}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+	}
+	for _, want := range []string{"指标", "注意力配额", "误放行率", "LLM 用量", "触发→启动延迟", "覆盖说明"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human metrics output lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
 // TestRunTimelineOnline prints the persisted event stream over a real daemon.
 func TestRunTimelineOnline(t *testing.T) {
 	home := freshHome(t)
 	startServerWithDB(t, home)
 	var out bytes.Buffer
-	code := run([]string{"sift", "timeline", "--run", "runCLI"}, &out, io.Discard)
+	code := run([]string{"sift", "timeline", "--run", "runCLI", "--json"}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
 	}
@@ -1146,12 +1189,396 @@ func TestRunTimelineOnline(t *testing.T) {
 	}
 }
 
+// TestRunTimelineHumanOnline pins the humanized default over a real daemon:
+// the persisted report.progress event must carry its Chinese label.
+func TestRunTimelineHumanOnline(t *testing.T) {
+	home := freshHome(t)
+	startServerWithDB(t, home)
+	var out bytes.Buffer
+	if code := run([]string{"sift", "timeline", "--run", "runCLI"}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+	}
+	for _, want := range []string{"事件时间线", "进度报告", "runCLI"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human timeline output lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRunTimelineHumanPagination pages the real CLI with --limit 2 over an
+// event stream whose seq order interleaves with occurred_at_ms (replay-like).
+// Every page must be globally occurred_at_ms descending, the first screen must
+// contain the globally newest event, and concatenating pages via the printed
+// keyset cursor must cover all events without duplicates.
+func TestRunTimelineHumanPagination(t *testing.T) {
+	home := freshHome(t)
+	db, err := storage.Open(context.Background(), storage.OpenConfig{Path: filepath.Join(home, "sift.db"), BinaryVersion: controlplane.Version, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	const base = int64(1_700_000_000_000)
+	if err := db.SeedProjectForTest(ctx, "cfg-cli", "proj-cli", base); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "runCLI", "proj-cli", "cfg-cli", "issue-1", base); err != nil {
+		t.Fatal(err)
+	}
+	// Insertion (seq) order interleaves with occurrence time; the global
+	// newest-first order is +5000, +4000, +3000, +2000, +1000.
+	offsets := []int64{1000, 3000, 2000, 5000, 4000}
+	for i, off := range offsets {
+		if _, err := db.AppendEvent(ctx, storage.EventCmd{RunID: "runCLI", Type: "report.progress", Source: storage.SourceAgent, Actor: fmt.Sprintf("agent-%d", i), PayloadJSON: []byte("{}"), OccurredAtMS: base + off, RecordedAtMS: base + off}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := controlplane.Start(config.Home{Path: home}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	srvCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Serve(srvCtx) }()
+	waitSocket(t, filepath.Join(home, "siftd.sock"))
+
+	type page struct {
+		events []struct {
+			Seq          int64
+			OccurredAtMS int64
+		}
+		nextSeq int64
+		nextMS  int64
+		hasMore bool
+	}
+	fetch := func(args ...string) page {
+		t.Helper()
+		var out bytes.Buffer
+		if code := run(append([]string{"sift", "timeline", "--run", "runCLI", "--limit", "2", "--json"}, args...), &out, io.Discard); code != 0 {
+			t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+		}
+		var response struct {
+			Result struct {
+				Events []struct {
+					Seq          int64
+					OccurredAtMS int64
+				} `json:"events"`
+				NextSeq          int64 `json:"next_seq"`
+				NextOccurredAtMS int64 `json:"next_occurred_at_ms"`
+				HasMore          bool  `json:"has_more"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+			t.Fatalf("decode page: %v\n%s", err, out.String())
+		}
+		r := response.Result
+		return page{events: r.Events, nextSeq: r.NextSeq, nextMS: r.NextOccurredAtMS, hasMore: r.HasMore}
+	}
+
+	page1 := fetch()
+	if len(page1.events) != 2 || !page1.hasMore {
+		t.Fatalf("page1 = %+v, want 2 events with more", page1)
+	}
+	// The first screen contains the globally newest event and is descending.
+	if page1.events[0].OccurredAtMS != base+5000 || page1.events[1].OccurredAtMS != base+4000 {
+		t.Fatalf("page1 not globally newest-first: %+v", page1.events)
+	}
+
+	// The human output of the same page leads with the newest event and prints
+	// the full (seq, occurred_at_ms) cursor for the next page.
+	var human bytes.Buffer
+	if code := run([]string{"sift", "timeline", "--run", "runCLI", "--limit", "2"}, &human, io.Discard); code != 0 {
+		t.Fatalf("human page exit code = %d; output:\n%s", code, human.String())
+	}
+	hint := fmt.Sprintf("--after-seq %d --after-ms %d", page1.nextSeq, page1.nextMS)
+	if !strings.Contains(human.String(), hint) {
+		t.Fatalf("human page lacks cursor hint %q:\n%s", hint, human.String())
+	}
+	first := time.UnixMilli(base + 5000).Format("15:04:05")
+	second := time.UnixMilli(base + 4000).Format("15:04:05")
+	if strings.Index(human.String(), first) > strings.Index(human.String(), second) {
+		t.Fatalf("human page is not newest-first:\n%s", human.String())
+	}
+
+	page2 := fetch("--after-seq", fmt.Sprintf("%d", page1.nextSeq), "--after-ms", fmt.Sprintf("%d", page1.nextMS))
+	if len(page2.events) != 2 || !page2.hasMore {
+		t.Fatalf("page2 = %+v, want 2 events with more", page2)
+	}
+	page3 := fetch("--after-seq", fmt.Sprintf("%d", page2.nextSeq), "--after-ms", fmt.Sprintf("%d", page2.nextMS))
+	if len(page3.events) != 1 || page3.hasMore {
+		t.Fatalf("page3 = %+v, want 1 final event", page3)
+	}
+
+	// Concatenated pages are globally occurred_at_ms descending, duplicate-free,
+	// and cover all five seeded events.
+	seen := map[int64]bool{}
+	var all []struct {
+		Seq          int64
+		OccurredAtMS int64
+	}
+	for _, p := range []page{page1, page2, page3} {
+		all = append(all, p.events...)
+	}
+	if len(all) != 5 {
+		t.Fatalf("pages cover %d events, want 5: %+v", len(all), all)
+	}
+	for i, e := range all {
+		if seen[e.Seq] {
+			t.Fatalf("duplicate seq %d across pages: %+v", e.Seq, all)
+		}
+		seen[e.Seq] = true
+		if i > 0 && all[i-1].OccurredAtMS < e.OccurredAtMS {
+			t.Fatalf("pages not globally descending at %d: %+v", i, all)
+		}
+	}
+}
+
+// TestOpsTimelineJSONBackwardCompatible pins the ops.timeline --json contract
+// evolution (#921 B2) explicitly instead of weakening it: the paging contract
+// intentionally grew from a seq cursor to an (occurred_at_ms, seq) keyset, and
+// that adds exactly one result field — next_occurred_at_ms. Every pre-existing
+// field (events, next_seq, has_more and the per-event keys) must stay
+// byte-for-byte identical with the origin/main envelope for the same fixed
+// fixture, modulo the two inherently random leaves (envelope request_id and
+// per-event id) which are normalized identically on both sides.
+//
+// The golden file testdata/ops_timeline_envelope_v1.json was captured from
+// origin/main (the last commit before B2): origin/main's `sift timeline`
+// printed the raw RPC envelope by default, and the fixture's insertion order
+// equals its occurrence order (newest-first, like a backfill), so the legacy
+// seq-ASC and the B2 occurred-DESC full streams coincide and the whole legacy
+// envelope is byte-comparable. Regenerate it from origin/main — never from
+// this branch — with the same fixture whenever the pre-B2 envelope is expected
+// to change (see testdata/README.md).
+//
+// The interleaved fixture (seq and occurred_at_ms out of order) is the case
+// the evolution genuinely reorders; there we assert the additive-only field
+// set diff, the next_occurred_at_ms cursor invariant, and that a legacy
+// after_seq-only client still drains the whole stream without duplicates (old
+// scripts keep working; B3 resolves the seq on the server).
+func TestOpsTimelineJSONBackwardCompatible(t *testing.T) {
+	home := freshHome(t)
+	db, err := storage.Open(context.Background(), storage.OpenConfig{Path: filepath.Join(home, "sift.db"), BinaryVersion: controlplane.Version, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	const base = int64(1_700_000_000_000)
+	if err := db.SeedProjectForTest(ctx, "cfg-cli", "proj-cli", base); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "runCLI", "proj-cli", "cfg-cli", "issue-1", base); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedForgeRunForTest(ctx, "runIX", "proj-cli", "cfg-cli", "issue-2", base); err != nil {
+		t.Fatal(err)
+	}
+	seedEvents := func(runID string, offsets []int64) {
+		t.Helper()
+		for i, off := range offsets {
+			if _, err := db.AppendEvent(ctx, storage.EventCmd{RunID: runID, Type: "report.progress", Source: storage.SourceAgent, Actor: fmt.Sprintf("agent-%d", i), PayloadJSON: []byte("{}"), OccurredAtMS: base + off, RecordedAtMS: base + off}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	s, err := controlplane.Start(config.Home{Path: home}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	srvCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Serve(srvCtx) }()
+	waitSocket(t, filepath.Join(home, "siftd.sock"))
+
+	// canonicalize mirrors exactly what the CLI prints (schema.Decode then
+	// MarshalIndent, printJSON) and then pins the leaves that are inherently
+	// non-deterministic or intentionally additive: the envelope request_id, the
+	// per-event id, and — with dropCursor — the sole additive result field
+	// next_occurred_at_ms, which selects the legacy field set for comparison.
+	canonicalize := func(raw []byte, dropCursor bool) []byte {
+		t.Helper()
+		var resp controlplane.Response
+		if err := schema.Decode(raw, &resp, schema.Closed); err != nil {
+			t.Fatalf("decode envelope: %v\n%s", err, raw)
+		}
+		resp.RequestID = "00112233445566778899aabbccddeeff"
+		result := resp.Result.(map[string]any)
+		if dropCursor {
+			delete(result, "next_occurred_at_ms")
+		}
+		for _, ev := range result["events"].([]any) {
+			em := ev.(map[string]any)
+			em["ID"] = fmt.Sprintf("golden-event-%d", int(em["Seq"].(float64)))
+		}
+		canon, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(canon, '\n')
+	}
+
+	// 1. Byte-for-byte golden: the fixed backfill-shaped fixture must yield a
+	// legacy field set identical with origin/main's envelope, byte for byte.
+	seedEvents("runCLI", []int64{5000, 4000, 3000, 2000, 1000})
+	var out bytes.Buffer
+	if code := run([]string{"sift", "timeline", "--run", "runCLI", "--limit", "100", "--json"}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+	}
+	golden, err := os.ReadFile(filepath.Join("testdata", "ops_timeline_envelope_v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := canonicalize(out.Bytes(), true); !bytes.Equal(got, golden) {
+		t.Fatalf("legacy field set diverged from origin/main envelope:\n--- got ---\n%s\n--- golden (origin/main) ---\n%s", got, golden)
+	}
+	// The additive field is present on the current side and carries the B2
+	// keyset cursor half: the oldest returned event's occurred_at_ms.
+	var withCursor struct {
+		Result struct {
+			Events []struct {
+				Seq          int64 `json:"Seq"`
+				OccurredAtMS int64 `json:"OccurredAtMS"`
+			} `json:"events"`
+			NextOccurredAtMS int64 `json:"next_occurred_at_ms"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &withCursor); err != nil {
+		t.Fatal(err)
+	}
+	last := withCursor.Result.Events[len(withCursor.Result.Events)-1]
+	if withCursor.Result.NextOccurredAtMS != last.OccurredAtMS {
+		t.Fatalf("next_occurred_at_ms = %d, want the oldest returned event's occurred_at_ms %d", withCursor.Result.NextOccurredAtMS, last.OccurredAtMS)
+	}
+
+	// 2. SIFT_JSON=1 and --json select the same raw RPC envelope surface, so a
+	// legacy env-based script sees the identical bytes (request_id aside).
+	t.Setenv("SIFT_JSON", "1")
+	var envOut bytes.Buffer
+	if code := run([]string{"sift", "timeline", "--run", "runCLI", "--limit", "100"}, &envOut, io.Discard); code != 0 {
+		t.Fatalf("SIFT_JSON exit code = %d; output:\n%s", code, envOut.String())
+	}
+	if !bytes.Equal(canonicalize(envOut.Bytes(), false), canonicalize(out.Bytes(), false)) {
+		t.Fatalf("SIFT_JSON=1 and --json envelopes diverge:\n%s\n---\n%s", envOut.String(), out.String())
+	}
+
+	// 3. Interleaved fixture: the evolution genuinely reorders pages here, so
+	// assert the additive-only field set diff against the golden structure, the
+	// newest-first ordering, and that a legacy after_seq-only client still
+	// drains the whole stream (old scripts keep working).
+	seedEvents("runIX", []int64{1000, 3000, 2000, 5000, 4000})
+	var ixOut bytes.Buffer
+	if code := run([]string{"sift", "timeline", "--run", "runIX", "--limit", "100", "--json"}, &ixOut, io.Discard); code != 0 {
+		t.Fatalf("interleaved exit code = %d; output:\n%s", code, ixOut.String())
+	}
+	keySet := func(m map[string]any) map[string]bool {
+		ks := make(map[string]bool, len(m))
+		for k := range m {
+			ks[k] = true
+		}
+		return ks
+	}
+	var goldenEnv, ixEnv struct {
+		Result map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(golden, &goldenEnv); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(ixOut.Bytes(), &ixEnv); err != nil {
+		t.Fatal(err)
+	}
+	goldenResultKeys := keySet(goldenEnv.Result)
+	ixResultKeys := keySet(ixEnv.Result)
+	if len(ixResultKeys) != len(goldenResultKeys)+1 || !ixResultKeys["next_occurred_at_ms"] {
+		t.Fatalf("result keys = %v, want legacy keys %v plus exactly next_occurred_at_ms", ixResultKeys, goldenResultKeys)
+	}
+	for k := range ixResultKeys {
+		if !goldenResultKeys[k] && k != "next_occurred_at_ms" {
+			t.Fatalf("unexpected new result key %q (additive contract allows only next_occurred_at_ms)", k)
+		}
+	}
+	for k := range goldenResultKeys {
+		if !ixResultKeys[k] {
+			t.Fatalf("legacy result key %q missing from current envelope", k)
+		}
+	}
+	// The per-event key set must be unchanged too.
+	goldenEventKeys := keySet(goldenEnv.Result["events"].([]any)[0].(map[string]any))
+	ixEvents := ixEnv.Result["events"].([]any)
+	for _, ev := range ixEvents {
+		if ks := keySet(ev.(map[string]any)); !reflect.DeepEqual(ks, goldenEventKeys) {
+			t.Fatalf("event keys = %v, want legacy event keys %v", ks, goldenEventKeys)
+		}
+	}
+	// The full interleaved stream is newest-first (the B2 ordering contract).
+	for i := 1; i < len(ixEvents); i++ {
+		prev := ixEvents[i-1].(map[string]any)["OccurredAtMS"].(float64)
+		cur := ixEvents[i].(map[string]any)["OccurredAtMS"].(float64)
+		if prev < cur {
+			t.Fatalf("interleaved stream not newest-first at %d", i)
+		}
+	}
+	// Legacy paging: first page without a cursor, then continue with only the
+	// legacy after_seq param (no after_occurred_at_ms); the stream must drain
+	// with no duplicates and no empty page before the end.
+	type page struct {
+		seqs    []int64
+		nextSeq int64
+		hasMore bool
+	}
+	fetchPage := func(args ...string) page {
+		t.Helper()
+		var b bytes.Buffer
+		if code := run(append([]string{"sift", "timeline", "--run", "runIX", "--limit", "2", "--json"}, args...), &b, io.Discard); code != 0 {
+			t.Fatalf("page exit code = %d; output:\n%s", code, b.String())
+		}
+		var resp struct {
+			Result struct {
+				Events []struct {
+					Seq int64 `json:"Seq"`
+				} `json:"events"`
+				NextSeq int64 `json:"next_seq"`
+				HasMore bool  `json:"has_more"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(b.Bytes(), &resp); err != nil {
+			t.Fatalf("decode page: %v\n%s", err, b.String())
+		}
+		p := page{nextSeq: resp.Result.NextSeq, hasMore: resp.Result.HasMore}
+		for _, e := range resp.Result.Events {
+			p.seqs = append(p.seqs, e.Seq)
+		}
+		return p
+	}
+	p1 := fetchPage()
+	p2 := fetchPage("--after-seq", fmt.Sprintf("%d", p1.nextSeq))
+	p3 := fetchPage("--after-seq", fmt.Sprintf("%d", p2.nextSeq))
+	p4 := fetchPage("--after-seq", fmt.Sprintf("%d", p3.nextSeq))
+	seen := map[int64]bool{}
+	for _, p := range []page{p1, p2, p3, p4} {
+		for _, seq := range p.seqs {
+			if seen[seq] {
+				t.Fatalf("duplicate seq %d across legacy pages", seq)
+			}
+			seen[seq] = true
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("legacy after_seq-only paging covered %d events, want all 5", len(seen))
+	}
+	if p4.hasMore || len(p4.seqs) != 0 {
+		t.Fatalf("legacy paging ended at %+v, want a final empty page with has_more=false", p4)
+	}
+}
+
 // TestRunPSOnline prints persisted runs over a real daemon.
 func TestRunPSOnline(t *testing.T) {
 	home := freshHome(t)
 	startServerWithDB(t, home)
 	var out bytes.Buffer
-	code := run([]string{"sift", "ps"}, &out, io.Discard)
+	code := run([]string{"sift", "ps", "--json"}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
 	}
@@ -1163,6 +1590,25 @@ func TestRunPSOnline(t *testing.T) {
 	runs := result["runs"].([]any)
 	if len(runs) != 1 {
 		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+}
+
+// TestRunPSHumanOnline pins the humanized default over a real daemon: the run
+// table carries the run id, project, Chinese status and phase columns.
+func TestRunPSHumanOnline(t *testing.T) {
+	home := freshHome(t)
+	startServerWithDB(t, home)
+	var out bytes.Buffer
+	if code := run([]string{"sift", "ps"}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit code = %d; output:\n%s", code, out.String())
+	}
+	for _, want := range []string{"运行列表", "runCLI", "proj-cli", "运行 ID", "项目"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human ps output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "protocol_major") {
+		t.Fatalf("human ps output leaked the RPC envelope:\n%s", out.String())
 	}
 }
 
@@ -1250,9 +1696,9 @@ func startServerWithChannelFailure(t *testing.T, home string) {
 func channelDeliveryFromCLI(t *testing.T, command string) map[string]any {
 	t.Helper()
 	var out bytes.Buffer
-	args := []string{"sift", command}
+	args := []string{"sift", command, "--json"}
 	if command == "doctor" {
-		args = append(args, "--json")
+		args = []string{"sift", command, "--json"}
 	}
 	run(args, &out, io.Discard)
 	var response map[string]any
