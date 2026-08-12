@@ -57,7 +57,7 @@ docs/
 | `reviews/` | **只读存档** | 评审过程存档，一份评审一个文件。存档即终态，后续处置写在被评审文档的处置对账节里，不改评审原文 |
 | `guides/` | **随功能迭代** | 面向用户的文档 |
 | `runbooks/` | **按需补充** | 面向运维的处置手册：部署、告警、故障排查。每条 runbook 针对一个具体症状 |
-| `dev/` | **按需补充** | 面向开发者的环境搭建、调试技巧、贡献流程 |
+| `dev/` | **按需补充** | 面向开发者的环境搭建、调试技巧、贡献流程；编码纪律见 [`coding-constraints.md`](dev/coding-constraints.md)（软规范） |
 
 ### plans 与 decisions 的衔接
 
@@ -120,7 +120,7 @@ summary: 一句话说明本文档回答什么问题（30 字以内）
 
   | 任务类型 | 加载 |
   |---------|------|
-  | 实现功能 X | `specs/X` + 相关 ADR + 当前 plan |
+  | 实现功能 X | `specs/X` + 相关 ADR + 当前 plan + [`dev/coding-constraints.md`](dev/coding-constraints.md) |
   | 写/改测试 | 对应 spec + `testing/strategy.md` + 对应测试方案 |
   | 评审/设计讨论 | PRD、DESIGN 相关章节 |
   | 派工 / 拆任务 | `WBS.md` 对应里程碑（分解与验收） |

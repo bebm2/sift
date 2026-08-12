@@ -3,6 +3,7 @@
 ## 先读
 
 - 文档地图、命名约定、上下文加载规则：[docs/README.md](docs/README.md)
+- 编码纪律（软规范）：[docs/dev/coding-constraints.md](docs/dev/coding-constraints.md)
 
 ## 项目现状
 
