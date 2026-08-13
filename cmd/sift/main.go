@@ -164,6 +164,9 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if command == "kill" || command == "retry" {
 		return runKillRetry(command, requestArgs, home, stdout, stderr, jsonOutput)
 	}
+	if command == "ps" {
+		return runPs(requestArgs, home, stdout, stderr, jsonOutput)
+	}
 	method, params, err := request(command, requestArgs)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "unknown command") {
@@ -203,8 +206,6 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return 1
 	}
 	switch command {
-	case "ps":
-		render.PS(stdout, response.Result)
 	case "timeline":
 		render.Timeline(stdout, response.Result)
 	case "logs":
@@ -466,6 +467,115 @@ func newRequestKey() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// runPs implements `sift ps`, modeled on `docker ps`: the default lists only
+// non-terminal (active) runs, -a/--all includes terminal ones, --status filters
+// by an exact status, --ids prints one run id per line for scripting. Status
+// selection is applied CLIENT-SIDE on the daemon response so it works against
+// any daemon version (the daemon's exact-status filter is not relied on); only
+// the project filter reaches the daemon. --ids/--json are CLI-only rendering.
+func runPs(args []string, home config.Home, stdout, stderr io.Writer, jsonOutput bool) int {
+	fs := flag.NewFlagSet("ps", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	allLong := fs.Bool("all", false, "show all runs including terminal (failed/done)")
+	allShort := fs.Bool("a", false, "shorthand for --all")
+	status := fs.String("status", "", "filter by exact status (queued|running|waiting_human|done|failed)")
+	ids := fs.Bool("ids", false, "print only run ids, one per line")
+	project := fs.String("project", "", "filter to a project id")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		report(stderr, fmt.Errorf("usage: sift ps [-a|--all] [--status STATUS] [--project ID] [--ids] [--json]"))
+		return 2
+	}
+	// selection: "" = active (non-terminal), "all" = everything, else exact.
+	selection := ""
+	if *allLong || *allShort {
+		selection = "all"
+	}
+	if *status != "" {
+		selection = *status
+	}
+	response, err := controlplane.OperatorRequest(home, "ops.ps", map[string]any{
+		"run_id": nil, "project_id": nullableStringCLI(*project), "status": nil, "limit": 100, "after_run_id": nil,
+	})
+	if err != nil {
+		reportDaemonUnavailable(home, stderr, err)
+		return 1
+	}
+	if !response.OK {
+		render.Error(stdout, response, render.FailureContext("ps", nil))
+		return 1
+	}
+	// Filter the runs client-side so the selection works against any daemon
+	// version (the daemon is asked for all runs; the CLI keeps the selection).
+	obj := filterPsRuns(response.Result, selection)
+	response.Result = obj
+	if *ids {
+		for _, r := range psRunIDList(obj) {
+			fmt.Fprintln(stdout, r)
+		}
+		return 0
+	}
+	if jsonOutput {
+		if err := printJSON(stdout, response); err != nil {
+			report(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	render.PS(stdout, response.Result)
+	return 0
+}
+
+// filterPsRuns decodes the ops.ps result, drops runs that do not match the
+// selection, and returns the result map with the filtered "runs". selection
+// ""/"active" = non-terminal only, "all" = everything, otherwise exact status.
+func filterPsRuns(value any, selection string) map[string]any {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{"runs": []any{}}
+	}
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return map[string]any{"runs": []any{}}
+	}
+	runs, _ := obj["runs"].([]any)
+	kept := make([]any, 0, len(runs))
+	for _, r := range runs {
+		m, _ := r.(map[string]any)
+		s, _ := m["status"].(string)
+		if psRunVisible(s, selection) {
+			kept = append(kept, r)
+		}
+	}
+	obj["runs"] = kept
+	return obj
+}
+
+func psRunIDList(obj map[string]any) []string {
+	runs, _ := obj["runs"].([]any)
+	ids := make([]string, 0, len(runs))
+	for _, r := range runs {
+		m, _ := r.(map[string]any)
+		if id, _ := m["run_id"].(string); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// psRunVisible reports whether a run of the given status should be shown under
+// the selection: "" (default) = non-terminal only; "all" = everything; any other
+// value = exact status match.
+func psRunVisible(status, selection string) bool {
+	switch selection {
+	case "", "active":
+		return status == "queued" || status == "running" || status == "waiting_human"
+	case "all":
+		return true
+	default:
+		return status == selection
+	}
+}
+
 func runKillRetry(command string, args []string, home config.Home, stdout, stderr io.Writer, jsonOutput bool) int {
 	version, key, runID, err := parseKillRetryArgs(command, args)
 	if err != nil {
@@ -537,8 +647,6 @@ func runKillRetry(command string, args []string, home config.Home, stdout, stder
 
 func request(command string, args []string) (string, map[string]any, error) {
 	switch command {
-	case "ps":
-		return "ops.ps", map[string]any{"run_id": nil, "project_id": nil, "status": nil, "limit": 100, "after_run_id": nil}, nil
 	case "doctor":
 		if len(args) != 0 {
 			return "", nil, fmt.Errorf("doctor accepts only --offline")
