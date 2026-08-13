@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/miaoxiaoyong/sift/internal/config"
 	"github.com/miaoxiaoyong/sift/internal/version"
 )
 
@@ -29,6 +30,16 @@ func updateArchiveName(release string) string {
 func checksumLine(archiveName string, archiveBytes []byte) string {
 	sum := sha256.Sum256(archiveBytes)
 	return fmt.Sprintf("%x  %s\n", sum, archiveName)
+}
+
+// swapRestartDaemon replaces the update command's daemon-restart seam for the
+// duration of a test and returns a restore func. It mirrors the endpoint
+// rewiring pattern so the auto-restart can be asserted without a real
+// platform supervisor.
+func swapRestartDaemon(fn func(config.Home) (string, error)) func() {
+	prev := restartRunningDaemon
+	restartRunningDaemon = fn
+	return func() { restartRunningDaemon = prev }
 }
 
 // releaseServer serves the GitHub release API and download endpoints over
@@ -155,12 +166,82 @@ func TestUpdateDaemonHintWhenSocketPresent(t *testing.T) {
 	archive := testUpdateArchive(t, "9.9.9")
 	name := updateArchiveName("9.9.9")
 	releaseServer(t, "9.9.9", map[string][]byte{name: archive}, checksumLine(name, archive))
+	// The auto-restart is attempted but fails (no real supervisor wired), so
+	// the command must fall back to the manual restart hint.
+	restore := swapRestartDaemon(func(config.Home) (string, error) { return "launchd", fmt.Errorf("not loaded") })
+	defer restore()
 	var out bytes.Buffer
 	if code := run([]string{"sift", "update"}, &out, io.Discard); code != 0 {
 		t.Fatalf("exit = %d, output=%q", code, out.String())
 	}
 	if !strings.Contains(out.String(), "sift service restart") {
 		t.Fatalf("output lacks the daemon restart hint:\n%s", out.String())
+	}
+}
+
+// TestUpdateAutoRestartsDaemon confirms a successful upgrade auto-restarts the
+// running daemon and reports the backend, instead of only hinting.
+func TestUpdateAutoRestartsDaemon(t *testing.T) {
+	home := freshHome(t)
+	listener, err := net.Listen("unix", filepath.Join(home, "siftd.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close(); _ = os.Remove(filepath.Join(home, "siftd.sock")) })
+
+	archive := testUpdateArchive(t, "9.9.9")
+	name := updateArchiveName("9.9.9")
+	releaseServer(t, "9.9.9", map[string][]byte{name: archive}, checksumLine(name, archive))
+
+	var called int
+	restore := swapRestartDaemon(func(config.Home) (string, error) {
+		called++
+		return "launchd", nil
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	if code := run([]string{"sift", "update"}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit = %d, output=%q", code, out.String())
+	}
+	if called != 1 {
+		t.Fatalf("restart called %d times, want 1", called)
+	}
+	if !strings.Contains(out.String(), "已重启守护进程（launchd）") {
+		t.Fatalf("output lacks the auto-restart success line:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "sift service restart") {
+		t.Fatalf("output should not contain the manual hint on success:\n%s", out.String())
+	}
+}
+
+// TestUpdateNoRestartFlagSkipsRestart confirms --no-restart suppresses the
+// auto-restart entirely (but still upgrades the binary).
+func TestUpdateNoRestartFlagSkipsRestart(t *testing.T) {
+	home := freshHome(t)
+	listener, err := net.Listen("unix", filepath.Join(home, "siftd.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close(); _ = os.Remove(filepath.Join(home, "siftd.sock")) })
+
+	archive := testUpdateArchive(t, "9.9.9")
+	name := updateArchiveName("9.9.9")
+	releaseServer(t, "9.9.9", map[string][]byte{name: archive}, checksumLine(name, archive))
+
+	var called int
+	restore := swapRestartDaemon(func(config.Home) (string, error) { called++; return "launchd", nil })
+	defer restore()
+
+	var out bytes.Buffer
+	if code := run([]string{"sift", "update", "--no-restart"}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit = %d, output=%q", code, out.String())
+	}
+	if called != 0 {
+		t.Fatalf("restart called %d times, want 0 under --no-restart", called)
+	}
+	if !strings.Contains(out.String(), "已升级到 9.9.9") {
+		t.Fatalf("output lacks upgrade confirmation:\n%s", out.String())
 	}
 }
 

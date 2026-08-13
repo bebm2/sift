@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/miaoxiaoyong/sift/internal/config"
+	"github.com/miaoxiaoyong/sift/internal/hosting"
 	"github.com/miaoxiaoyong/sift/internal/install"
 	"github.com/miaoxiaoyong/sift/internal/version"
 )
@@ -68,9 +69,10 @@ func runUpdate(args []string, home config.Home, verbose, quiet bool, stdout, std
 	check := fs.Bool("check", false, "only report current vs latest, do not install")
 	pinned := fs.String("version", "", "pin the release version to download (default: latest)")
 	force := fs.Bool("force", false, "reinstall even when the version is already current")
+	noRestart := fs.Bool("no-restart", false, "do not auto-restart the daemon after a successful upgrade")
 	jsonFlag := fs.Bool("json", false, "emit machine-readable output")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
-		report(stderr, fmt.Errorf("usage: sift update [--check] [--version X] [--force] [--json]"))
+		report(stderr, fmt.Errorf("usage: sift update [--check] [--version X] [--force] [--no-restart] [--json]"))
 		return 2
 	}
 	jsonOutput := os.Getenv("SIFT_JSON") == "1" || *jsonFlag
@@ -197,12 +199,39 @@ func runUpdate(args []string, home config.Home, verbose, quiet bool, stdout, std
 		return emitUpdateJSON(stdout, stderr, current, installed, true)
 	}
 	humanf(stdout, quiet, "已升级到 %s\n", installed)
-	// Daemon-aware: a running siftd keeps the old binary until restarted
-	// (release.md §3: `current` switch never touches the running process).
-	if isSocket(filepath.Join(home.Path, "siftd.sock")) {
+	// Daemon-aware: a running siftd keeps the old binary in memory until
+	// restarted (release.md §3: the `current` switch never touches the
+	// running process). Auto-restart the managed service so the upgrade
+	// actually takes effect; fall back to a hint for a foreground daemon or a
+	// restart failure. --no-restart and the --json machine path skip the
+	// auto-restart (scripts manage their own daemon).
+	if !*noRestart && isSocket(filepath.Join(home.Path, "siftd.sock")) {
+		if backend, err := restartRunningDaemon(home); err == nil {
+			humanf(stdout, quiet, "已重启守护进程（%s），新版本生效\n", backend)
+			return 0
+		}
 		humanf(stdout, quiet, "守护进程正在运行：运行 `sift service restart` 使新版本生效\n")
 	}
 	return 0
+}
+
+// restartRunningDaemon restarts the running daemon so a just-installed release
+// takes effect. It returns the detected hosting backend on success. It is a
+// package var so tests can assert a restart is attempted without depending on
+// a real platform supervisor (the same rewiring pattern as releaseAPIURL).
+var restartRunningDaemon = func(home config.Home) (string, error) {
+	spec, err := hosting.NewSpec(home.Path)
+	if err != nil {
+		return "", err
+	}
+	plan, err := spec.Plan(hosting.ActionRestart)
+	if err != nil {
+		return "", err
+	}
+	if _, err := hosting.Exec(plan); err != nil {
+		return string(spec.Backend), err
+	}
+	return string(spec.Backend), nil
 }
 
 // downloadSize returns the on-disk size of a completed download for the -v
