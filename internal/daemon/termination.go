@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -260,17 +261,86 @@ func (c *TerminationCoordinator) Timeout(ctx context.Context) error {
 
 func (c *TerminationCoordinator) Operator(ctx context.Context, runID string, expectedVersion int64, retry bool) error {
 	attempt, err := c.DB.RecoveryAttemptForRun(ctx, runID)
+	if err == nil {
+		if attempt.RunVersion != expectedVersion {
+			return storage.ErrRejectedStale
+		}
+		source := storage.TerminationKill
+		if retry {
+			source = storage.TerminationRetry
+		}
+		return c.terminate(ctx, attempt, source, expectedVersion)
+	}
+	if !errors.Is(err, storage.ErrRejectedStale) {
+		return err
+	}
+	// No dispatchable (non-terminal) attempt. RecoveryAttemptForRun returns
+	// stale for this condition, but it is not a version conflict: the run's
+	// latest attempt is finished/orphaned (or it never launched), so there is
+	// no live process to observe. Surfacing it as stale made such runs
+	// un-killable. Drive a controlled absence outcome instead.
+	return c.terminateNoActiveAttempt(ctx, runID, expectedVersion, retry)
+}
+
+// terminateNoActiveAttempt handles kill/retry when no non-terminal attempt
+// exists. The latest attempt is finished/orphaned (a stuck run) or absent (a
+// queued run before assignment). Either way there is no live process, so a
+// controlled absence outcome applies and the run is moved to a terminal state.
+// A run that is already done/failed is reported as already terminal rather
+// than re-converged.
+func (c *TerminationCoordinator) terminateNoActiveAttempt(ctx context.Context, runID string, expectedVersion int64, retry bool) error {
+	run, err := c.DB.Run(ctx, runID)
 	if err != nil {
 		return err
 	}
-	if attempt.RunVersion != expectedVersion {
-		return storage.ErrRejectedStale
+	if run.Status == storage.RunDone || run.Status == storage.RunFailed {
+		return storage.ErrRunAlreadyTerminal
 	}
 	source := storage.TerminationKill
 	if retry {
 		source = storage.TerminationRetry
 	}
-	return c.terminate(ctx, attempt, source, expectedVersion)
+	latest, _, lerr := c.DB.LatestAttemptForRun(ctx, runID)
+	if errors.Is(lerr, storage.ErrRejectedStale) {
+		// No attempt body at all (queued before assignment). There is nothing
+		// to record a termination against; a kill forces the run to failed.
+		// retry has no finished attempt to re-run from.
+		if retry {
+			return storage.ErrRunAlreadyTerminal
+		}
+		return c.forceRunFailed(ctx, runID, expectedVersion)
+	}
+	if lerr != nil {
+		return lerr
+	}
+	// Finished/orphaned attempt: the execution body is already gone, so
+	// absence is trivially true. Reuse the controlled-termination port so the
+	// audit event, isolation release and run transition are identical to a
+	// normal kill/retry-absence convergence.
+	_, err = c.DB.RecordTerminationObservation(ctx, storage.RecordTerminationObservationCmd{
+		RunID: latest.RunID, AttemptNo: latest.AttemptNo,
+		ExpectedRunVersion: expectedVersion, ExpectedGeneration: latest.Generation,
+		Source: source, Absent: true,
+		Evidence: "no active attempt; operator controlled termination of a finished attempt",
+		NowMS:    c.nowMS(),
+		AttentionDailyQuota: c.AttentionDailyQuota, DayTimezone: c.DayTimezone, DailySummaryAt: c.DailySummaryAt,
+		CriticalWindowMS: c.CriticalWindowMS, CriticalTotalLimit: c.CriticalTotalLimit, CriticalPerRunLimit: c.CriticalPerRunLimit,
+		Channels: c.Channels,
+	})
+	return err
+}
+
+// forceRunFailed transitions a non-terminal run straight to failed. It is the
+// no-attempt fallback: a queued run that never launched has no execution body
+// to record a termination against, so the kill mirrors the absence outcome via
+// the canonical run-status writer (which still CAS-guards the version and
+// rejects illegal transitions).
+func (c *TerminationCoordinator) forceRunFailed(ctx context.Context, runID string, expectedVersion int64) error {
+	_, err := c.DB.TransitionRun(ctx, runID, expectedVersion, storage.DomainCommand{
+		To: storage.RunFailed, Source: storage.SourceOperator, Actor: "operator_kill",
+		FailureReason: "operator_kill", OccurredAtMS: c.nowMS(),
+	})
+	return err
 }
 
 func (c *TerminationCoordinator) heartbeatStale(attempt storage.RecoveryAttempt) bool {

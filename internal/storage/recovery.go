@@ -285,3 +285,21 @@ func (d *DB) RecoveryAttemptForRun(ctx context.Context, runID string) (RecoveryA
 	}
 	return scanRecoveryAttempt(rows)
 }
+
+// LatestAttemptForRun returns the newest attempt for a run regardless of
+// terminal phase, together with the run's current status. It is the
+// no-dispatchable-attempt companion to RecoveryAttemptForRun: when every
+// attempt is finished/orphaned the operator kill/retry path still needs the
+// latest body to drive a controlled absence outcome, and the run status to
+// tell a stuck non-terminal run from one already done/failed. ErrRejectedStale
+// means the run has no attempts at all (e.g. queued before assignment).
+func (d *DB) LatestAttemptForRun(ctx context.Context, runID string) (RecoveryAttempt, string, error) {
+	row := d.db.QueryRowContext(ctx, `SELECT r.status, `+recoveryAttemptColumns+` FROM attempts a JOIN runs r ON r.id=a.run_id LEFT JOIN attempt_claims c ON c.run_id=a.run_id AND c.attempt_no=a.attempt_no WHERE a.run_id=? ORDER BY a.attempt_no DESC LIMIT 1`, runID)
+	var status string
+	var a RecoveryAttempt
+	err := row.Scan(&status, &a.RunID, &a.RunVersion, &a.AttemptNo, &a.Generation, &a.Phase, &a.Backend, &a.AgentID, &a.DispatchID, &a.TopologyQualificationKey, &a.WrapperPID, &a.WrapperStartedAtMS, &a.WrapperExecutable, &a.WrapperPGID, &a.ControlNonceHash, &a.HeartbeatAtMS, &a.AgentPID, &a.AgentStartedAtMS, &a.AgentExecutable, &a.IsolationState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RecoveryAttempt{}, "", ErrRejectedStale
+	}
+	return a, status, err
+}

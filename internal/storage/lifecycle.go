@@ -273,8 +273,9 @@ const (
 )
 
 var (
-	ErrRejectedStale     = errors.New("storage: rejected stale command")
-	ErrIllegalTransition = errors.New("storage: illegal run transition")
+	ErrRejectedStale      = errors.New("storage: rejected stale command")
+	ErrIllegalTransition  = errors.New("storage: illegal run transition")
+	ErrRunAlreadyTerminal = errors.New("storage: run is already in a terminal state")
 )
 
 type Run struct {

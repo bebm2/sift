@@ -347,6 +347,9 @@ func (s *Server) operatorRequest(req Request) Response {
 			if errors.Is(err, storage.ErrRejectedStale) {
 				return failure(req.RequestID, "stale", "run or attempt changed", false)
 			}
+			if errors.Is(err, storage.ErrRunAlreadyTerminal) {
+				return failure(req.RequestID, "conflict", "运行已完成或失败，无需终止", false)
+			}
 			return failure(req.RequestID, "termination_failed", "controlled termination was not accepted", true)
 		}
 		return success(req.RequestID, map[string]any{"accepted": true, "state": "terminating"})
