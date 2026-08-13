@@ -32,7 +32,7 @@ func FailureContext(command string, args []string) string {
 		return fmt.Sprintf("运行 %s 的日志不存在（可能已被清理）", runID)
 	case "worktree":
 		return fmt.Sprintf("运行 %s 没有可用的工作树", runID)
-	case "kill", "retry":
+	case "kill", "retry", "rm":
 		return fmt.Sprintf("运行 %s 不存在", runID)
 	default:
 		return "请求的数据不存在"

@@ -268,6 +268,18 @@ var commands = []commandMeta{
 		examples: []string{"sift retry run-123", "sift retry run-123 --expected-version 2 --request-key retry-1"},
 	},
 	{
+		name:    "rm",
+		group:   groupControl,
+		brief:   "rm <run-id>",
+		summary: "从列表移除运行（归档，保留历史）",
+		usage:   "sift rm <run-id> [--force|-f] [--json]",
+		flags: []flagMeta{
+			{"-f, --force", "", "仍在运行时先终止再移除"},
+			{"--json", "", "输出机器可读的 JSON"},
+		},
+		examples: []string{"sift rm run-123", "sift rm -f run-123", "sift rm $(sift ps -a --ids)"},
+	},
+	{
 		name:            "report",
 		group:           groupControl,
 		brief:           "report <kind>",

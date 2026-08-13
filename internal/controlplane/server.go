@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -353,6 +354,50 @@ func (s *Server) operatorRequest(req Request) Response {
 			return failure(req.RequestID, "termination_failed", "controlled termination was not accepted", true)
 		}
 		return success(req.RequestID, map[string]any{"accepted": true, "state": "terminating"})
+	case "ops.rm":
+		if !onlyKeys(req.Params, "run_id", "expected_version", "force") {
+			return failure(req.RequestID, "invalid_request", "invalid params", false)
+		}
+		runID, ok := req.Params["run_id"].(string)
+		version, vok := req.Params["expected_version"].(float64)
+		force, _ := req.Params["force"].(bool)
+		if !ok || runID == "" || !vok || version < 1 || version != float64(int64(version)) {
+			return failure(req.RequestID, "invalid_request", "invalid params", false)
+		}
+		if s.db == nil {
+			return failure(req.RequestID, "unavailable", "storage is unavailable", true)
+		}
+		run, err := s.db.Run(context.Background(), runID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return failure(req.RequestID, "not_found", "run not found", false)
+		}
+		if err != nil {
+			return failure(req.RequestID, "storage", "run lookup unavailable", true)
+		}
+		// Terminal runs archive directly. Active runs require --force, which
+		// terminates first so no live process is left running under a hidden
+		// run; the run then archives.
+		if run.Status != storage.RunDone && run.Status != storage.RunFailed {
+			if !force {
+				return failure(req.RequestID, "conflict", "运行仍在进行中；加 --force 先终止再移除", false)
+			}
+			if s.operations == nil {
+				return failure(req.RequestID, "unavailable", "runtime termination is unavailable", true)
+			}
+			if err := s.operations(context.Background(), "ops.kill", runID, int64(version)); err != nil && !errors.Is(err, storage.ErrRunAlreadyTerminal) {
+				if errors.Is(err, storage.ErrRejectedStale) {
+					return failure(req.RequestID, "stale", "run or attempt changed", false)
+				}
+				return failure(req.RequestID, "termination_failed", "controlled termination was not accepted", true)
+			}
+		}
+		if err := s.db.ArchiveRun(context.Background(), runID, time.Now().UnixMilli()); err != nil {
+			if errors.Is(err, storage.ErrRunNotFound) {
+				return failure(req.RequestID, "not_found", "run not found", false)
+			}
+			return failure(req.RequestID, "storage", "archive unavailable", true)
+		}
+		return success(req.RequestID, map[string]any{"removed": true, "run_id": runID, "archived": true})
 	default:
 		return failure(req.RequestID, "unknown_method", "unknown method", false)
 	}

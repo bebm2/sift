@@ -167,6 +167,9 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if command == "ps" {
 		return runPs(requestArgs, home, stdout, stderr, jsonOutput)
 	}
+	if command == "rm" {
+		return runRm(requestArgs, home, stdout, stderr, jsonOutput)
+	}
 	method, params, err := request(command, requestArgs)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "unknown command") {
@@ -576,42 +579,119 @@ func psRunVisible(status, selection string) bool {
 	}
 }
 
+// runRm implements `sift rm` (docker-style): it removes a run from `sift ps` by
+// archiving it. Runs are never hard-deleted — their audit trail (events,
+// budget_entries, ledger_entries, ...) is append-only, so archiving hides the
+// run while retaining every event and metric. Terminal runs archive directly;
+// an active run requires --force, which terminates it first so no live process
+// is left running under a hidden run. Like kill/retry, the expected version is
+// auto-resolved from ops.ps.
+func runRm(args []string, home config.Home, stdout, stderr io.Writer, jsonOutput bool) int {
+	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	forceLong := fs.Bool("force", false, "terminate the run first if it is still active")
+	forceShort := fs.Bool("f", false, "shorthand for --force")
+	// Go's flag package stops at the first non-flag arg, so collect flags ahead
+	// of the positional run-id (same shape as parseKillRetryArgs).
+	ordered := make([]string, 0, len(args))
+	positional := ""
+	for _, a := range args {
+		if a == "--force" || a == "-f" || strings.HasPrefix(a, "-") {
+			ordered = append(ordered, a)
+			continue
+		}
+		if positional != "" {
+			report(stderr, fmt.Errorf("usage: sift rm <run-id> [--force|-f] [--json]"))
+			return 2
+		}
+		positional = a
+	}
+	if err := fs.Parse(ordered); err != nil {
+		report(stderr, err)
+		return 2
+	}
+	if fs.NArg() != 0 || positional == "" {
+		report(stderr, fmt.Errorf("usage: sift rm <run-id> [--force|-f] [--json]"))
+		return 2
+	}
+	runID := positional
+	force := *forceLong || *forceShort
+
+	version, ok := resolveRunVersion(home, runID, stdout, stderr, jsonOutput)
+	if !ok {
+		return 1
+	}
+	response, err := controlplane.OperatorRequest(home, "ops.rm", map[string]any{
+		"run_id": runID, "expected_version": version, "force": force,
+	})
+	if err != nil {
+		reportDaemonUnavailable(home, stderr, err)
+		return 1
+	}
+	if jsonOutput {
+		if err := printJSON(stdout, response); err != nil {
+			report(stderr, err)
+			return 1
+		}
+		if !response.OK {
+			return 1
+		}
+		return 0
+	}
+	if !response.OK {
+		render.Error(stdout, response, render.FailureContext("rm", []string{runID}))
+		return 1
+	}
+	fmt.Fprintf(stdout, "✓ 已移除运行 %s（已归档；历史保留在 timeline/metrics）\n", runID)
+	return 0
+}
+
+// resolveRunVersion fetches the current run version via ops.ps for commands that
+// need an expected_version CAS but did not receive one explicitly. It renders
+// any failure (daemon down, run missing) and returns ok=false so the caller can
+// bail with exit 1.
+func resolveRunVersion(home config.Home, runID string, stdout, stderr io.Writer, jsonOutput bool) (version int, ok bool) {
+	response, err := controlplane.OperatorRequest(home, "ops.ps", map[string]any{
+		"run_id": runID, "project_id": nil, "status": nil, "limit": 1, "after_run_id": nil,
+	})
+	if err != nil {
+		reportDaemonUnavailable(home, stderr, err)
+		return 0, false
+	}
+	if !response.OK {
+		if jsonOutput {
+			_ = printJSON(stdout, response)
+		} else {
+			render.Error(stdout, response, render.FailureContext("kill", []string{runID}))
+		}
+		return 0, false
+	}
+	var result struct {
+		Runs []struct {
+			RunID   string `json:"run_id"`
+			Version int64  `json:"version"`
+		} `json:"runs"`
+	}
+	body, err := json.Marshal(response.Result)
+	if err != nil || json.Unmarshal(body, &result) != nil || len(result.Runs) == 0 || result.Runs[0].RunID != runID || result.Runs[0].Version < 1 {
+		fmt.Fprintf(stdout, "✗ 未找到运行 %s（运行 sift ps 查看）\n", runID)
+		return 0, false
+	}
+	return int(result.Runs[0].Version), true
+}
+
 func runKillRetry(command string, args []string, home config.Home, stdout, stderr io.Writer, jsonOutput bool) int {
 	version, key, runID, err := parseKillRetryArgs(command, args)
 	if err != nil {
 		report(stderr, err)
 		return 2
 	}
-	if version < 1 || key == "" {
-		response, err := controlplane.OperatorRequest(home, "ops.ps", map[string]any{
-			"run_id": runID, "project_id": nil, "status": nil, "limit": 1, "after_run_id": nil,
-		})
-		if err != nil {
-			reportDaemonUnavailable(home, stderr, err)
+	if version < 1 {
+		v, ok := resolveRunVersion(home, runID, stdout, stderr, jsonOutput)
+		if !ok {
 			return 1
 		}
-		if !response.OK {
-			if jsonOutput {
-				_ = printJSON(stdout, response)
-			} else {
-				render.Error(stdout, response, render.FailureContext(command, []string{runID}))
-			}
-			return 1
-		}
-		var result struct {
-			Runs []struct {
-				RunID   string `json:"run_id"`
-				Version int64  `json:"version"`
-			} `json:"runs"`
-		}
-		body, err := json.Marshal(response.Result)
-		if err != nil || json.Unmarshal(body, &result) != nil || len(result.Runs) == 0 || result.Runs[0].RunID != runID || result.Runs[0].Version < 1 {
-			fmt.Fprintf(stdout, "✗ 未找到运行 %s（运行 sift ps 查看）\n", runID)
-			return 1
-		}
-		if version < 1 {
-			version = int(result.Runs[0].Version)
-		}
+		version = v
 	}
 	if key == "" {
 		key, err = newRequestKey()

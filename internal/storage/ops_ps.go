@@ -64,7 +64,7 @@ func (d *DB) RunPS(ctx context.Context, q PSQuery) (PSReport, error) {
 		where = "WHERE r.id=?"
 		args = append(args, q.RunID)
 	} else {
-		conds := []string{}
+		conds := []string{"r.archived_at_ms IS NULL"}
 		if q.ProjectID != "" {
 			conds = append(conds, "r.project_id=?")
 			args = append(args, q.ProjectID)
