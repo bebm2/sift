@@ -61,9 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/xsift/sift/main/scripts/install.sh 
 
 ```bash
 cd /path/to/your/repo
-sift init
-sift doctor --offline
-sift service install            # 无 launchd/systemd 时会提示改用 sift daemon
+sift init        # 向导随后询问式引导：离线自检 / 安装用户级服务 / 创建触发 label
 ```
 
 然后给一个边界清楚、可丢弃的测试 Issue 加默认触发标签：

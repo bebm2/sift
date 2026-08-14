@@ -22,6 +22,7 @@ import (
 	"github.com/xsift/sift/internal/agents"
 	"github.com/xsift/sift/internal/cli/render"
 	"github.com/xsift/sift/internal/config"
+	"github.com/xsift/sift/internal/controlplane"
 )
 
 type setupScope int
@@ -277,6 +278,12 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 	}
 	fmt.Fprintf(stdout, "%s 已写入 %s\n", render.Status("ok"), config.ConfigPath(home))
 	announceConfigApplied(home, stdout, stderr)
+	// Interactive init only: the closing three-in-one (issue #961). Offline or
+	// flags-given runs skip it entirely so CI/scripted output stays unchanged;
+	// the wizard exit code keeps reflecting the config write itself (红线).
+	if interactive && scope == setupAll {
+		setupCloseout(home, projectKind, projectKey, in, stdout, stderr)
+	}
 	return 0
 }
 
@@ -463,6 +470,20 @@ func forgeCLI(kind string) string {
 // production implementation attaches installs and the official auth login to
 // the user's stdio — Sift passes through, never wraps or buffers them.
 var setupCmd setupCommand = realCommand{}
+
+// setupDoctorRun is the seam for the closing offline self-check (issue #961
+// 步骤 1): production reuses controlplane.OfflineDoctor — the exact logic
+// `sift doctor --offline` executes — instead of shelling out a child process.
+// Tests swap it for a fixed result so no host probes run.
+var setupDoctorRun = controlplane.OfflineDoctor
+
+// setupServiceRun reuses the `sift service` entry point for the closing
+// service step (issue #961 步骤 2): install and status run through the exact
+// code path the CLI command uses, never a shelled-out sift child. Tests swap
+// it for a fake so no launchctl/systemctl invocation touches the host.
+var setupServiceRun = func(action string, home config.Home, stdout, stderr io.Writer) int {
+	return runService([]string{action}, home, stdout, stderr)
+}
 
 // setupCommand is the exec surface of the setup wizard: PATH lookup and
 // captured-output probes, plus stdio passthrough runs for the official auth
@@ -961,4 +982,141 @@ func setupID(s string) string {
 func isSocket(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode()&os.ModeSocket != 0
+}
+
+// setupCloseout runs the interactive three-step closing sequence after the
+// config is written (issue #961): embedded offline doctor self-check, user
+// service install/status, and confirm-first trigger label creation. Each step
+// defaults to yes and can be skipped; every failure degrades without aborting.
+// The trigger label name comes from the just-written config (labels.trigger,
+// default sift:run, config.md §3.14).
+func setupCloseout(home config.Home, kind, projectKey string, in *bufio.Reader, stdout, stderr io.Writer) {
+	fmt.Fprintln(stdout, "\n收尾三合一（直接回车默认执行，可输入 n 跳过）：")
+	setupCloseoutDoctor(in, stdout, home)
+	setupCloseoutService(in, stdout, stderr, home)
+	label := "sift:run"
+	if snap, err := config.Load(home, time.Now()); err == nil {
+		label = snap.Config.Labels.Trigger
+	}
+	setupCloseoutLabel(in, stdout, kind, projectKey, label)
+	printSetupReady(stdout, kind, label)
+}
+
+// setupCloseoutDoctor runs the embedded offline doctor (step 1). A non-zero
+// result lists each failing check with a pointer to the troubleshooting
+// runbook; it never blocks the following steps. The runbook owns the repair
+// steps (引用不复制), so this only points per check.
+func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
+	if !askYes(in, out, "运行离线自检（sift doctor --offline）") {
+		return
+	}
+	value := setupDoctorRun(home)
+	renderDoctor(out, value)
+	result := normalizeDoctorResult(value)
+	if doctorExitCode(result) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "修复指引（逐条处理，warning 不应忽略，error 必须先修复）：")
+	checks, _ := result["checks"].([]any)
+	for _, raw := range checks {
+		check, _ := raw.(map[string]any)
+		if level, _ := check["level"].(string); level == "ok" || level == "info" {
+			continue
+		}
+		id, _ := check["id"].(string)
+		fmt.Fprintf(out, "  - %s → docs/runbooks/troubleshooting.md §3 Doctor 报告\n", id)
+	}
+}
+
+// normalizeDoctorResult projects a doctor result (typed checks from the
+// controlplane package or any JSON shape) onto the render map so guidance can
+// iterate the checks with the same tolerance renderDoctor has.
+func normalizeDoctorResult(value any) map[string]any {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{}
+	}
+	var result map[string]any
+	if json.Unmarshal(body, &result) != nil {
+		return map[string]any{}
+	}
+	return result
+}
+
+// setupCloseoutService installs and starts the user service (step 2) through
+// the same entry point `sift service install`/`status` use. A host without a
+// supervisor gets the foreground `sift daemon` hint from the service layer
+// itself, exactly like the standalone command; a non-zero exit prints the
+// troubleshooting pointer and the wizard continues with step 3.
+func setupCloseoutService(in *bufio.Reader, out, errOut io.Writer, home config.Home) {
+	if !askYes(in, out, "安装用户级服务并启动（sift service install）") {
+		return
+	}
+	if code := setupServiceRun("install", home, out, errOut); code != 0 {
+		fmt.Fprintln(out, "  ✗ service install 失败；排查步骤见 docs/runbooks/troubleshooting.md §2（无 supervisor 时按提示前台运行 `sift daemon`）")
+		return
+	}
+	setupServiceRun("status", home, out, errOut)
+}
+
+// setupCloseoutLabel creates the trigger label (step 3), the only forge write
+// of the wizard, with double caution (issue #961 红线): it dedupes first via
+// the forge CLI's label list, shows the exact command and asks for an explicit
+// confirmation before creating, and every failure degrades to the printed
+// manual command. An existing label is skipped without re-creating or showing
+// a command. Without a bound project there is no repo context, so the step
+// degrades to the manual command too.
+func setupCloseoutLabel(in *bufio.Reader, out io.Writer, kind, projectKey, label string) {
+	if kind == "" || projectKey == "" {
+		fmt.Fprintf(out, "  %s 未绑定项目，跳过触发 label 创建；手动命令：%s label create %s --color 5319e7\n", render.Status("warning"), forgeCLI("github"), label)
+		return
+	}
+	if !askYes(in, out, "创建触发 label "+label+"（Forge 仓库写操作）") {
+		return
+	}
+	cli := forgeCLI(kind)
+	listed, err := setupCmd.output(cli, "label", "list", "--repo", projectKey)
+	if err != nil {
+		fmt.Fprintf(out, "  %s 无法查询 %s 的 label 列表（%v），跳过创建；手动命令：%s label create %s --color 5319e7 --repo %s\n", render.Status("warning"), projectKey, err, cli, label, projectKey)
+		return
+	}
+	if triggerLabelListed(listed, label) {
+		fmt.Fprintf(out, "  ✓ label 已存在：%s，跳过创建\n", label)
+		return
+	}
+	command := fmt.Sprintf("%s label create %s --color 5319e7 --repo %s", cli, label, projectKey)
+	fmt.Fprintf(out, "  将执行：%s\n", command)
+	if !askYes(in, out, "确认执行？") {
+		return
+	}
+	if err := setupCmd.run(cli, "label", "create", label, "--color", "5319e7", "--repo", projectKey); err != nil {
+		fmt.Fprintf(out, "  %s 创建 label 失败：%v；手动执行：%s\n", render.Status("warning"), err, command)
+	}
+}
+
+// triggerLabelListed reports whether the forge CLI's label list output already
+// contains the label. The label name is the first column of every row; the
+// dedupe must never create a duplicate (issue #961 红线).
+func triggerLabelListed(output, label string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == label || strings.HasPrefix(line, label+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// printSetupReady closes the wizard with the trigger example and the polling
+// expectation. The numeric intervals (60s idle / 15s active) are expected
+// semantics only; the authoritative defaults live once in config.md §3.5 and
+// are linked, never copied (引用不复制, issue #961).
+func printSetupReady(out io.Writer, kind, label string) {
+	fmt.Fprintf(out, "全部就绪。给一个 Issue 打上 %s 后，约 60 秒内出现在 sift ps：\n", label)
+	if kind == "gitlab" {
+		fmt.Fprintf(out, "  glab issue update <N> --label %q\n", label)
+	} else {
+		fmt.Fprintf(out, "  gh issue edit <N> --add-label %q\n", label)
+	}
+	fmt.Fprintln(out, "轮询预期 60s（idle）/15s（active）；权威默认值见 docs/specs/config.md §3.5 scheduler.intake_idle_interval")
 }
