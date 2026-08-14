@@ -265,6 +265,18 @@ sift worktree <run-id>
 - Run failed：用 `sift logs <run-id>` 和 `sift timeline --run <run-id>` 找原因，修复环境后执行 `sift retry <run-id>`；
 - Agent 卡住或方向错误：执行 `sift kill <run-id>`，再检查隔离 worktree，不要直接合并其分支。
 
+### 7.5 会话式探索：`sift pi`
+
+不确定下一步做什么时，可以用会话式入口：
+
+```bash
+sift pi
+```
+
+`pi` 交互会话会注入一份「Sift 操作 skill」（随 release 内置，自动写到 `~/.pi/agent/skills/sift/`）和当前项目状态快照。你可以在会话里连续提问（例如「最近三个 run 哪个值得重试」「这个 timeline 里 Gate 为什么拒了」），agent 会用只读命令（`ps`/`timeline`/`logs`/`metrics`/`doctor`）自己取证后回答；有副作用的命令（`kill`/`retry`/`rm`/`service restart`）skill 要求先与你确认。
+
+> 安全边界：skill 只是易用层，不是安全层。真正的闸门（approve 的一次性 nonce、policy fail-closed、`auto_merge` 默认关）都在 Sift CLI 内部，agent 无法绕过——把 CLI 交给 agent 用，最坏情况等价于一个手快的人类用户。pi 未安装时 `sift pi` 会打印与 init 相同的安装指引（不阻塞）。
+
 ### 8. 审批或拒绝
 
 需要人工决定时，Sift 会在 Forge 评论中给出带 Run ID 和一次性 nonce 的完整命令，例如命令形态为：

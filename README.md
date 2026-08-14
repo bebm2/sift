@@ -79,6 +79,8 @@ sift timeline
 sift logs <run-id>
 ```
 
+不确定下一步时可用会话式入口 `sift pi`（注入 Sift 操作 skill 的 pi 会话，agent 只读取证后回答）。
+
 需要人决定时，请复制 Sift 发布到 Issue/PR/MR 评论中的**完整命令**；批准命令包含本次 Run ID 和一次性 nonce，不能简写成 `/sift approve`。
 
 详细的成功预期、失败恢复与清理步骤见 **[Getting Started](docs/guides/getting-started.md)**。
@@ -99,6 +101,7 @@ sift logs <run-id>
 - 从 Issue 出发，分解、执行、运行 Checks/Gate，并创建 Change；
 - 在需要人时，把带证据和可执行命令的决策请求发回 Forge；
 - 用 `ps`、`logs`、`timeline` 和 `metrics` 提供本地可观测性；
+- 用 `sift pi` 提供注入 Sift 操作 skill 的会话式探索/排障入口；
 - 统一 GitHub/GitLab 差异，同时保留 Forge 作为 Issue、PR/MR、审批和合并事实源；
 - 支持 process 与 tmux 运行后端，并保留审计、预算与恢复证据。
 

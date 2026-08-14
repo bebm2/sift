@@ -99,6 +99,14 @@ var commands = []commandMeta{
 		examples: []string{"sift daemon"},
 	},
 	{
+		name:     "pi",
+		group:    groupBasics,
+		brief:    "pi",
+		summary:  "进入注入 Sift 操作 skill 的 pi 会话",
+		usage:    "sift pi",
+		examples: []string{"sift pi"},
+	},
+	{
 		name:    "doctor",
 		group:   groupBasics,
 		brief:   "doctor",
