@@ -163,9 +163,9 @@ sift init
 
 配置写入后，向导会询问式引导「收尾三合一」（每步直接回车默认执行，或输入 `n` 跳过）：
 
-1. **离线自检**：内嵌执行 `sift doctor --offline` 的检查逻辑，有未通过项时逐条给出修复指引（指向[故障排查](../runbooks/troubleshooting.md)），失败不阻塞；
-2. **用户级服务**：复用 `sift service install` + `sift service status` 完成安装与启动；没有可用 supervisor 时提示前台运行 `sift daemon`；
-3. **触发 label**：以配置 `labels.trigger` 为准（默认 `sift:run`），先 `gh/glab label list` 查重，不存在时展示将执行的命令并确认后创建；已存在或失败都只降级不阻塞。
+1. **离线自检**：内嵌执行 `sift doctor --offline` 的检查逻辑，有未通过项时按严重度分组给出指引（error 带针对性修复建议；`tm6:*`、`operator-token` 等同 UID 安全边界标注为「已知 V0 边界、非故障」），失败不阻塞；
+2. **用户级服务**：复用 `sift service install` + `sift service status` 完成安装与启动，已运行的服务会跳过不重复安装；没有可用 supervisor 时提示前台运行 `sift daemon`；
+3. **触发 label**：以配置 `labels.trigger` 为准（默认 `sift:run`），先 `gh/glab label list` 查重，不存在时展示将执行的命令并确认后创建（gh 用位置参数，glab 用 `--name` 与 `#RRGGBB` 颜色）；已存在或失败都只降级不阻塞；重复运行 init 不会重复安装或重复创建。
 
 `--offline` 或 flags 全给时这三步全部跳过，非交互输出不变。
 
