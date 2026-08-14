@@ -21,12 +21,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miaoxiaoyong/sift/internal/config"
-	"github.com/miaoxiaoyong/sift/internal/controlplane"
-	"github.com/miaoxiaoyong/sift/internal/hosting"
-	"github.com/miaoxiaoyong/sift/internal/schema"
-	"github.com/miaoxiaoyong/sift/internal/storage"
-	"github.com/miaoxiaoyong/sift/internal/version"
+	"github.com/xsift/sift/internal/config"
+	"github.com/xsift/sift/internal/controlplane"
+	"github.com/xsift/sift/internal/hosting"
+	"github.com/xsift/sift/internal/schema"
+	"github.com/xsift/sift/internal/storage"
+	"github.com/xsift/sift/internal/version"
 )
 
 // freshHome returns a 0700 temp dir suitable for use as SIFT_HOME. It creates
@@ -756,7 +756,7 @@ func TestDoctorHandshakeErrorConsistencyDaemonVersionMismatchExitsTwo(t *testing
 	cli := filepath.Join(t.TempDir(), "sift")
 	_, file, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
-	build := exec.Command("go", "build", "-o", cli, "-ldflags", "-X github.com/miaoxiaoyong/sift/internal/version.Release=2.0.0", "./cmd/sift")
+	build := exec.Command("go", "build", "-o", cli, "-ldflags", "-X github.com/xsift/sift/internal/version.Release=2.0.0", "./cmd/sift")
 	build.Dir = root
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build mismatched CLI: %v\n%s", err, output)
