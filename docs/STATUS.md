@@ -1,7 +1,7 @@
 ---
 status: active
 created: 2026-08-04
-last_updated: 2026-08-11
+last_updated: 2026-08-14
 summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 ---
 
@@ -61,6 +61,33 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 | 兼容层清理 | #898 | WorktreeManager/ReconcilerScheduler |
 | SQL 中心化评估 | #880 | 评估完毕，无安全提取项 |
 | 文档规范 | #888 | STATUS.md(执行)+ WBS(纯分解) |
+
+## 初学者旅程优化（本轮，2026-08-14）
+
+围绕「从接触到用起来」的初学者旅程收敛命令面（基于 #947/#955/#957 onboarding 主线后的第二轮 UX 打磨）：
+
+| # | 内容 | 状态 | PR |
+|---|---|---|---|
+| #960 | init 依赖引导：gh/glab 三态诊断 + 确认式安装 + auth 内嵌 + pi 默认引导 | ✅ 合并 | #969 |
+| #961 | init 收尾三合一：doctor 自检 / service 安装 / trigger label 创建 + 轮询预期 | ✅ 合并 | #970 |
+| #962 | `sift pi` 会话入口：注入 Sift 操作 skill（go:embed 分发、只读/副作用/红线分级） | ✅ 合并 | #972 |
+| #963 | `sift issue` 语义入口（v1 只读） | 📌 P3 待启动 | — |
+
+首跑路径收敛为：`install` → `sift init`（依赖引导+收尾三合一）→ 打标签 → 可选 `sift pi` 会话探索。详见 [getting-started](../docs/guides/getting-started.md)（§7.5 会话式探索）。
+
+## 技术债清理（本轮，2026-08-14）
+
+扫描并处理 [#927](https://github.com/xsift/sift/issues/927) backlog 及流程残留：
+
+| # | 债 | 处理 | PR |
+|---|---|---|---|
+| #973 | 依赖引导测试 CI hermeticity（ubuntu gh 在 /usr/bin） | 隔离修复（遗留未闭合收尾） | #974 |
+| #976 | init `--agent-args` trim + interactive 判定 | 修复 + 测试 | #979 |
+| #977 | 写 os.Executable 目录的冗余 flaky 测试 | 删除（runtime 包等价覆盖） | #978 |
+| #980 | 测试防覆盖真实 launchd plist（P0 安全） | 隔离修复（遗留未闭合收尾） | #982 |
+| #927 五项 | config 数值漂移 / doctor 渲染噪音 / staticcheck CI / 安装器 rc+chmod / tmux flake 超时 | 一次处理 | #981 |
+
+另：补存 #913/#915 审核存档（早期 review 分支未合入 main 的遗漏，PR #975）；清理 7 个残留 worktree 与远端分支。
 
 ## 遗留 / 延期
 
