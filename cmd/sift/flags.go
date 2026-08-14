@@ -31,13 +31,6 @@ func splitGlobalFlags(args []string) (rest []string, verbose, quiet bool) {
 	return rest, verbose, quiet
 }
 
-// isGlobalFlag reports whether s is one of the accepted global flag
-// spellings (used to fall back to the overview for a bare `sift -v`).
-func isGlobalFlag(s string) bool {
-	_, verbose, quiet := splitGlobalFlags([]string{s})
-	return verbose || quiet
-}
-
 // humanf writes a human success/progress message unless --quiet suppressed
 // it. It never touches stderr (errors) or machine output.
 func humanf(w io.Writer, quiet bool, format string, a ...any) {

@@ -133,6 +133,8 @@ fi
 
 bin_root="$INSTALL_ROOT/bin"
 version_dir="$bin_root/$version"
+install_root_preexisting=0
+[ -d "$INSTALL_ROOT" ] && install_root_preexisting=1
 mkdir -p "$bin_root"
 staging="$bin_root/.staging-${version}.$$"
 [ ! -e "$staging" ] || fail 'staging path already exists'
@@ -184,6 +186,8 @@ if [ "$add_to_path" -eq 1 ] || [ "${SIFT_AUTO_PATH:-}" = "1" ]; then
     printf 'Add Sift to PATH manually: %s\n' "$path_line"
   elif [ -f "$rc_file" ] && grep -Fqx "$path_line" "$rc_file"; then
     printf 'Sift PATH entry already present in %s (no change)\n' "$rc_file"
+  elif [ -f "$rc_file" ] && grep -Eq 'export[[:space:]]+PATH=.*"?\$HOME/.sift/bin/current' "$rc_file"; then
+    printf 'Sift PATH entry already present in %s (different quoting; no change)\n' "$rc_file"
   elif printf '\n# Added by the Sift installer (SIFT_AUTO_PATH)\n%s\n' "$path_line" >>"$rc_file" 2>/dev/null; then
     printf 'Added Sift to PATH in %s\n' "$rc_file"
   else
@@ -194,9 +198,14 @@ fi
 
 # The daemon refuses startup when SIFT_HOME grants group/other access
 # (docs/specs/config.md §2.1); the installer-created root must be owner-only.
-if ! chmod 700 "$INSTALL_ROOT" 2>/dev/null; then
-  printf 'Sift installer: warning: could not set %s to owner-only (0700); ' "$INSTALL_ROOT" >&2
-  printf 'run chmod 700 %s before starting sift daemon\n' "$INSTALL_ROOT" >&2
+# Only a freshly created root is tightened: an existing root may be a
+# pre-created shared directory whose group access is intentional (issue #927),
+# and silently chmodding it would break that intent.
+if [ "$install_root_preexisting" -eq 0 ]; then
+  if ! chmod 700 "$INSTALL_ROOT" 2>/dev/null; then
+    printf 'Sift installer: warning: could not set %s to owner-only (0700); ' "$INSTALL_ROOT" >&2
+    printf 'run chmod 700 %s before starting sift daemon\n' "$INSTALL_ROOT" >&2
+  fi
 fi
 
 cat <<EOF

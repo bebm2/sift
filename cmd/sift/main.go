@@ -398,16 +398,54 @@ func renderDoctor(w io.Writer, value any) {
 		id, _ := check["id"].(string)
 		message, _ := check["message"].(string)
 		fmt.Fprintf(w, "%s %s：%s\n", render.Status(level), id, doctorMessage(message, level))
-		if details, ok := check["details"].(map[string]any); ok && len(details) > 0 {
-			if b, err := json.Marshal(details); err == nil {
-				fmt.Fprintf(w, "  详情：%s\n", string(b))
-			}
+		if details, ok := check["details"].(map[string]any); ok {
+			renderDoctorDetails(w, details)
 		}
 	}
 	code := doctorExitCode(result)
 	labels := []string{"正常", "有警告", "有错误"}
 	if code >= 0 && code < len(labels) {
 		fmt.Fprintf(w, "\n结论：%s（退出码 %d）\n", labels[code], code)
+	}
+}
+
+// doctorDetailKeyOrder is the preferred render order for doctor check
+// details. Only keys in this set are rendered in the human view; everything
+// else is noise for diagnosis (issue #927: doctor details were a raw JSON
+// dump). The machine-readable JSON output is unchanged and still carries every
+// detail key.
+var doctorDetailKeyOrder = []string{
+	"path", "wrapper_path", "wrapper_version", "wrapper_protocol_major",
+	"daemon_version", "daemon_protocol_major", "release_version", "cli_version",
+	"project_id", "run_id", "attempt_no", "agent_id", "phase", "isolation_state",
+	"executable_path", "worktree_path", "status", "reason", "mode",
+	"error", "output",
+}
+
+// renderDoctorDetails renders a doctor check's details as a compact human
+// line. Only the diagnostic-relevant keys from doctorDetailKeyOrder are shown
+// (present values only), one per comma, instead of dumping the whole JSON map.
+func renderDoctorDetails(w io.Writer, details map[string]any) {
+	parts := make([]string, 0, 4)
+	for _, key := range doctorDetailKeyOrder {
+		v, ok := details[key]
+		if !ok {
+			continue
+		}
+		switch t := v.(type) {
+		case string:
+			if t == "" {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s=%s", key, t))
+		case float64:
+			parts = append(parts, fmt.Sprintf("%s=%v", key, t))
+		default:
+			parts = append(parts, fmt.Sprintf("%s=%v", key, t))
+		}
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(w, "  %s\n", strings.Join(parts, "，"))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -315,8 +316,35 @@ func setupDocument(home config.Home) (map[string]any, bool, error) {
 	return doc, true, nil
 }
 
+// normalizeNumbers converts integral float64 values to int before yaml
+// serialization. setupDocument decodes the existing config via JSON into a
+// map[string]any, which turns every number into float64; yaml.v3 then emits
+// large integral floats in scientific notation (1000000 → 1e+06), a byte
+// drift on every init rerun over an existing config (issue #927). Only
+// integral in-range values are converted; fractions and out-of-range values
+// stay float64 so no numeric meaning changes.
+func normalizeNumbers(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, item := range t {
+			t[k] = normalizeNumbers(item)
+		}
+		return t
+	case []any:
+		for i, item := range t {
+			t[i] = normalizeNumbers(item)
+		}
+		return t
+	case float64:
+		if t == math.Trunc(t) && t >= math.MinInt64 && t <= math.MaxInt64 {
+			return int(t)
+		}
+	}
+	return v
+}
+
 func writeSetupDocument(home config.Home, doc map[string]any, backup bool) error {
-	data, err := yaml.Marshal(doc)
+	data, err := yaml.Marshal(normalizeNumbers(doc))
 	if err != nil {
 		return err
 	}

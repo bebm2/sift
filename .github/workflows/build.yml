@@ -97,6 +97,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tmux
       - run: CGO_ENABLED=0 go vet ./...
+      # Issue #927: staticcheck gate. Correctness-focused checks run; the ST*
+      # comment-style family is excluded (ST1005 flags Chinese terminal user
+      # messages as "error strings should not be capitalized", a false
+      # positive for non-composable user-facing strings, and ST1000/ST1020/ST1021
+      # are historical comment-style preferences, not correctness).
+      - name: staticcheck (correctness checks, no ST*)
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck -checks="all,-ST*" ./...
       - name: test (CGO_ENABLED=0)
         run: CGO_ENABLED=0 go test ./...
       # issue #35: TestV10ZeroNetworkListeners is //go:build linux gated, so
