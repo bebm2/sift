@@ -17,6 +17,32 @@ Sift 支持 macOS/Linux 的 amd64 与 arm64。一个 release 归档同时包含�
 - 配置中使用的 Agent CLI；
 - 仅在配置选择 tmux backend 时需要 `tmux`。
 
+### 依赖缺失的引导
+
+`sift init` 自动探测外部依赖并确认式引导（绝不静默安装）；本矩阵是全仓库唯一下载/安装命令的单一事实来源，其余文档只链接本节点。
+
+**Forge CLI（gh/glab）** 三态诊断：
+
+| 状态 | 行为 |
+|---|---|
+| 已装且已登录 | 静默记录 operator，不询问 |
+| 已装、未登录 | 询问是否运行官方 `gh auth login` / `glab auth login`（透传官方流程，登录态仍归官方 CLI） |
+| 未安装 | 询问是否安装：macOS 用 `brew install gh|glab`；Debian/Ubuntu 按[官方仓库指引](https://cli.github.com/)后 `sudo apt install gh|glab`；RHEL/Fedora 用 `sudo dnf install gh|glab` |
+
+无包管理器、无权限或安装失败时，只打印官方安装指引（gh: https://cli.github.com/ ；glab: https://gitlab.com/gitlab-org/cli）并继续，不阻塞后续流程。
+
+**Coding Agent**：PATH 中没有任何已知 Agent 且交互模式下，优先推荐安装 pi（开源、多模型、无厂商账号门槛）：
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+# 或官方脚本
+curl -fsSL https://pi.dev/install.sh | sh
+```
+
+装完验证 `pi --version` 并登记到配置；登录（订阅走 `pi` 内 `/login`，或 export API Key）只做弱信号检测，强验证交给 `sift doctor`。其他商业 Agent（claude/codex/cursor 等）只保持探测登记，不代为安装。
+
+上述引导仅在交互式 `sift init` 中出现；`--offline` 或 flags 全给时跳过。
+
 默认状态目录是 `~/.sift`。如需修改，安装、service 和日常 CLI 必须始终使用同一个绝对路径：
 
 ```bash

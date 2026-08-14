@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -300,8 +302,8 @@ func TestInteractiveInitCharacteristicsDisplay(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+filepath.Dir(gitPath))
 
 	var out bytes.Buffer
-	// Answers: agents=all ; operator github=Enter (skip).
-	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("all\n\n"), &out, io.Discard); code != 0 {
+	// Answers: gh install=n ; glab install=n ; agents=all ; operator=Enter (skip).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\nall\n\n"), &out, io.Discard); code != 0 {
 		t.Fatalf("init = %d: %s", code, out.String())
 	}
 	for _, want := range []string{
@@ -575,9 +577,10 @@ func TestInteractiveInitProbeLoginUsesOperatorWithoutPrompt(t *testing.T) {
 	t.Setenv("PATH", agentBin+string(os.PathListSeparator)+filepath.Dir(gitPath))
 
 	var out bytes.Buffer
-	// The only answer is agent selection. A successful gh probe must consume no
-	// operator answer and must be written directly to the allowlist.
-	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("all\n"), &out, io.Discard); code != 0 {
+	// The only answers are the glab install decline (gh is already logged in)
+	// and agent selection. A successful gh probe must consume no operator
+	// answer and must be written directly to the allowlist.
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nall\n"), &out, io.Discard); code != 0 {
 		t.Fatalf("init = %d: %s", code, out.String())
 	}
 	if strings.Contains(out.String(), "操作员用户名") || !strings.Contains(out.String(), "✓ operator: probe-user") {
@@ -694,8 +697,9 @@ func TestInteractiveInitNumberedAgentSelection(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+filepath.Dir(gitPath))
 	var out bytes.Buffer
-	// Answers: agents=1,3 ; project=Enter (cwd) ; operator=Enter (skip).
-	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("1,3\n\n\n"), &out, io.Discard); code != 0 {
+	// Answers: gh install=n ; glab install=n ; agents=1,3 ; project=Enter (cwd) ;
+	// operator=Enter (skip).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\n1,3\n\n"), &out, io.Discard); code != 0 {
 		t.Fatalf("init = %d: %s", code, out.String())
 	}
 	if strings.Contains(out.String(), "Forge 类型") {
@@ -782,5 +786,453 @@ func TestSetupAddAndDaemonAwareHint(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "sift service reload") || !strings.Contains(out.String(), "前台运行") {
 		t.Fatalf("daemon-aware output = %q", out.String())
+	}
+}
+
+// ---- issue #960: init dependency guidance ----------------------------------
+
+// fakeCommand is a test double for setupCmd: CI never really installs packages
+// or runs official auth flows (issue #960 acceptance 5). lookup defaults to
+// false, output to an error, run records invocations and returns nil.
+type fakeCommand struct {
+	found    map[string]bool
+	outputFn func(name string, args ...string) (string, error)
+	runFn    func(name string, args ...string) error
+	runs     [][]string
+}
+
+func (f *fakeCommand) lookup(name string) bool { return f.found[name] }
+func (f *fakeCommand) output(name string, args ...string) (string, error) {
+	if f.outputFn != nil {
+		return f.outputFn(name, args...)
+	}
+	return "", errors.New("fake command: not found")
+}
+func (f *fakeCommand) run(name string, args ...string) error {
+	f.runs = append(f.runs, append([]string{name}, args...))
+	if f.runFn != nil {
+		return f.runFn(name, args...)
+	}
+	return nil
+}
+
+func replaceSetupCmd(t *testing.T, f *fakeCommand) {
+	t.Helper()
+	prev := setupCmd
+	setupCmd = f
+	t.Cleanup(func() { setupCmd = prev })
+}
+
+// initTestRepo creates a git repo with a GitHub origin and chdirs into it.
+func initTestRepo(t *testing.T) config.Home {
+	t.Helper()
+	_ = freshHome(t)
+	home, err := config.ResolveHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(t.TempDir(), "demo")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", repo, "remote", "add", "origin", "git@github.com:owner/repo.git").CombinedOutput(); err != nil {
+		t.Fatalf("git remote: %v: %s", err, out)
+	}
+	t.Chdir(repo)
+	return home
+}
+
+// gitOnlyPATH narrows PATH to the directory holding git so no forge CLI, npm or
+// coding agent is visible (deterministic probes regardless of the host).
+func gitOnlyPATH(t *testing.T) {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(gitPath))
+}
+
+// TestInitForgeMissingGuidesInstall pins acceptance 1 (missing → install
+// prompt) and acceptance 2 (declining install still completes init with exit
+// 0 and the config written).
+func TestInitForgeMissingGuidesInstall(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+
+	var out bytes.Buffer
+	// Answers: gh install=n ; glab install=n ; pi=n ; agent fallback=Enter ;
+	// operator=Enter (EOF).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\nn\n\n"), &out, io.Discard); code != 0 {
+		t.Fatalf("init = %d: %s", code, out.String())
+	}
+	for _, want := range []string{
+		"未检测到 GitHub CLI（gh）", "是否现在安装 gh",
+		"未检测到 GitLab CLI（glab）", "是否现在安装 glab",
+		"手动安装 pi",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("guidance output missing %q:\n%s", want, out.String())
+		}
+	}
+	snap, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Config.Projects) != 1 || len(snap.Config.Agents) != 0 {
+		t.Fatalf("decline must still complete project binding without agents: %#v", snap.Config)
+	}
+}
+
+// TestInitForgeNotLoggedGuidesLogin pins acceptance 1 (installed-not-logged →
+// login question): declining falls back to the manual operator question, and a
+// successful official auth login records the operator without asking.
+func TestInitForgeNotLoggedGuidesLogin(t *testing.T) {
+	t.Run("login success records operator silently", func(t *testing.T) {
+		home := initTestRepo(t)
+		gitOnlyPATH(t)
+		calls := 0
+		fake := &fakeCommand{found: map[string]bool{"gh": true, "glab": true}}
+		fake.outputFn = func(name string, args ...string) (string, error) {
+			if name == "gh" {
+				calls++
+				if calls == 1 {
+					return "", errors.New("gh not logged in")
+				}
+				return "github.com\n  ✓ Logged in to github.com account gh-user (keyring)\n", nil
+			}
+			return "", errors.New("fake command: not found")
+		}
+		replaceSetupCmd(t, fake)
+
+		var out bytes.Buffer
+		// Answers: gh login=y ; glab login=n ; pi=n ; agent fallback=Enter ;
+		// operator=Enter (EOF).
+		if code := runWithInput([]string{"sift", "init"}, strings.NewReader("y\nn\nn\n\n"), &out, io.Discard); code != 0 {
+			t.Fatalf("init = %d: %s", code, out.String())
+		}
+		for _, want := range []string{"检测到 gh 未登录", "是否现在运行官方 gh auth login", "✓ 已检测到 GitHub 登录：gh-user", "✓ operator: gh-user"} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("output missing %q:\n%s", want, out.String())
+			}
+		}
+		if got := fake.runs; len(got) != 1 || strings.Join(got[0], " ") != "gh auth login" {
+			t.Fatalf("official auth login was not passed through: %#v", got)
+		}
+		snap, err := config.Load(home, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := snap.Config.Operators.GitHub; len(got) != 1 || got[0] != "gh-user" {
+			t.Fatalf("operators.github = %#v, want [gh-user]", got)
+		}
+		if strings.Contains(out.String(), "操作员用户名") {
+			t.Fatalf("logged operator must not be asked to confirm: %q", out.String())
+		}
+	})
+
+	t.Run("decline falls back to manual operator question", func(t *testing.T) {
+		home := initTestRepo(t)
+		gitOnlyPATH(t)
+		fake := &fakeCommand{found: map[string]bool{"gh": true}}
+		fake.outputFn = func(name string, args ...string) (string, error) {
+			if name == "gh" {
+				return "", errors.New("gh not logged in")
+			}
+			return "", errors.New("fake command: not found")
+		}
+		replaceSetupCmd(t, fake)
+
+		var out bytes.Buffer
+		// Answers: gh login=n ; glab install=n ; pi=n ; agent fallback=Enter ;
+		// operator=alice.
+		if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\nn\n\nalice\n"), &out, io.Discard); code != 0 {
+			t.Fatalf("init = %d: %s", code, out.String())
+		}
+		if !strings.Contains(out.String(), "是否现在运行官方 gh auth login") {
+			t.Fatalf("decline should keep the login question: %q", out.String())
+		}
+		snap, err := config.Load(home, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := snap.Config.Operators.GitHub; len(got) != 1 || got[0] != "alice" {
+			t.Fatalf("operators.github = %#v, want [alice]", got)
+		}
+	})
+}
+
+// TestInitForgeInstallFailureDegrades pins acceptance 2: a failed install
+// command degrades to the official manual path and init still completes with
+// exit code 0 and the config written.
+func TestInitForgeInstallFailureDegrades(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+	fake := &fakeCommand{found: map[string]bool{"brew": true, "npm": true}}
+	fake.runFn = func(name string, args ...string) error {
+		if name == "brew" {
+			return errors.New("permission denied")
+		}
+		return nil
+	}
+	replaceSetupCmd(t, fake)
+
+	var out bytes.Buffer
+	// Answers: gh install=y ; glab install=n ; pi=n ; agent fallback=Enter ;
+	// operator=Enter (EOF).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("y\nn\nn\n\n"), &out, io.Discard); code != 0 {
+		t.Fatalf("init = %d: %s", code, out.String())
+	}
+	for _, want := range []string{"自动安装 gh 失败", "cli.github.com"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("degradation output missing %q:\n%s", want, out.String())
+		}
+	}
+	if _, err := os.Stat(config.ConfigPath(home)); err != nil {
+		t.Fatalf("config was not written after failed install: %v", err)
+	}
+}
+
+// TestInitPiBootstrapInstallsAndRegisters pins acceptance 3: an empty agent
+// scan offers pi first; confirming installs via npm, verifies pi and writes
+// config agents[pi] (default -p args, reusing addAgent).
+func TestInitPiBootstrapInstallsAndRegisters(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+	fake := &fakeCommand{found: map[string]bool{"npm": true}}
+	fake.outputFn = func(name string, args ...string) (string, error) {
+		if name == "pi" {
+			return "pi 0.9.9\n", nil
+		}
+		return "", errors.New("fake command: not found")
+	}
+	replaceSetupCmd(t, fake)
+
+	var out bytes.Buffer
+	// Answers: gh install=n ; glab install=n ; pi=Enter (yes) ; operator=Enter (EOF).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\n\n"), &out, io.Discard); code != 0 {
+		t.Fatalf("init = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "推荐安装 pi（开源，多模型，支持订阅/API Key）") {
+		t.Fatalf("pi guidance missing: %q", out.String())
+	}
+	wantRun := []string{"npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"}
+	if len(fake.runs) != 1 || strings.Join(fake.runs[0], " ") != strings.Join(wantRun, " ") {
+		t.Fatalf("npm install = %#v, want %v", fake.runs, wantRun)
+	}
+	snap, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Config.Agents) != 1 || snap.Config.Agents[0].ID != "pi" || snap.Config.Agents[0].Executable != "pi" {
+		t.Fatalf("agents = %#v, want pi registered", snap.Config.Agents)
+	}
+	if got := snap.Config.Agents[0].Args; strings.Join(got, ",") != "-p" {
+		t.Fatalf("pi default args = %#v, want [-p]", got)
+	}
+}
+
+// TestInitPiBootstrapDeclinedPrintsGuidance pins acceptance 3: declining the pi
+// offer prints the manual path and does not block the wizard.
+func TestInitPiBootstrapDeclinedPrintsGuidance(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+
+	var out bytes.Buffer
+	// Answers: gh install=n ; glab install=n ; pi=n ; agent fallback=Enter ;
+	// operator=Enter (EOF).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\nn\n\n"), &out, io.Discard); code != 0 {
+		t.Fatalf("init = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "curl -fsSL https://pi.dev/install.sh | sh") {
+		t.Fatalf("declined pi install must print the manual path: %q", out.String())
+	}
+	snap, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Config.Agents) != 0 {
+		t.Fatalf("agents = %#v, want none", snap.Config.Agents)
+	}
+}
+
+// TestInitPiBootstrapNoNpmDegrades pins acceptance 3: without npm the pi offer
+// degrades to the official script guidance and does not block.
+func TestInitPiBootstrapNoNpmDegrades(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+	fake := &fakeCommand{} // npm not on PATH
+	replaceSetupCmd(t, fake)
+
+	var out bytes.Buffer
+	// Answers: gh install=n ; glab install=n ; pi=y ; agent fallback=Enter ;
+	// operator=Enter (EOF).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\ny\n\n"), &out, io.Discard); code != 0 {
+		t.Fatalf("init = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "未检测到 npm") || !strings.Contains(out.String(), "https://pi.dev/install.sh") {
+		t.Fatalf("no-npm degradation missing: %q", out.String())
+	}
+	snap, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Config.Agents) != 0 {
+		t.Fatalf("agents = %#v, want none", snap.Config.Agents)
+	}
+}
+
+// TestInitNonInteractivePathsSkipGuidance pins acceptance 4: --offline probes
+// nothing, and the flags-all-given path keeps only the graded report — no
+// install/login/pi prompts either way.
+func TestInitNonInteractivePathsSkipGuidance(t *testing.T) {
+	t.Run("offline", func(t *testing.T) {
+		home := initTestRepo(t)
+		gitOnlyPATH(t)
+		var out bytes.Buffer
+		if code := runWithInput([]string{"sift", "init", "--offline"}, strings.NewReader(""), &out, io.Discard); code != 0 {
+			t.Fatalf("init offline = %d: %s", code, out.String())
+		}
+		for _, forbidden := range []string{"是否现在安装", "是否现在运行官方", "推荐安装 pi", "未检测到 GitHub CLI", "已检测到 GitHub 登录"} {
+			if strings.Contains(out.String(), forbidden) {
+				t.Fatalf("offline init must skip all guidance/report, got %q in %q", forbidden, out.String())
+			}
+		}
+		if _, err := os.Stat(config.ConfigPath(home)); err != nil {
+			t.Fatalf("config was not written: %v", err)
+		}
+	})
+
+	t.Run("flags given", func(t *testing.T) {
+		home := initTestRepo(t)
+		gitOnlyPATH(t)
+		agent := filepath.Join(t.TempDir(), "fake-agent")
+		if err := os.WriteFile(agent, []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		// --agent/--project given: non-interactive. The graded report still
+		// shows the missing CLI, but no guidance prompt may appear.
+		if code := runWithInput([]string{"sift", "init", "--agent", agent, "--project", "."}, strings.NewReader(""), &out, io.Discard); code != 0 {
+			t.Fatalf("init flags = %d: %s", code, out.String())
+		}
+		if !strings.Contains(out.String(), "未检测到 GitHub CLI（gh）") {
+			t.Fatalf("graded report missing for flags path: %q", out.String())
+		}
+		for _, forbidden := range []string{"是否现在安装", "是否现在运行官方", "推荐安装 pi"} {
+			if strings.Contains(out.String(), forbidden) {
+				t.Fatalf("flags path must not prompt, got %q in %q", forbidden, out.String())
+			}
+		}
+		snap, err := config.Load(home, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Config.Agents) != 1 {
+			t.Fatalf("agents = %#v", snap.Config.Agents)
+		}
+	})
+}
+
+// TestProbeForgeLoginThreeStates pins acceptance 1 at the unit level: the probe
+// distinguishes missing, installed-not-logged and logged via the injected
+// runner.
+func TestProbeForgeLoginThreeStates(t *testing.T) {
+	fake := &fakeCommand{found: map[string]bool{"gh": true}}
+	fake.outputFn = func(name string, args ...string) (string, error) {
+		if name == "gh" && len(args) == 2 && args[0] == "auth" && args[1] == "status" {
+			return "github.com\n  ✓ Logged in to github.com account alice (keyring)\n", nil
+		}
+		return "", errors.New("fake command: not found")
+	}
+	replaceSetupCmd(t, fake)
+
+	if got := probeForgeLogin("github"); !got.installed || got.login != "alice" {
+		t.Fatalf("logged probe = %#v", got)
+	}
+	fake.found["gh"] = false
+	if got := probeForgeLogin("github"); got.installed || got.login != "" {
+		t.Fatalf("missing probe = %#v", got)
+	}
+	fake.found["gh"] = true
+	fake.outputFn = func(string, ...string) (string, error) { return "", errors.New("not logged in") }
+	if got := probeForgeLogin("github"); !got.installed || got.login != "" {
+		t.Fatalf("installed-not-logged probe = %#v", got)
+	}
+}
+
+// TestReportForgeLoginsGraded pins the three-state report wording: missing and
+// installed-not-logged are distinguishable, logged shows the identity.
+func TestReportForgeLoginsGraded(t *testing.T) {
+	var out bytes.Buffer
+	reportForgeLogins(&out, forgeLogins{
+		github: forgeProbe{installed: true, login: "alice"},
+		gitlab: forgeProbe{installed: true},
+	})
+	for _, want := range []string{"已检测到 GitHub 登录：alice", "检测到 glab 未登录；请运行 glab auth login。"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("graded report missing %q: %q", want, out.String())
+		}
+	}
+	out.Reset()
+	reportForgeLogins(&out, forgeLogins{})
+	for _, want := range []string{"未检测到 GitHub CLI（gh）", "未检测到 GitLab CLI（glab）"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("graded report missing %q: %q", want, out.String())
+		}
+	}
+}
+
+// TestAskYes pins the confirm-first semantics: Enter and y/yes/是 confirm,
+// anything else (n/no, unexpected text) declines — installs are never silent
+// (issue #960 §2 红线).
+func TestAskYes(t *testing.T) {
+	for _, tt := range []struct {
+		answer, name string
+		want         bool
+	}{
+		{"\n", "enter", true},
+		{"y\n", "y", true},
+		{"yes\n", "yes", true},
+		{"是\n", "是", true},
+		{"n\n", "n", false},
+		{"no\n", "no", false},
+		{"garbage\n", "unexpected", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if got := askYes(bufio.NewReader(strings.NewReader(tt.answer)), &out, "测试问题"); got != tt.want {
+				t.Fatalf("askYes(%q) = %v, want %v", tt.answer, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPiAuthLikely pins the weak login signal: the auth file or a common API
+// key env var counts as possibly logged in, otherwise guidance is shown.
+func TestPiAuthLikely(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"} {
+		t.Setenv(k, "")
+	}
+	if piAuthLikely() {
+		t.Fatal("empty env + no auth file must not count as logged in")
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".pi", "agent", "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !piAuthLikely() {
+		t.Fatal("auth.json must count as possibly logged in")
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	if !piAuthLikely() {
+		t.Fatal("ANTHROPIC_API_KEY must count as possibly logged in")
 	}
 }

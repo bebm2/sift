@@ -15,6 +15,12 @@ summary: 从安全试跑或已有仓库完成首个 Sift Run
 
 ## 0. 前置检查
 
+### 依赖自动引导
+
+`sift init` 会自动探测并引导缺失的外部依赖：gh/glab 未安装时确认式引导安装、已装未登录时引导运行官方登录；PATH 中没有任何已知 Coding Agent 时优先推荐安装 pi。**手工检查只用于排障**——安装与登录的命令矩阵见[安装指南「依赖缺失的引导」](installation.md#依赖缺失的引导)。强校验请直接信任 `sift doctor` 的结论。
+
+仍要手动核对时：
+
 ### 系统与 Git
 
 Sift 发布包支持 macOS/Linux 的 amd64/arm64。先确认当前目录是有 `origin` 的 Git 仓库：
@@ -30,7 +36,7 @@ git remote get-url origin
 
 ### Forge CLI 与认证
 
-GitHub 项目安装 [GitHub CLI](https://cli.github.com/)，GitLab 项目安装 [GitLab CLI](https://gitlab.com/gitlab-org/cli)。只需检查对应平台：
+GitHub 项目用 `gh`，GitLab 项目用 `glab`。只需检查对应平台：
 
 ```bash
 gh --version && gh auth status
@@ -40,15 +46,7 @@ glab --version && glab auth status
 
 **成功预期**：CLI 输出版本，`auth status` 显示当前 host 和登录用户。
 
-**失败恢复**：
-
-```bash
-gh auth login       # GitHub
-# 或
-glab auth login     # GitLab
-```
-
-公司自建实例应登录项目 remote 对应的 host。Sift 复用官方 CLI 的登录，不保存或刷新 Forge token。
+**失败恢复**：未安装或未登录时，直接重跑 `sift init` 即可获得安装/登录引导；也可手动执行 `gh auth login` / `glab auth login`（Sift 复用官方 CLI 的登录，不保存或刷新 Forge token）。公司自建实例应登录项目 remote 对应的 host。
 
 ### Coding Agent 与额度
 
@@ -60,7 +58,7 @@ claude --version       # 示例；换成 codex、cursor、pi 等实际命令
 
 **成功预期**：命令无需图形交互即可输出版本。只有 Cursor GUI 而没有 PATH 中的 `cursor` CLI，不满足后台启动条件。
 
-**失败恢复**：安装并登录 Agent CLI，确认它在 daemon 可见的 PATH 中；也可以在 `sift init` 中输入绝对可执行路径。Agent 的账号、API Key、订阅和模型费用由你负责。Sift 配置中的 Brain token/API/attention 预算用于自身调度和 fail-closed，但不应当作供应商账单上限；首次测试请选小任务并同时检查供应商侧限额。
+**失败恢复**：PATH 中没有任何 Agent 时，`sift init` 会优先引导安装 pi（开源、多模型、无厂商账号门槛）；其他商业 Agent 不在 PATH 时请自行安装并确认它在 daemon 可见的 PATH 中，也可以在 `sift init` 中输入绝对可执行路径。Agent 的账号、API Key、订阅和模型费用由你负责。Sift 配置中的 Brain token/API/attention 预算用于自身调度和 fail-closed，但不应当作供应商账单上限；首次测试请选小任务并同时检查供应商侧限额。
 
 ## 1. 安装 Sift
 
