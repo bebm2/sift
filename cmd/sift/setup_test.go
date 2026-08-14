@@ -462,6 +462,9 @@ func TestSelectAgents(t *testing.T) {
 		{" 1, 3 ", "claude,pi"},
 		{"0", ""},
 		{"none", ""},
+		{"n", ""}, // issue #992: decline spellings must skip
+		{"N", ""},
+		{"no", ""},
 		{"1,9", "claude"},          // out-of-range entries are dropped
 		{"claude,pi", "claude,pi"}, // legacy names pass through
 	} {
@@ -1787,6 +1790,17 @@ func TestTriggerLabelListed(t *testing.T) {
 		if got := triggerLabelListed(tt.output, tt.label); got != tt.want {
 			t.Fatalf("triggerLabelListed(%q, %q) = %v, want %v", tt.output, tt.label, got, tt.want)
 		}
+	}
+	// glab's real table format (captured live from glab 1.99.0, issue #987):
+	// a summary line, a blank line, an ID\tName\tDescription\tColor header and
+	// tab-separated rows where the label is the second field. Empty description
+	// cells produce consecutive tabs and must not break the match.
+	glab := "Showing label 1 of 1 on platform/hexark.\n\nID\tName\tDescription\tColor\n257\tsift:run\t\t#5319e7\n\n"
+	if !triggerLabelListed(glab, "sift:run") {
+		t.Fatalf("glab tab row must match existing label sift:run")
+	}
+	if triggerLabelListed(glab, "sift") {
+		t.Fatalf("glab table must not match absent label sift (exact second-field match only)")
 	}
 }
 
