@@ -142,6 +142,57 @@ func TestAgentArgsDefaultsAndOverride(t *testing.T) {
 	}
 }
 
+// TestAgentArgsTrimmedAndNonInteractive asserts issue #976: --agent-args items
+// are trimmed per element (leading/trailing spaces dropped, empties skipped)
+// and passing --agent-args without --agent keeps init non-interactive (no
+// agent-selection prompt, no dependency guidance).
+func TestAgentArgsTrimmedAndNonInteractive(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+	replaceSetupCmd(t, &fakeCommand{}) // nothing on PATH: deterministic
+
+	fake := filepath.Join(t.TempDir(), "fake-agent")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	// --agent-args with spaces around commas and values: every element must be
+	// trimmed and empty elements dropped before registration.
+	code := runWithInput([]string{
+		"sift", "init", "--offline",
+		"--agent", fake,
+		"--agent-args", " --foo , , bar , ",
+	}, strings.NewReader(""), &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("init --agent-args = %d: %s", code, out.String())
+	}
+	snap, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Config.Agents) != 1 {
+		t.Fatalf("agents = %#v", snap.Config.Agents)
+	}
+	if got := snap.Config.Agents[0].Args; len(got) != 2 || got[0] != "--foo" || got[1] != "bar" {
+		t.Fatalf("trimmed args = %#v", got)
+	}
+
+	// --agent-args alone (no --agent): still non-interactive. The probe would
+	// otherwise ask to select an agent; with nothing on PATH it must not block.
+	out.Reset()
+	code = runWithInput([]string{
+		"sift", "init", "--offline",
+		"--agent-args", "--x",
+	}, strings.NewReader(""), &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("init --agent-args alone = %d: %s", code, out.String())
+	}
+	if strings.Contains(out.String(), "选择 Agent") || strings.Contains(out.String(), "推荐安装 pi") {
+		t.Fatalf("--agent-args alone still entered interactive guidance: %q", out.String())
+	}
+}
+
 func TestProjectAddDoesNotChangeOperators(t *testing.T) {
 	_ = freshHome(t)
 	home, err := config.ResolveHome()

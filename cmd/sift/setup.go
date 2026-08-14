@@ -96,7 +96,7 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 		report(stderr, errors.New("--project and --forge are only supported by sift init or sift project add"))
 		return 2
 	}
-	interactive := !opt.offline && opt.agents == "" && opt.project == "" && opt.operator == "" && opt.forge == ""
+	interactive := !opt.offline && opt.agents == "" && opt.project == "" && opt.operator == "" && opt.forge == "" && !agentArgsSet
 	in := bufio.NewReader(stdin)
 
 	// Probe gh and glab logins independently so each operators allowlist
@@ -219,7 +219,11 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 				if agentArgsSet {
 					agentArgs := []string{}
 					if opt.agentArgs != "" {
-						agentArgs = strings.Split(opt.agentArgs, ",")
+						for _, a := range strings.Split(opt.agentArgs, ",") {
+							if a = strings.TrimSpace(a); a != "" {
+								agentArgs = append(agentArgs, a)
+							}
+						}
 					}
 					addAgent(doc, spec, &agentArgs)
 				} else {
