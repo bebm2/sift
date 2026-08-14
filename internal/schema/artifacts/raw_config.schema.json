@@ -29,6 +29,12 @@
           "id": {
             "type": "string"
           },
+          "launch_env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "max_concurrent": {
             "type": [
               "integer",
