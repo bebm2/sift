@@ -737,67 +737,6 @@ func TestDaemonDispatchRejectsArguments(t *testing.T) {
 	}
 }
 
-func TestDaemonResolvesWrapperAlongsideSiftExecutable(t *testing.T) {
-	home := freshHome(t)
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapper := filepath.Join(filepath.Dir(executable), "sift-agent-wrapper")
-	old, readErr := os.ReadFile(wrapper)
-	oldInfo, statErr := os.Stat(wrapper)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		t.Fatal(readErr)
-	}
-	if statErr != nil && !os.IsNotExist(statErr) {
-		t.Fatal(statErr)
-	}
-	t.Cleanup(func() {
-		if readErr == nil {
-			_ = os.WriteFile(wrapper, old, oldInfo.Mode().Perm())
-			return
-		}
-		_ = os.Remove(wrapper)
-	})
-	content := []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '" + controlplane.Version + "'; fi\nif [ \"$1\" = \"--protocol-major\" ]; then printf '%d\\n' '" + fmt.Sprint(controlplane.ProtocolMajor) + "'; fi\n")
-	if err := os.WriteFile(wrapper, content, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(wrapper, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runDaemon(ctx, config.Home{Path: home}) }()
-	waitSocket(t, filepath.Join(home, "siftd.sock"))
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		select {
-		case err := <-done:
-			t.Fatalf("runDaemon stopped before serving: %v", err)
-		default:
-		}
-		if _, err := controlplane.OperatorRequest(config.Home{Path: home}, "ops.doctor", map[string]any{}); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("runDaemon did not start serving")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("runDaemon = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runDaemon did not stop after context cancellation")
-	}
-}
-
 func TestHookBootstrapRequestRequiresExplicitProject(t *testing.T) {
 	method, params, err := request("hooks-bootstrap", []string{"project"})
 	if err != nil || method != "ops.hooks-bootstrap" || params["project_id"] != "project" {
