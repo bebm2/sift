@@ -1214,7 +1214,10 @@ func labelListArgs(cli, projectKey string) []string {
 // name is rejected by glab label create.
 func labelCreateArgs(cli, label, projectKey string) []string {
 	if cli == "glab" {
-		args := []string{"label", "create", "-n", label, "-c", "5319e7"}
+		// The '#' prefix is required: GitLab's API rejects a bare hex color
+		// with 400 "must be a valid color code" (issue #987; verified live
+		// against gitlab.hexinfo.cn). gh keeps the bare hex form.
+		args := []string{"label", "create", "-n", label, "-c", "#5319e7"}
 		if projectKey != "" {
 			args = append(args, "-R", projectKey)
 		}

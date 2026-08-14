@@ -1670,11 +1670,11 @@ func TestSetupCloseoutLabelGlabUsesNamedFlags(t *testing.T) {
 	replaceSetupCmd(t, fake)
 	var out bytes.Buffer
 	setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\ny\n")), &out, "gitlab", "group/proj", "sift:run")
-	want := []string{"glab", "label", "create", "-n", "sift:run", "-c", "5319e7", "-R", "group/proj"}
+	want := []string{"glab", "label", "create", "-n", "sift:run", "-c", "#5319e7", "-R", "group/proj"}
 	if len(fake.runs) != 1 || strings.Join(fake.runs[0], " ") != strings.Join(want, " ") {
 		t.Fatalf("glab label create = %#v, want %v", fake.runs, want)
 	}
-	if !strings.Contains(out.String(), "将执行：glab label create -n sift:run -c 5319e7 -R group/proj") {
+	if !strings.Contains(out.String(), "将执行：glab label create -n sift:run -c #5319e7 -R group/proj") {
 		t.Fatalf("must show the exact glab command before confirming: %q", out.String())
 	}
 }
@@ -1692,7 +1692,7 @@ func TestSetupCloseoutLabelGlabDegradesManualCommand(t *testing.T) {
 	replaceSetupCmd(t, fake)
 	var out bytes.Buffer
 	setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\ny\n")), &out, "gitlab", "group/proj", "sift:run")
-	if !strings.Contains(out.String(), "手动执行：glab label create -n sift:run -c 5319e7 -R group/proj") {
+	if !strings.Contains(out.String(), "手动执行：glab label create -n sift:run -c #5319e7 -R group/proj") {
 		t.Fatalf("failed glab create must degrade to the flag-based manual command: %q", out.String())
 	}
 }
