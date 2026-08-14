@@ -116,7 +116,7 @@ sift service status
 sift doctor
 ```
 
-无可用 launchd/systemd user service 时，按提示在一个保持打开的终端运行 `sift daemon`。成功预期与恢复方式同路径 B 的[初始化](#3-初始化)、[离线检查](#4-离线检查)和[启动 Coordinator](#5-启动-coordinator)。
+无可用 launchd/systemd user service 时，按提示在一个保持打开的终端运行 `sift daemon`。成功预期与恢复方式同路径 B 的[初始化](#3-初始化)、[离线检查](#4-离线检查手动复查入口)和[启动 Coordinator](#5-启动-coordinator手动补救入口)。
 
 ### A3. 触发并观察 seed Issues
 
@@ -161,7 +161,15 @@ sift init
 3. 从已登录的 Forge CLI 记录 operator；
 4. 写入 `~/.sift/config.yaml`。
 
-**成功预期**：末尾显示已写入配置；`sift agent list` 和 `sift project list` 能看到所选 Agent/项目。
+配置写入后，向导会询问式引导「收尾三合一」（每步直接回车默认执行，或输入 `n` 跳过）：
+
+1. **离线自检**：内嵌执行 `sift doctor --offline` 的检查逻辑，有未通过项时逐条给出修复指引（指向[故障排查](../runbooks/troubleshooting.md)），失败不阻塞；
+2. **用户级服务**：复用 `sift service install` + `sift service status` 完成安装与启动；没有可用 supervisor 时提示前台运行 `sift daemon`；
+3. **触发 label**：以配置 `labels.trigger` 为准（默认 `sift:run`），先 `gh/glab label list` 查重，不存在时展示将执行的命令并确认后创建；已存在或失败都只降级不阻塞。
+
+`--offline` 或 flags 全给时这三步全部跳过，非交互输出不变。
+
+**成功预期**：末尾显示已写入配置并完成收尾引导（或按 `n` 跳过）；`sift agent list` 和 `sift project list` 能看到所选 Agent/项目。
 
 **失败恢复**：
 
@@ -170,7 +178,9 @@ sift init
 - operator 缺失：先完成 `gh auth login` / `glab auth login`，再运行 `sift init`；
 - 写错配置：重新运行向导会备份原文件为 `config.yaml.bak`；字段级修复见 [配置规格](../specs/config.md)。
 
-### 4. 离线检查
+### 4. 离线检查（手动复查入口）
+
+`sift init` 收尾时已引导运行离线自检；以下为手动复查入口：
 
 ```bash
 sift doctor --offline
@@ -186,9 +196,9 @@ chmod 700 "${SIFT_HOME:-$HOME/.sift}"
 chmod 600 "${SIFT_HOME:-$HOME/.sift}/config.yaml"
 ```
 
-### 5. 启动 Coordinator
+### 5. 启动 Coordinator（手动补救入口）
 
-推荐用户级服务：
+`init` 收尾三合一已引导安装并启动用户级服务；本节为手动补救入口（当时跳过、之后重装或需要重查时使用）：
 
 ```bash
 sift service install

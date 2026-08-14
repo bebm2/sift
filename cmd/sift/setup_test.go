@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -824,6 +825,20 @@ func replaceSetupCmd(t *testing.T, f *fakeCommand) {
 	t.Cleanup(func() { setupCmd = prev })
 }
 
+func replaceSetupDoctor(t *testing.T, f func(config.Home) map[string]any) {
+	t.Helper()
+	prev := setupDoctorRun
+	setupDoctorRun = f
+	t.Cleanup(func() { setupDoctorRun = prev })
+}
+
+func replaceSetupService(t *testing.T, f func(action string, home config.Home, stdout, stderr io.Writer) int) {
+	t.Helper()
+	prev := setupServiceRun
+	setupServiceRun = f
+	t.Cleanup(func() { setupServiceRun = prev })
+}
+
 // initTestRepo creates a git repo with a GitHub origin and chdirs into it.
 func initTestRepo(t *testing.T) config.Home {
 	t.Helper()
@@ -1097,7 +1112,7 @@ func TestInitNonInteractivePathsSkipGuidance(t *testing.T) {
 		if code := runWithInput([]string{"sift", "init", "--offline"}, strings.NewReader(""), &out, io.Discard); code != 0 {
 			t.Fatalf("init offline = %d: %s", code, out.String())
 		}
-		for _, forbidden := range []string{"是否现在安装", "是否现在运行官方", "推荐安装 pi", "未检测到 GitHub CLI", "已检测到 GitHub 登录"} {
+		for _, forbidden := range []string{"是否现在安装", "是否现在运行官方", "推荐安装 pi", "未检测到 GitHub CLI", "已检测到 GitHub 登录", "收尾三合一", "全部就绪"} {
 			if strings.Contains(out.String(), forbidden) {
 				t.Fatalf("offline init must skip all guidance/report, got %q in %q", forbidden, out.String())
 			}
@@ -1306,6 +1321,312 @@ func TestInitEOFDeclinesConfirmations(t *testing.T) {
 			t.Fatalf("agents = %#v, want pi registered", snap.Config.Agents)
 		}
 	})
+}
+
+// ---- issue #961: init 收尾三合一 -------------------------------------------
+
+// fakeDoctorCheck mirrors the controlplane doctorCheck JSON shape: production
+// OfflineDoctor returns a typed slice inside the result map, which must not
+// break the guidance normalization (regression: `[]any` assertion only).
+type fakeDoctorCheck struct {
+	ID      string `json:"id"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
+// fakeDoctorResult builds a deterministic offline doctor result with the given
+// exit code and per-check levels, so closeout tests never depend on the host.
+func fakeDoctorResult(exitCode int, levels ...string) map[string]any {
+	checks := make([]fakeDoctorCheck, 0, len(levels))
+	for _, level := range levels {
+		message := level
+		if level != "ok" {
+			message = "fake " + level + " message"
+		}
+		checks = append(checks, fakeDoctorCheck{ID: "check-" + level, Level: level, Message: message})
+	}
+	return map[string]any{"offline": true, "exit_code": exitCode, "security_posture": "unsafe-local", "checks": checks}
+}
+
+// TestSetupCloseoutDoctorRendersPerCheckGuidance pins acceptance 1 (step 1): a
+// non-zero offline doctor result renders and then lists each non-ok check with
+// a pointer to the troubleshooting runbook, while ok checks get none.
+func TestSetupCloseoutDoctorRendersPerCheckGuidance(t *testing.T) {
+	_ = freshHome(t)
+	home, err := config.ResolveHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceSetupDoctor(t, func(config.Home) map[string]any {
+		return fakeDoctorResult(2, "ok", "warning", "error")
+	})
+	var out bytes.Buffer
+	setupCloseoutDoctor(bufio.NewReader(strings.NewReader("\n")), &out, home)
+	for _, want := range []string{"Sift 诊断", "结论：有错误（退出码 2）", "修复指引", "check-warning", "check-error", "troubleshooting.md"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("doctor guidance missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Count(out.String(), "troubleshooting.md §3") != 2 {
+		t.Fatalf("exactly the failing checks must receive guidance: %q", out.String())
+	}
+}
+
+// TestSetupCloseoutDoctorDeclineSkips pins that declining the offline check
+// runs nothing (acceptance 1: each step can be skipped).
+func TestSetupCloseoutDoctorDeclineSkips(t *testing.T) {
+	_ = freshHome(t)
+	home, err := config.ResolveHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	replaceSetupDoctor(t, func(config.Home) map[string]any {
+		ran = true
+		return fakeDoctorResult(0)
+	})
+	var out bytes.Buffer
+	setupCloseoutDoctor(bufio.NewReader(strings.NewReader("n\n")), &out, home)
+	if ran || strings.Contains(out.String(), "Sift 诊断") {
+		t.Fatalf("declined doctor step must not run: ran=%v %q", ran, out.String())
+	}
+}
+
+// TestSetupCloseoutServiceFailurePrintsTroubleshooting pins acceptance 2: a
+// failed install prints the troubleshooting pointer, skips status, and does
+// not stop the wizard (the label step and closing output still run below).
+func TestSetupCloseoutServiceFailurePrintsTroubleshooting(t *testing.T) {
+	_ = freshHome(t)
+	home, err := config.ResolveHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceSetupService(t, func(action string, home config.Home, stdout, stderr io.Writer) int {
+		fmt.Fprintf(stdout, "fake service %s output\n", action)
+		if action == "install" {
+			return 1
+		}
+		return 0
+	})
+	var out bytes.Buffer
+	setupCloseoutService(bufio.NewReader(strings.NewReader("\n")), &out, io.Discard, home)
+	if !strings.Contains(out.String(), "troubleshooting.md") || !strings.Contains(out.String(), "sift daemon") {
+		t.Fatalf("install failure must print the troubleshooting pointer: %q", out.String())
+	}
+	if strings.Contains(out.String(), "fake service status output") {
+		t.Fatalf("status must not run after a failed install: %q", out.String())
+	}
+}
+
+// TestSetupCloseoutServiceForegroundRunsStatus pins acceptance 2: a no-
+// supervisor install succeeds (service layer prints the foreground hint) and
+// status still runs afterwards, mirroring the standalone `sift service` flow.
+func TestSetupCloseoutServiceForegroundRunsStatus(t *testing.T) {
+	_ = freshHome(t)
+	home, err := config.ResolveHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceSetupService(t, func(action string, home config.Home, stdout, stderr io.Writer) int {
+		if action == "install" {
+			fmt.Fprintln(stdout, "foreground daemon (no supervisor)：前台运行 `sift daemon`")
+		} else {
+			fmt.Fprintln(stdout, "fake status output")
+		}
+		return 0
+	})
+	var out bytes.Buffer
+	setupCloseoutService(bufio.NewReader(strings.NewReader("\n")), &out, io.Discard, home)
+	for _, want := range []string{"sift daemon", "fake status output"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("foreground service flow missing %q: %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "troubleshooting.md") {
+		t.Fatalf("foreground success must not print a failure pointer: %q", out.String())
+	}
+}
+
+// TestSetupCloseoutLabelCreatesAfterDedupeAndConfirm pins acceptance 1 (step 3)
+// and the double-caution red line: the label is deduped first, the exact
+// command is shown, and only an explicit confirmation executes the create.
+func TestSetupCloseoutLabelCreatesAfterDedupeAndConfirm(t *testing.T) {
+	fake := &fakeCommand{found: map[string]bool{"gh": true}}
+	fake.outputFn = func(name string, args ...string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "label" && args[1] == "list" {
+			return "NAME  DESCRIPTION  COLOR\n", nil
+		}
+		return "", errors.New("fake command: not found")
+	}
+	replaceSetupCmd(t, fake)
+	var out bytes.Buffer
+	// Step ask = y, then the shown-command confirmation = y.
+	setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\ny\n")), &out, "github", "owner/repo", "sift:run")
+	want := []string{"gh", "label", "create", "sift:run", "--color", "5319e7", "--repo", "owner/repo"}
+	if len(fake.runs) != 1 || strings.Join(fake.runs[0], " ") != strings.Join(want, " ") {
+		t.Fatalf("label create = %#v, want %v", fake.runs, want)
+	}
+	if !strings.Contains(out.String(), "将执行：gh label create sift:run --color 5319e7 --repo owner/repo") {
+		t.Fatalf("must show the exact command before confirming: %q", out.String())
+	}
+}
+
+// TestSetupCloseoutLabelExistsSkipsCreate pins acceptance 1: an already
+// existing label is skipped without re-creating and without showing a create
+// command (issue #961 红线: never silently create — nor duplicate).
+func TestSetupCloseoutLabelExistsSkipsCreate(t *testing.T) {
+	fake := &fakeCommand{found: map[string]bool{"gh": true}}
+	fake.outputFn = func(name string, args ...string) (string, error) {
+		return "NAME  DESCRIPTION  COLOR\nsift:run  5319e7  \n", nil
+	}
+	replaceSetupCmd(t, fake)
+	var out bytes.Buffer
+	setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\n")), &out, "github", "owner/repo", "sift:run")
+	if len(fake.runs) != 0 {
+		t.Fatalf("existing label must not be re-created: %#v", fake.runs)
+	}
+	if strings.Contains(out.String(), "gh label create") {
+		t.Fatalf("existing label must not show a create command: %q", out.String())
+	}
+}
+
+// TestSetupCloseoutLabelDegrades pins the remaining degradation paths: a
+// declined confirmation and a failed create both print no run / the manual
+// command, a failed dedupe probe never creates, and a missing project prints
+// the manual command.
+func TestSetupCloseoutLabelDegrades(t *testing.T) {
+	t.Run("declined confirmation does not create", func(t *testing.T) {
+		fake := &fakeCommand{found: map[string]bool{"gh": true}}
+		fake.outputFn = func(string, ...string) (string, error) {
+			return "NAME\n", nil
+		}
+		replaceSetupCmd(t, fake)
+		var out bytes.Buffer
+		setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\nn\n")), &out, "github", "owner/repo", "sift:run")
+		if len(fake.runs) != 0 {
+			t.Fatalf("declined create ran: %#v", fake.runs)
+		}
+	})
+	t.Run("failed create degrades to manual command", func(t *testing.T) {
+		fake := &fakeCommand{found: map[string]bool{"gh": true}}
+		fake.outputFn = func(string, ...string) (string, error) {
+			return "NAME\n", nil
+		}
+		fake.runFn = func(string, ...string) error {
+			return errors.New("permission denied")
+		}
+		replaceSetupCmd(t, fake)
+		var out bytes.Buffer
+		setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\ny\n")), &out, "github", "owner/repo", "sift:run")
+		if !strings.Contains(out.String(), "手动执行：gh label create sift:run --color 5319e7 --repo owner/repo") {
+			t.Fatalf("failed create must degrade to the manual command: %q", out.String())
+		}
+	})
+	t.Run("failed dedupe probe never creates", func(t *testing.T) {
+		fake := &fakeCommand{found: map[string]bool{"gh": true}}
+		replaceSetupCmd(t, fake)
+		var out bytes.Buffer
+		setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\n")), &out, "github", "owner/repo", "sift:run")
+		if len(fake.runs) != 0 {
+			t.Fatalf("unverified create ran: %#v", fake.runs)
+		}
+		if !strings.Contains(out.String(), "手动命令：gh label create") {
+			t.Fatalf("unverifiable dedupe must degrade to the manual command: %q", out.String())
+		}
+	})
+	t.Run("missing project degrades to manual command", func(t *testing.T) {
+		var out bytes.Buffer
+		setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\n")), &out, "", "", "sift:run")
+		if !strings.Contains(out.String(), "手动命令：gh label create sift:run --color 5319e7") {
+			t.Fatalf("no-project step must degrade to the manual command: %q", out.String())
+		}
+	})
+}
+
+// TestTriggerLabelListed pins the dedupe parser against the plain table output
+// of both forge CLIs (label name is the first column).
+func TestTriggerLabelListed(t *testing.T) {
+	table := "NAME  DESCRIPTION  COLOR\nsift:run  5319e7  \nbug  something  d73a4a\n"
+	for _, tt := range []struct {
+		output, label string
+		want          bool
+	}{
+		{table, "sift:run", true},
+		{table, "bug", true},
+		{"sift:run\n", "sift:run", true},
+		{table, "sift:approved", false},
+		{"NAME\n", "sift:run", false},
+		{"", "sift:run", false},
+	} {
+		if got := triggerLabelListed(tt.output, tt.label); got != tt.want {
+			t.Fatalf("triggerLabelListed(%q, %q) = %v, want %v", tt.output, tt.label, got, tt.want)
+		}
+	}
+}
+
+// TestInteractiveInitCloseoutThreeSteps is the wizard integration test for
+// issue #961: after the config write the three closing steps appear in order,
+// each defaults to yes, the label is deduped then created through the injected
+// forge CLI, and the closing output carries the trigger example plus the
+// polling expectation. Non-interactive init below still runs zero closing
+// actions (acceptance 3).
+func TestInteractiveInitCloseoutThreeSteps(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+	fake := &fakeCommand{found: map[string]bool{"gh": true}}
+	fake.outputFn = func(name string, args ...string) (string, error) {
+		switch {
+		case name == "gh" && len(args) == 2 && args[0] == "auth" && args[1] == "status":
+			return "github.com\n  ✓ Logged in to github.com account alice (keyring)\n", nil
+		case name == "gh" && len(args) >= 2 && args[0] == "label" && args[1] == "list":
+			return "NAME  DESCRIPTION  COLOR\n", nil
+		}
+		return "", errors.New("fake command: not found")
+	}
+	replaceSetupCmd(t, fake)
+	replaceSetupDoctor(t, func(config.Home) map[string]any {
+		return fakeDoctorResult(0, "ok")
+	})
+	replaceSetupService(t, func(action string, home config.Home, stdout, stderr io.Writer) int {
+		fmt.Fprintf(stdout, "fake service %s\n", action)
+		return 0
+	})
+
+	var out bytes.Buffer
+	// Answers: glab install=n ; pi=n ; agent fallback=Enter ; closeout:
+	// doctor=y, service=y, label=y, create-confirm=y.
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\n\ny\ny\ny\ny\n"), &out, io.Discard); code != 0 {
+		t.Fatalf("init = %d: %s", code, out.String())
+	}
+	for _, want := range []string{
+		"收尾三合一",
+		"运行离线自检（sift doctor --offline）",
+		"Sift 诊断",
+		"安装用户级服务并启动（sift service install）",
+		"fake service install",
+		"fake service status",
+		"创建触发 label sift:run（Forge 仓库写操作）",
+		"将执行：gh label create sift:run --color 5319e7 --repo owner/repo",
+		"全部就绪",
+		"gh issue edit <N> --add-label \"sift:run\"",
+		"60 秒",
+		"docs/specs/config.md §3.5",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("closeout output missing %q:\n%s", want, out.String())
+		}
+	}
+	create := []string{"gh", "label", "create", "sift:run", "--color", "5319e7", "--repo", "owner/repo"}
+	if len(fake.runs) != 1 || strings.Join(fake.runs[0], " ") != strings.Join(create, " ") {
+		t.Fatalf("label create = %#v, want %v", fake.runs, create)
+	}
+	snap, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Config.Projects) != 1 || snap.Config.Projects[0].Forge.Project != "owner/repo" {
+		t.Fatalf("projects = %#v", snap.Config.Projects)
+	}
 }
 
 // TestPiAuthLikely pins the weak login signal: the auth file or a common API
