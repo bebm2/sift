@@ -878,6 +878,10 @@ func gitOnlyPATH(t *testing.T) {
 func TestInitForgeMissingGuidesInstall(t *testing.T) {
 	home := initTestRepo(t)
 	gitOnlyPATH(t)
+	// Explicitly inject the "missing" command+auth state: host PATH/HOME and a
+	// real gh on the runner (ubuntu puts gh in /usr/bin next to git) must not
+	// flip this into an installed-not-logged probe (issue #960 hermeticity).
+	replaceSetupCmd(t, &fakeCommand{}) // nothing on PATH
 
 	var out bytes.Buffer
 	// Answers: gh install=n ; glab install=n ; pi=n ; agent fallback=Enter ;
@@ -1056,6 +1060,9 @@ func TestInitPiBootstrapInstallsAndRegisters(t *testing.T) {
 func TestInitPiBootstrapDeclinedPrintsGuidance(t *testing.T) {
 	home := initTestRepo(t)
 	gitOnlyPATH(t)
+	// Inject the explicit missing state so a host-installed gh/glab cannot
+	// turn the missing-install prompt into a login prompt (issue #960).
+	replaceSetupCmd(t, &fakeCommand{}) // nothing on PATH
 
 	var out bytes.Buffer
 	// Answers: gh install=n ; glab install=n ; pi=n ; agent fallback=Enter ;
@@ -1125,6 +1132,9 @@ func TestInitNonInteractivePathsSkipGuidance(t *testing.T) {
 	t.Run("flags given", func(t *testing.T) {
 		home := initTestRepo(t)
 		gitOnlyPATH(t)
+		// The graded report must show the missing CLI regardless of any real gh
+		// on the runner: inject the explicit missing state (issue #960).
+		replaceSetupCmd(t, &fakeCommand{}) // nothing on PATH
 		agent := filepath.Join(t.TempDir(), "fake-agent")
 		if err := os.WriteFile(agent, []byte("#!/bin/sh\n"), 0o700); err != nil {
 			t.Fatal(err)
