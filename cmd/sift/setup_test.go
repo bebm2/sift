@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/xsift/sift/internal/config"
 )
 
@@ -104,6 +106,44 @@ func TestWriteSetupDocumentRejectsInvalidEditWithoutReplacingConfig(t *testing.T
 	}
 	if !bytes.Equal(got, valid) {
 		t.Fatalf("config changed after invalid edit: %q", got)
+	}
+}
+
+// TestNormalizeNumbersKeepsIntegralDecimals guards the issue #927 config byte
+// drift: setupDocument decodes existing config via JSON (all numbers become
+// float64), and yaml.v3 would serialize large integral floats as scientific
+// notation (1000000 → 1e+06) on every init rerun. normalizeNumbers converts
+// integral in-range floats to int; fractions and out-of-range values stay
+// float64 so no numeric meaning changes. The assertion is the absence of
+// scientific notation plus the exact decimal form (map quoting style is a
+// yaml.v3 output detail and intentionally not pinned).
+func TestNormalizeNumbersKeepsIntegralDecimals(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"large-int", map[string]any{"n": float64(1000000)}, "1000000"},
+		{"int64-range", map[string]any{"n": float64(2147483648)}, "2147483648"},
+		{"small-int", map[string]any{"n": float64(60)}, "60"},
+		{"fraction", map[string]any{"n": 1.5}, "1.5"},
+		{"nested", map[string]any{"sub": map[string]any{"big": float64(3000000000)}}, "3000000000"},
+		{"list", map[string]any{"l": []any{float64(1000000), float64(2.5)}}, "1000000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data, err := yaml.Marshal(normalizeNumbers(c.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := string(data)
+			if strings.Contains(s, "e+") || strings.Contains(s, "E+") {
+				t.Fatalf("yaml still uses scientific notation: %q", s)
+			}
+			if !strings.Contains(s, c.want) {
+				t.Fatalf("yaml = %q, want it to contain %q", s, c.want)
+			}
+		})
 	}
 }
 
@@ -334,10 +374,6 @@ func TestInteractiveInitCharacteristicsDisplay(t *testing.T) {
 		t.Fatalf("git remote: %v: %s", err, out)
 	}
 	t.Chdir(repo)
-	repo, err = filepath.EvalSymlinks(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
 	bin := t.TempDir()
 	for name, body := range map[string]string{
 		"claude": "#!/bin/sh\nprintf 'Claude Code version 2.0.0\\n'\n",
@@ -520,10 +556,6 @@ func TestInteractiveProjectAddAskOncePersistsHost(t *testing.T) {
 		t.Fatalf("git remote: %v: %s", err, out)
 	}
 	t.Chdir(repo)
-	repo, err = filepath.EvalSymlinks(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var out bytes.Buffer
 	if code := runWithInput([]string{"sift", "project", "add"}, strings.NewReader("gitlab\n"), &out, io.Discard); code != 0 {
 		t.Fatalf("project add = %d: %s", code, out.String())

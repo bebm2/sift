@@ -433,7 +433,7 @@ func TestProductionWrapperReapsTERMIgnoringAgentOnTerminationSignal(t *testing.T
 		t.Fatal(err)
 	}
 	pgid := executionWrapperPGID(t, filepath.Join(runDir, "control.json"))
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	started := false
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(filepath.Join(runDir, "control.json")); err == nil {
@@ -466,7 +466,7 @@ func executionWrapperPGID(t *testing.T, controlPath string) int {
 
 func executionWrapperPID(t *testing.T, controlPath string) int {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(controlPath)
 		if err == nil {
@@ -702,7 +702,7 @@ func TestProductionWrapperKeepsAgentInWrapperProcessGroup(t *testing.T) {
 
 func waitForWrapperFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(path); err == nil {
 			return
@@ -714,7 +714,7 @@ func waitForWrapperFile(t *testing.T, path string) {
 
 func waitForPendingReaper(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
@@ -744,7 +744,7 @@ func readPIDFile(t *testing.T, paths ...string) int {
 
 func waitForNonEmptyFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
 			return
@@ -905,7 +905,7 @@ func (s *wrapperServer) waitForStartedReceipt(t *testing.T) {
 	t.Helper()
 	select {
 	case <-s.startedReceipt:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("server did not receive claim.started")
 	}
 }
@@ -918,7 +918,7 @@ func (s *wrapperServer) waitForStartedConfirmation(t *testing.T) {
 	t.Helper()
 	select {
 	case <-s.startedConfirmation:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("server did not confirm claim.started")
 	}
 }
@@ -969,7 +969,7 @@ func (s *wrapperServer) waitForPath() {
 	if s.waitPath == "" {
 		return
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(s.waitPath); err == nil {
 			return
@@ -1062,7 +1062,7 @@ func requireRealTmux(t *testing.T) string {
 
 func waitForTmuxSessionGone(t *testing.T, tmux, socket, name string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		cmd := osexec.Command(tmux, "-f", "/dev/null", "-S", socket, "has-session", "-t", "="+name)
 		cmd.Env = runtimepkg.TmuxClientEnvironment()

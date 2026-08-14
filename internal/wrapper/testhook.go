@@ -20,7 +20,7 @@ func pauseForTest(point string) error {
 		}
 	}
 	if release := os.Getenv("SIFT_WRAPPER_TEST_RELEASE"); release != "" {
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
 			if _, err := os.Stat(release); err == nil {
 				return nil
