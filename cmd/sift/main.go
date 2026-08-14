@@ -126,6 +126,13 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		}
 		return runDaemonCommand(home, stderr)
 	}
+	if command == "pi" {
+		if len(cmdArgs) != 0 {
+			report(stderr, fmt.Errorf("usage: sift pi"))
+			return 2
+		}
+		return runPi(stdout, stderr)
+	}
 	if command == "install" {
 		return runInstall(cmdArgs, home, stdout, stderr)
 	}

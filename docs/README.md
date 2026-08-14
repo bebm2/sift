@@ -4,6 +4,8 @@
 
 用户首次使用请从 [`guides/getting-started.md`](guides/getting-started.md) 开始；安装与升级细节见 [`guides/installation.md`](guides/installation.md)，故障恢复见 [`runbooks/troubleshooting.md`](runbooks/troubleshooting.md)。这些用户入口不要求先读 PRD/DESIGN。
 
+`docs/` 同时是 `sift pi` 会话所注入 skill 的权威来源：`internal/pi/skill/SKILL.md` 是从本目录文档派生的浓缩层（只读/副作用/红线分级），发现矛盾以本目录 docs 为准并反馈。
+
 ---
 
 ## 目录结构
