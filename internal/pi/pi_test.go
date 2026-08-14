@@ -61,7 +61,7 @@ func TestEnsureSkillIdempotent(t *testing.T) {
 
 func TestRunSessionMissingPi(t *testing.T) {
 	r := &fakeRunner{path: map[string]string{}}
-	err := RunSession(r, "", nil)
+	err := RunSession(r)
 	if _, ok := err.(PiMissingError); !ok {
 		t.Fatalf("RunSession with missing pi = %v, want PiMissingError", err)
 	}

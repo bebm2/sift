@@ -1177,14 +1177,14 @@ func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
 	if len(warnings) > 0 {
 		fmt.Fprintln(out, "需要注意（warning，可暂缓但建议处理）：")
 		for _, id := range warnings {
-			fmt.Fprintf(out, "  - %s\n", id)
+			fmt.Fprintf(out, "  - %s：%s\n", id, doctorWarningHint(id))
 		}
 	}
 	if len(known) > 0 {
-		fmt.Fprintln(out, "已知 V0 边界（warning，同 UID 安全设计边界，非故障，无需处理）：")
-		for _, id := range known {
-			fmt.Fprintf(out, "  - %s\n", id)
-		}
+		// Known V0 boundaries need no action from the user; listing fifteen
+		// tm6:/process-group ids is noise, not guidance. A one-line count keeps
+		// the wizard readable while `sift doctor` still shows every check id.
+		fmt.Fprintf(out, "另有 %d 项同 UID 安全设计边界的已知提示（V0 设计内，非故障，无需处理；逐项见 sift doctor）\n", len(known))
 	}
 	printFrozenLaunchEnvNote(out, home)
 }
@@ -1207,6 +1207,9 @@ func printFrozenLaunchEnvNote(out io.Writer, home config.Home) {
 	}
 }
 
+// doctorWarningHint renders a plain-language hint for an actionable warning.
+// A bare check id like "hooks:hexark" or "outbox:backlog" tells a first-run
+// user nothing; the hint explains what it means and what (if anything) to do.
 // knownV0Boundary reports whether a doctor check is a V0 same-UID security
 // boundary that is a designed limitation, not a fault. These surface as
 // warnings in doctor but are not actionable by the user (issue #961 收尾
@@ -1233,6 +1236,24 @@ func doctorActionableHint(id string) string {
 		return "outbox 积压未清；启动 daemon 后会自动重试"
 	default:
 		return "见 docs/runbooks/troubleshooting.md §3 Doctor 报告"
+	}
+}
+
+// doctorWarningHint explains an actionable warning in plain language. These
+// are deferrable, so the hint says what it means rather than demanding a
+// repair step (issue feedback: 裸 check id 用户看不懂).
+func doctorWarningHint(id string) string {
+	switch {
+	case strings.HasPrefix(id, "hooks:"):
+		return "项目 git hooks 基线尚未建立（仓库刚接入时正常；重跑 init 或稍后自动恢复）"
+	case strings.HasPrefix(id, "outbox:"):
+		return "有待处理的远端操作积压（daemon 运行时会自动重试，无需干预）"
+	case strings.HasPrefix(id, "attempts:"):
+		return "本地运行记录暂不可读（daemon 启动后建立）"
+	case strings.HasPrefix(id, "version:wrapper"):
+		return "wrapper 未随本 CLI 同目录安装（开发构建常见；发布安装不受影响）"
+	default:
+		return "详情见 sift doctor"
 	}
 }
 
@@ -1300,10 +1321,10 @@ func setupCloseoutLabel(in *bufio.Reader, out io.Writer, kind, projectKey, label
 		fmt.Fprintf(out, "  %s 未绑定项目，跳过触发 label 创建；手动命令：%s\n", render.Status("warning"), labelCreateCommand(forgeCLI(kind), label, projectKey))
 		return
 	}
-	if !askYes(in, out, "创建触发 label "+label+"（Forge 仓库写操作）") {
-		return
-	}
 	cli := forgeCLI(kind)
+	// Dedupe before asking: an existing label is reported as done without a
+	// prompt, so the user is never asked to "create" what already exists
+	// (issue feedback: 已存在就不要提示创建).
 	listed, err := setupCmd.output(cli, labelListArgs(cli, projectKey)...)
 	if err != nil {
 		fmt.Fprintf(out, "  %s 无法查询 %s 的 label 列表（%v），跳过创建；手动命令：%s\n", render.Status("warning"), projectKey, err, labelCreateCommand(cli, label, projectKey))
@@ -1315,7 +1336,7 @@ func setupCloseoutLabel(in *bufio.Reader, out io.Writer, kind, projectKey, label
 	}
 	command := labelCreateCommand(cli, label, projectKey)
 	fmt.Fprintf(out, "  将执行：%s\n", command)
-	if !askYes(in, out, "确认执行？") {
+	if !askYes(in, out, "创建触发 label "+label+"（Forge 仓库写操作，确认执行？）") {
 		return
 	}
 	if err := setupCmd.run(cli, labelCreateArgs(cli, label, projectKey)...); err != nil {

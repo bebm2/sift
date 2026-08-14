@@ -1500,13 +1500,26 @@ func TestSetupCloseoutDoctorGroupsKnownV0Boundaries(t *testing.T) {
 	})
 	var out bytes.Buffer
 	setupCloseoutDoctor(bufio.NewReader(strings.NewReader("\n")), &out, home)
-	for _, want := range []string{"已知 V0 边界", "tm6:sift-home", "operator-token-readable-by-agent", "security-posture:darwin", "process-group:codex"} {
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("V0 boundary grouping missing %q:\n%s", want, out.String())
+	// Known boundaries collapse to one count line in the guidance section
+	// (the full renderDoctor listing above still shows every id — that part is
+	// the diagnostic, not the guidance).
+	if !strings.Contains(out.String(), "另有 4 项同 UID 安全设计边界的已知提示") {
+		t.Fatalf("V0 boundary count line missing:\n%s", out.String())
+	}
+	// The guidance section must not list the boundary ids under a repair or
+	// attention heading; after the conclusion line only the count line follows.
+	conclusion := strings.Index(out.String(), "结论：")
+	if conclusion < 0 {
+		t.Fatal("conclusion line missing")
+	}
+	guidance := out.String()[conclusion:]
+	for _, banned := range []string{"tm6:", "operator-token", "security-posture:", "process-group:"} {
+		if strings.Contains(guidance, banned) {
+			t.Fatalf("guidance section must not list known boundary %q: %q", banned, guidance)
 		}
 	}
-	if strings.Contains(out.String(), "需要修复") {
-		t.Fatalf("V0 boundaries must not be listed as repairable errors: %q", out.String())
+	if strings.Contains(guidance, "需要修复") {
+		t.Fatalf("V0 boundaries must not be listed as repairable errors: %q", guidance)
 	}
 }
 
@@ -1740,7 +1753,8 @@ func TestSetupCloseoutLabelDegrades(t *testing.T) {
 		}
 		replaceSetupCmd(t, fake)
 		var out bytes.Buffer
-		setupCloseoutLabel(bufio.NewReader(strings.NewReader("y\nn\n")), &out, "github", "owner/repo", "sift:run")
+		// Dedupe runs before the single confirmation, so one "n" now declines.
+		setupCloseoutLabel(bufio.NewReader(strings.NewReader("n\n")), &out, "github", "owner/repo", "sift:run")
 		if len(fake.runs) != 0 {
 			t.Fatalf("declined create ran: %#v", fake.runs)
 		}
@@ -1843,8 +1857,9 @@ func TestInteractiveInitCloseoutThreeSteps(t *testing.T) {
 
 	var out bytes.Buffer
 	// Answers: glab install=n ; pi=n ; agent fallback=Enter ; closeout:
-	// doctor=y, service=y, label=y, create-confirm=y.
-	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\n\ny\ny\ny\ny\n"), &out, io.Discard); code != 0 {
+	// doctor=y, service=y, label=y (dedupe runs first now, so a single y both
+	// confirms intent and executes — issue feedback: 已存在不提示、单次确认).
+	if code := runWithInput([]string{"sift", "init"}, strings.NewReader("n\nn\n\ny\ny\ny\n"), &out, io.Discard); code != 0 {
 		t.Fatalf("init = %d: %s", code, out.String())
 	}
 	for _, want := range []string{
@@ -1854,7 +1869,7 @@ func TestInteractiveInitCloseoutThreeSteps(t *testing.T) {
 		"安装用户级服务并启动（sift service install）",
 		"fake service install",
 		"fake service status",
-		"创建触发 label sift:run（Forge 仓库写操作）",
+		"创建触发 label sift:run（Forge 仓库写操作，确认执行？）",
 		"将执行：gh label create sift:run --color 5319e7 --repo owner/repo",
 		"全部就绪",
 		"gh issue edit <N> --add-label \"sift:run\"",
