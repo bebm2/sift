@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -800,11 +801,19 @@ func TestInteractiveInitNumberedAgentSelection(t *testing.T) {
 	if len(snap.Config.Agents) != 2 {
 		t.Fatalf("agents = %#v, want the 1,3 subset", snap.Config.Agents)
 	}
-	if got := snap.Config.Agents[0]; got.ID != "claude" || got.Executable != "claude" {
+	if got := snap.Config.Agents[0]; got.ID != "claude" || got.Executable != filepath.Join(bin, "claude") {
 		t.Fatalf("agent[0] = %#v", got)
 	}
-	if got := snap.Config.Agents[1]; got.ID != "pi" || got.Executable != "pi" {
+	if got := snap.Config.Agents[1]; got.ID != "pi" || got.Executable != filepath.Join(bin, "pi") {
 		t.Fatalf("agent[1] = %#v", got)
+	}
+	// Issue #993: detected agents carry the init-time HOME/PATH snapshot so
+	// daemon launches match the interactive probe environment.
+	wantEnv := map[string]string{"HOME": os.Getenv("HOME"), "PATH": bin + string(os.PathListSeparator) + filepath.Dir(gitPath)}
+	for _, agent := range snap.Config.Agents {
+		if !reflect.DeepEqual(agent.LaunchEnv, wantEnv) {
+			t.Fatalf("agent %s launch_env = %#v, want %#v", agent.ID, agent.LaunchEnv, wantEnv)
+		}
 	}
 	if len(snap.Config.Projects) != 1 || snap.Config.Projects[0].Forge.Kind != config.ForgeKindGitHub {
 		t.Fatalf("projects = %#v", snap.Config.Projects)
@@ -1978,5 +1987,144 @@ func TestPiAuthLikely(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 	if !piAuthLikely() {
 		t.Fatal("ANTHROPIC_API_KEY must count as possibly logged in")
+	}
+}
+
+// Issue #993: addAgent freezes the detection environment — absolute
+// executable plus the HOME/PATH snapshot — and degrades to the configured
+// form when the executable cannot be resolved.
+
+func TestAddAgentResolvesAbsoluteAndFreezesEnv(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "pi"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+bin) // duplicate entry collapses
+	t.Setenv("HOME", "/frozen/home")
+
+	doc := map[string]any{"version": 1}
+	addAgent(doc, "pi", nil)
+
+	agents := list(doc, "agents")
+	if len(agents) != 1 {
+		t.Fatalf("agents = %#v", agents)
+	}
+	entry := agents[0].(map[string]any)
+	if got, want := entry["executable"], filepath.Join(bin, "pi"); got != want {
+		t.Fatalf("executable = %v, want absolute %v", got, want)
+	}
+	env, ok := entry["launch_env"].(map[string]string)
+	if !ok {
+		t.Fatalf("launch_env missing: %#v", entry)
+	}
+	if env["HOME"] != "/frozen/home" || env["PATH"] != bin {
+		t.Fatalf("launch_env = %#v, want frozen HOME/PATH snapshot", env)
+	}
+}
+
+func TestAddAgentUnresolvableKeepsConfiguredForm(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	doc := map[string]any{"version": 1}
+	addAgent(doc, "missing-agent", nil)
+
+	entry := list(doc, "agents")[0].(map[string]any)
+	if got := entry["executable"]; got != "missing-agent" {
+		t.Fatalf("executable = %v, want configured form for doctor to flag", got)
+	}
+	if _, ok := entry["launch_env"]; ok {
+		t.Fatalf("launch_env must be absent when detection never succeeded: %#v", entry)
+	}
+}
+
+// Issue #993 review round 1 P1: re-registering an existing agent id must
+// refresh the frozen executable/launch_env — the closeout note's "re-run sift
+// init" guidance is otherwise a dead end. User args survive; an explicit
+// --agent-args (non-nil) replaces them.
+func TestAddAgentExistingIDRefreshesFrozenEntry(t *testing.T) {
+	binA, binB := t.TempDir(), t.TempDir()
+	for _, bin := range []string{binA, binB} {
+		if err := os.WriteFile(filepath.Join(bin, "pi"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", "/frozen/home")
+
+	t.Setenv("PATH", binA)
+	doc := map[string]any{"version": 1}
+	custom := []string{"--mine"}
+	addAgent(doc, "pi", &custom)
+
+	// Re-run with the Agent moved to binB and no explicit args: executable and
+	// launch_env refresh, user args stay.
+	t.Setenv("PATH", binB)
+	addAgent(doc, "pi", nil)
+
+	agents := list(doc, "agents")
+	if len(agents) != 1 {
+		t.Fatalf("agents = %#v, want the existing entry refreshed in place", agents)
+	}
+	entry := agents[0].(map[string]any)
+	if got, want := entry["executable"], filepath.Join(binB, "pi"); got != want {
+		t.Fatalf("executable = %v, want refreshed %v", got, want)
+	}
+	env, ok := entry["launch_env"].(map[string]string)
+	if !ok {
+		t.Fatalf("launch_env missing after refresh: %#v", entry)
+	}
+	if env["PATH"] != binB {
+		t.Fatalf("launch_env PATH = %q, want refreshed snapshot %q", env["PATH"], binB)
+	}
+	if got := entry["args"]; !equalStrings(got, custom) {
+		t.Fatalf("args = %#v, want user args preserved", got)
+	}
+
+	// An explicit --agent-args (even empty) replaces user args.
+	explicit := []string{"--new"}
+	addAgent(doc, "pi", &explicit)
+	if got := entry["args"]; !equalStrings(got, explicit) {
+		t.Fatalf("args = %#v, want explicit --agent-args to win", got)
+	}
+}
+
+// TestInitReRunRefreshesExistingAgentFrozenPath pins the review round 1 P1
+// closing gauge end to end: `sift init --offline --agent=<new path>` with an
+// existing agent id must point config.yaml at the new executable.
+func TestInitReRunRefreshesExistingAgentFrozenPath(t *testing.T) {
+	home := initTestRepo(t)
+	gitOnlyPATH(t)
+	replaceSetupCmd(t, &fakeCommand{}) // nothing on PATH: deterministic
+
+	binA, binB := t.TempDir(), t.TempDir()
+	for _, bin := range []string{binA, binB} {
+		if err := os.WriteFile(filepath.Join(bin, "pi"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	if code := runWithInput([]string{
+		"sift", "init", "--offline", "--agent", filepath.Join(binA, "pi"),
+	}, strings.NewReader(""), &out, io.Discard); code != 0 {
+		t.Fatalf("first init = %d: %s", code, out.String())
+	}
+	out.Reset()
+	if code := runWithInput([]string{
+		"sift", "init", "--offline", "--agent", filepath.Join(binB, "pi"),
+	}, strings.NewReader(""), &out, io.Discard); code != 0 {
+		t.Fatalf("re-run init = %d: %s", code, out.String())
+	}
+
+	snap, err := config.Load(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Config.Agents) != 1 {
+		t.Fatalf("agents = %#v, want the existing entry refreshed in place", snap.Config.Agents)
+	}
+	if got, want := snap.Config.Agents[0].Executable, filepath.Join(binB, "pi"); got != want {
+		t.Fatalf("executable = %q, want refreshed %q", got, want)
+	}
+	if len(snap.Config.Agents[0].LaunchEnv) == 0 {
+		t.Fatalf("launch_env must be refreshed, not dropped: %#v", snap.Config.Agents[0])
 	}
 }
