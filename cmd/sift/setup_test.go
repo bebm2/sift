@@ -1441,9 +1441,11 @@ func fakeDoctorResult(exitCode int, levels ...string) map[string]any {
 	return map[string]any{"offline": true, "exit_code": exitCode, "security_posture": "unsafe-local", "checks": checks}
 }
 
-// TestSetupCloseoutDoctorRendersPerCheckGuidance pins acceptance 1 (step 1): a
-// non-zero offline doctor result renders and then lists each non-ok check with
-// a pointer to the troubleshooting runbook, while ok checks get none.
+// TestSetupCloseoutDoctorRendersPerCheckGuidance pins acceptance 1 (step 1):
+// a non-zero offline doctor result renders and then groups the failing checks
+// by severity — errors get targeted repair hints, plain warnings get a
+// deferrable notice, and known V0 same-UID boundaries are labelled as
+// non-faults. ok checks get none of the above (issue #961 收尾体验).
 func TestSetupCloseoutDoctorRendersPerCheckGuidance(t *testing.T) {
 	_ = freshHome(t)
 	home, err := config.ResolveHome()
@@ -1455,13 +1457,44 @@ func TestSetupCloseoutDoctorRendersPerCheckGuidance(t *testing.T) {
 	})
 	var out bytes.Buffer
 	setupCloseoutDoctor(bufio.NewReader(strings.NewReader("\n")), &out, home)
-	for _, want := range []string{"Sift 诊断", "结论：有错误（退出码 2）", "修复指引", "check-warning", "check-error", "troubleshooting.md"} {
+	for _, want := range []string{"Sift 诊断", "结论：有错误（退出码 2）", "需要修复（error", "check-error", "需要注意（warning", "check-warning"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("doctor guidance missing %q:\n%s", want, out.String())
 		}
 	}
-	if strings.Count(out.String(), "troubleshooting.md §3") != 2 {
-		t.Fatalf("exactly the failing checks must receive guidance: %q", out.String())
+	if strings.Contains(out.String(), "修复指引") {
+		t.Fatalf("old flat guidance header must not appear: %q", out.String())
+	}
+}
+
+// TestSetupCloseoutDoctorGroupsKnownV0Boundaries pins that tm6:*/operator-token/
+// security-posture/process-group warnings are reported as known V0 same-UID
+// boundaries, not as faults requiring repair (issue #961 收尾体验: warning 不
+// 应与 error 混列为必须修复).
+func TestSetupCloseoutDoctorGroupsKnownV0Boundaries(t *testing.T) {
+	_ = freshHome(t)
+	home, err := config.ResolveHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceSetupDoctor(t, func(config.Home) map[string]any {
+		checks := []any{
+			map[string]any{"id": "tm6:sift-home", "level": "warning", "message": "same-UID"},
+			map[string]any{"id": "operator-token-readable-by-agent", "level": "warning", "message": "V0 same-UID"},
+			map[string]any{"id": "security-posture:darwin", "level": "warning", "message": "unsafe-local"},
+			map[string]any{"id": "process-group:codex", "level": "warning", "message": "unavailable"},
+		}
+		return map[string]any{"offline": true, "exit_code": 1, "security_posture": "unsafe-local", "checks": checks}
+	})
+	var out bytes.Buffer
+	setupCloseoutDoctor(bufio.NewReader(strings.NewReader("\n")), &out, home)
+	for _, want := range []string{"已知 V0 边界", "tm6:sift-home", "operator-token-readable-by-agent", "security-posture:darwin", "process-group:codex"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("V0 boundary grouping missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "需要修复") {
+		t.Fatalf("V0 boundaries must not be listed as repairable errors: %q", out.String())
 	}
 }
 
