@@ -12,14 +12,19 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/xsift/sift/internal/pi"
 )
 
-// runPi resolves the user home, installs the Sift skill, builds the context
-// snapshot and launches the pi TUI. A missing pi degrades to the same manual
-// install guidance the init wizard uses (issue #960), never blocking.
+// runPi resolves the user home, installs the Sift skill and launches the pi
+// TUI. A missing pi degrades to the same manual install guidance the init
+// wizard uses (issue #960), never blocking.
+//
+// stdin is handed to pi verbatim: a TUI needs a real terminal for its tty
+// detection, and piping a context snapshot through io.MultiReader breaks it
+// (issue: sift pi 卡住不进交互 — the session started but never rendered).
+// Context injection is not needed: the Sift skill already teaches the agent
+// to gather state itself via read-only commands (sift ps/timeline/logs).
 func runPi(stdout, stderr io.Writer) int {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
@@ -33,28 +38,13 @@ func runPi(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "✓ Sift skill 就绪：%s\n", skillPath)
 
-	runner := pi.OSRunner{}
-	if _, err := runner.LookPath("pi"); err != nil {
+	if _, err := exec.LookPath("pi"); err != nil {
 		fmt.Fprintln(stderr, piInstallManual())
 		return 1
 	}
-
-	cwd, _ := os.Getwd()
-	snapshot := pi.ContextSnapshot(cwd, func() string { return psSnapshot() })
-	if err := pi.RunSession(runner, skillPath, strings.NewReader(snapshot)); err != nil {
+	if err := pi.RunSession(pi.OSRunner{}); err != nil {
 		fmt.Fprintln(stderr, "✗ pi 会话结束：", err)
 		return 1
 	}
 	return 0
-}
-
-// psSnapshot returns a compact `sift ps` view for the context snapshot. It
-// degrades to "" when the daemon is unreachable so the session still starts;
-// the snapshot is a prompt hint, never an authorization input.
-func psSnapshot() string {
-	out, err := exec.Command("sift", "ps").CombinedOutput()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }

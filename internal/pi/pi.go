@@ -9,7 +9,6 @@ package pi
 import (
 	"embed"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,12 +76,15 @@ func (PiMissingError) Error() string {
 	return "pi 未安装：请先安装 pi（curl -fsSL https://pi.dev/install.sh | sh，或 npm install -g --ignore-scripts @earendil-works/pi-coding-agent），然后重试 `sift pi`"
 }
 
-// RunSession launches an interactive pi session with the Sift skill available
-// and the current Sift state injected as context. It is intended for a real
-// terminal: it hands stdin/stdout/stderr to the child process. The pi
-// executable is resolved from PATH; a missing pi returns PiMissingError so
-// the caller can route to the #960 install guidance.
-func RunSession(r Runner, skillPath string, ctx io.Reader) error {
+// RunSession launches an interactive pi session with the Sift skill
+// available. It is intended for a real terminal: stdin/stdout/stderr are
+// handed to the child verbatim — a TUI needs the real tty for its terminal
+// detection, so no context may be piped through stdin (issue: sift pi 卡住
+// 不进交互). Context comes from the skill itself, which teaches the agent to
+// gather state via read-only commands. The pi executable is resolved from
+// PATH; a missing pi returns PiMissingError so the caller routes to the #960
+// install guidance.
+func RunSession(r Runner) error {
 	if _, err := r.LookPath("pi"); err != nil {
 		return PiMissingError{}
 	}
@@ -90,9 +92,6 @@ func RunSession(r Runner, skillPath string, ctx io.Reader) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if ctx != nil {
-		cmd.Stdin = io.MultiReader(ctx, os.Stdin)
-	}
 	return cmd.Run()
 }
 
