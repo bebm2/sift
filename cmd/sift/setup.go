@@ -1049,15 +1049,67 @@ func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
 	if doctorExitCode(result) == 0 {
 		return
 	}
-	fmt.Fprintln(out, "修复指引（逐条处理，warning 不应忽略，error 必须先修复）：")
 	checks, _ := result["checks"].([]any)
+	var errors, warnings, known []string
 	for _, raw := range checks {
 		check, _ := raw.(map[string]any)
-		if level, _ := check["level"].(string); level == "ok" || level == "info" {
-			continue
-		}
+		level, _ := check["level"].(string)
 		id, _ := check["id"].(string)
-		fmt.Fprintf(out, "  - %s → docs/runbooks/troubleshooting.md §3 Doctor 报告\n", id)
+		switch {
+		case level == "error":
+			errors = append(errors, id)
+		case level == "warning" && knownV0Boundary(id):
+			known = append(known, id)
+		case level == "warning":
+			warnings = append(warnings, id)
+		}
+	}
+	if len(errors) > 0 {
+		fmt.Fprintln(out, "需要修复（error，使用前必须先处理）：")
+		for _, id := range errors {
+			fmt.Fprintf(out, "  - %s：%s\n", id, doctorActionableHint(id))
+		}
+	}
+	if len(warnings) > 0 {
+		fmt.Fprintln(out, "需要注意（warning，可暂缓但建议处理）：")
+		for _, id := range warnings {
+			fmt.Fprintf(out, "  - %s\n", id)
+		}
+	}
+	if len(known) > 0 {
+		fmt.Fprintln(out, "已知 V0 边界（warning，同 UID 安全设计边界，非故障，无需处理）：")
+		for _, id := range known {
+			fmt.Fprintf(out, "  - %s\n", id)
+		}
+	}
+}
+
+// knownV0Boundary reports whether a doctor check is a V0 same-UID security
+// boundary that is a designed limitation, not a fault. These surface as
+// warnings in doctor but are not actionable by the user (issue #961 收尾
+// 体验：warning 不应与 error 混列为必须修复）。
+func knownV0Boundary(id string) bool {
+	return strings.HasPrefix(id, "tm6:") ||
+		id == "operator-token-readable-by-agent" ||
+		strings.HasPrefix(id, "security-posture:") ||
+		strings.HasPrefix(id, "process-group:")
+}
+
+// doctorActionableHint returns a targeted repair hint for an error check,
+// instead of pointing every check at the same runbook section (issue #961 收
+// 尾体验：error 需给可执行建议）。
+func doctorActionableHint(id string) string {
+	switch {
+	case strings.HasPrefix(id, "agent-cli:"):
+		return "该 Coding Agent 无法从终端启动（PATH 或依赖缺失）；安装/登录该 Agent 后重试"
+	case strings.HasPrefix(id, "policy:"):
+		return "项目策略基线无法解析；检查仓库 .sift/policy.yaml 与 git 状态后重试"
+	case strings.HasPrefix(id, "hooks:"):
+		return "项目 hooks 无法建立；检查仓库 git config core.hooksPath 与权限"
+	case strings.HasPrefix(id, "outbox:"):
+		return "outbox 积压未清；启动 daemon 后会自动重试"
+	default:
+		return "见 docs/runbooks/troubleshooting.md §3 Doctor 报告"
 	}
 }
 
