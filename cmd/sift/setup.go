@@ -198,7 +198,7 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 				for i, d := range found {
 					fmt.Fprintf(stdout, "  %d. %s\n", i+1, formatDetectedAgent(d))
 				}
-				picked := prompt(in, stdout, "选择 Agent（序号逗号分隔，如 1,3；直接回车或 all=全选；0/none=跳过）", "")
+				picked := prompt(in, stdout, "选择 Agent（序号逗号分隔，如 1,3；直接回车或 all=全选；n/0/none=跳过）", "")
 				agentSpecs = selectAgents(picked, detectedAgentNames(found))
 			}
 		} else if agentSpecs != "" {
@@ -696,7 +696,12 @@ func selectAgents(picked string, found []string) string {
 	if picked == "" || picked == "all" {
 		return strings.Join(found, ",")
 	}
-	if picked == "0" || picked == "none" {
+	// Decline spellings must never fall through to the custom-spec path: a
+	// user answering "n"/"no" to the selection prompt (the same spelling the
+	// closeout steps use) would otherwise be registered as an agent literally
+	// named "n" (issue #992, reproduced live). "0"/"none" stay for parity
+	// with the prompt text.
+	if picked == "0" || picked == "none" || picked == "n" || picked == "no" {
 		return ""
 	}
 	tokens := strings.Split(picked, ",")
@@ -1214,7 +1219,10 @@ func labelListArgs(cli, projectKey string) []string {
 // name is rejected by glab label create.
 func labelCreateArgs(cli, label, projectKey string) []string {
 	if cli == "glab" {
-		args := []string{"label", "create", "-n", label, "-c", "5319e7"}
+		// The '#' prefix is required: GitLab's API rejects a bare hex color
+		// with 400 "must be a valid color code" (issue #987; verified live
+		// against gitlab.hexinfo.cn). gh keeps the bare hex form.
+		args := []string{"label", "create", "-n", label, "-c", "#5319e7"}
 		if projectKey != "" {
 			args = append(args, "-R", projectKey)
 		}
@@ -1241,6 +1249,16 @@ func triggerLabelListed(output, label string) bool {
 		line = strings.TrimSpace(line)
 		if line == label || strings.HasPrefix(line, label+" ") {
 			return true
+		}
+		// glab prints a tab-separated ID\tName\tDescription\tColor table, so
+		// the label is the second field (issue #987: without this, an existing
+		// label is never matched and the create attempt 409s "already exists",
+		// reproduced live against platform/hexark).
+		if strings.Contains(line, "\t") {
+			fields := strings.Split(line, "\t")
+			if len(fields) >= 2 && fields[1] == label {
+				return true
+			}
 		}
 	}
 	return false
