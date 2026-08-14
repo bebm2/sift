@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -99,10 +100,18 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 
 	// Probe gh and glab logins independently so each operators allowlist
 	// prefills from its own CLI (issue #929); offline skips the probes.
+	// Interactive init walks both CLIs through the three-state diagnosis —
+	// missing → offer install, installed-not-logged → offer the official auth
+	// login, logged → silent — with confirm-first installs (issue #960); all
+	// other paths keep the graded report only.
 	var logins forgeLogins
 	if !opt.offline {
-		logins = probeForgeLogins()
-		reportForgeLogins(stdout, logins)
+		if interactive && scope == setupAll {
+			logins = guideForgeLogins(in, stdout)
+		} else {
+			logins = probeForgeLogins()
+			reportForgeLogins(stdout, logins)
+		}
 	}
 
 	// Project binding. forge.kind is per-project and derived from the git
@@ -171,8 +180,16 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 		if agentSpecs == "" && interactive {
 			found := detectAgents()
 			if len(found) == 0 {
-				fmt.Fprintln(stdout, "⚠ 未在 PATH 中发现已收录的 coding agent（claude/codex/cursor/pi/gemini/aider/qwen/cody 等）；可输入可执行文件名，或直接回车跳过。")
-				agentSpecs = prompt(in, stdout, "选择 Agent（逗号分隔，直接回车跳过）", "")
+				// pi ranks first when nothing is detected (issue #960 §3): it is
+				// open source and needs no vendor account. Commercial agents are
+				// never installed by sift — they stay detected/registered only.
+				fmt.Fprintln(stdout, "⚠ 未在 PATH 中发现已收录的 coding agent（claude/codex/cursor/pi/gemini/aider/qwen/cody 等）")
+				if spec := guidePiBootstrap(in, stdout); spec != "" {
+					agentSpecs = spec
+				} else {
+					fmt.Fprintln(stdout, "  可输入可执行文件名，或直接回车跳过。")
+					agentSpecs = prompt(in, stdout, "选择 Agent（逗号分隔，直接回车跳过）", "")
+				}
 			} else {
 				fmt.Fprintf(stdout, "%s 检测到 Agent：\n", render.Status("ok"))
 				for i, d := range found {
@@ -228,13 +245,16 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 				}
 			}
 		} else if !opt.offline {
-			for _, entry := range []struct{ kind, label, login string }{
+			for _, entry := range []struct {
+				kind, label string
+				probe       forgeProbe
+			}{
 				{"github", "GitHub", logins.github},
 				{"gitlab", "GitLab", logins.gitlab},
 			} {
-				if entry.login != "" {
-					addOperator(doc, entry.kind, entry.login)
-					fmt.Fprintf(stdout, "✓ operator: %s\n", entry.login)
+				if entry.probe.login != "" {
+					addOperator(doc, entry.kind, entry.probe.login)
+					fmt.Fprintf(stdout, "✓ operator: %s\n", entry.probe.login)
 					continue
 				}
 				// A failed probe remains the only interactive question. For a
@@ -340,7 +360,11 @@ func prompt(in *bufio.Reader, out io.Writer, label, fallback string) string {
 	}
 	line, err := in.ReadString('\n')
 	if err != nil && len(line) == 0 {
-		return fallback
+		// EOF is not an answer: never substitute the default (issue #960 P1),
+		// otherwise `sift init </dev/null` would silently confirm an install
+		// or login whose fallback is y. Callers treat the empty result as
+		// skip/decline and continue the wizard.
+		return ""
 	}
 	if line = strings.TrimSpace(line); line == "" {
 		return fallback
@@ -394,16 +418,26 @@ func formatDetectedAgent(d detectedAgent) string {
 	return fmt.Sprintf("%s — %s · %s", name, d.char.Summary(), d.char.Notes)
 }
 
-func probeForgeLogin(kind string) string {
+// forgeProbe is the structured result of probing one forge CLI (issue #960):
+// installed reports whether the CLI is on PATH, login the parsed auth identity
+// (empty when not logged in or when auth status fails). The three states —
+// missing / installed-not-logged / logged — drive the init guidance.
+// forgeLoginFromStatus is only a prefill, never an authorization decision.
+type forgeProbe struct {
+	installed bool
+	login     string
+}
+
+func probeForgeLogin(kind string) forgeProbe {
 	cli := forgeCLI(kind)
-	if _, err := exec.LookPath(cli); err != nil {
-		return ""
+	if !setupCmd.lookup(cli) {
+		return forgeProbe{}
 	}
-	out, err := exec.Command(cli, "auth", "status").CombinedOutput()
+	out, err := setupCmd.output(cli, "auth", "status")
 	if err != nil {
-		return ""
+		return forgeProbe{installed: true}
 	}
-	return forgeLoginFromStatus(string(out))
+	return forgeProbe{installed: true, login: forgeLoginFromStatus(out)}
 }
 
 // forgeLoginFromStatus extracts gh's "account <login>" and glab's
@@ -423,6 +457,112 @@ func forgeCLI(kind string) string {
 	}
 	return "gh"
 }
+
+// setupCmd abstracts the exec calls the wizard makes so tests inject fakes
+// (issue #960): CI never really installs packages or runs auth flows. The
+// production implementation attaches installs and the official auth login to
+// the user's stdio — Sift passes through, never wraps or buffers them.
+var setupCmd setupCommand = realCommand{}
+
+// setupCommand is the exec surface of the setup wizard: PATH lookup and
+// captured-output probes, plus stdio passthrough runs for the official auth
+// login and package-manager installs.
+type setupCommand interface {
+	lookup(name string) bool
+	output(name string, args ...string) (string, error)
+	run(name string, args ...string) error
+}
+
+// realCommand executes through os/exec; installs and auth login attach to
+// os.Stdin/os.Stdout/os.Stderr per the passthrough requirement (issue #960 §1).
+type realCommand struct{}
+
+func (realCommand) lookup(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func (realCommand) output(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	return string(out), err
+}
+
+func (realCommand) run(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+// guidePiBootstrap offers to install the pi coding agent when interactive init
+// finds no known agent on PATH (issue #960 §3). pi ranks first because it is
+// open source, multi-model and needs no vendor account; commercial agents are
+// never installed by sift. Returns the agent spec to register ("pi"), or ""
+// when the user declines or the install cannot verify — the caller then falls
+// back to the plain agent prompt. Every failure degrades to printed guidance.
+func guidePiBootstrap(in *bufio.Reader, out io.Writer) string {
+	if !askYes(in, out, "推荐安装 pi（开源，多模型，支持订阅/API Key）") {
+		fmt.Fprintln(out, piInstallManual())
+		return ""
+	}
+	if !setupCmd.lookup("npm") {
+		fmt.Fprintf(out, "%s 未检测到 npm，请用官方脚本安装 pi：\n", render.Status("warning"))
+		fmt.Fprintln(out, piInstallManual())
+		return ""
+	}
+	if err := setupCmd.run("npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"); err != nil {
+		fmt.Fprintf(out, "%s npm 安装 pi 失败：%v\n", render.Status("warning"), err)
+		fmt.Fprintln(out, piInstallManual())
+		return ""
+	}
+	if _, err := setupCmd.output("pi", "--version"); err != nil {
+		fmt.Fprintf(out, "%s 安装后未能验证 `pi --version`；请手动安装并确认可运行。\n", render.Status("warning"))
+		fmt.Fprintln(out, piInstallManual())
+		return ""
+	}
+	if !piAuthLikely() {
+		fmt.Fprintln(out, piLoginGuidance())
+	}
+	return "pi"
+}
+
+// piInstallManual is the non-blocking degradation text when pi auto-install is
+// declined or impossible. The script URL is the single source; docs link it
+// instead of copying the command (issue #960 引用不复制).
+func piInstallManual() string {
+	return "  手动安装 pi：\n" +
+		"    curl -fsSL https://pi.dev/install.sh | sh\n" +
+		"    或 npm install -g --ignore-scripts @earendil-works/pi-coding-agent\n" +
+		"    装完确认 `pi --version` 可运行。"
+}
+
+// piLoginGuidance prints the two weak-signal login paths after a successful
+// install (issue #960 §3.4). Strong verification stays with sift doctor; init
+// never spends model calls to verify login, and v1 does not launch the pi TUI.
+func piLoginGuidance() string {
+	return "  登录 pi（任选一条路径；v1 不自动拉起 pi 界面）：\n" +
+		"    - 订阅：运行 `pi` 后在界面输入 /login，选择 provider\n" +
+		"    - API Key：export ANTHROPIC_API_KEY=...（或 OPENAI_API_KEY 等）后运行 `pi`\n" +
+		"  强验证请用 `sift doctor`。"
+}
+
+// piAuthLikely returns a weak signal that pi is already configured with a
+// provider: the agent auth file exists or a common API key env var is set.
+// It is deliberately not a strong check — sift doctor owns verification and
+// init does not burn model calls here (issue #960 §3.5).
+func piAuthLikely() bool {
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".pi", "agent", "auth.json")); err == nil {
+			return true
+		}
+	}
+	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"} {
+		if os.Getenv(k) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func detectedRepo() string {
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
@@ -526,10 +666,10 @@ func selectAgents(picked string, found []string) string {
 	return strings.Join(selected, ",")
 }
 
-// forgeLogins holds the independent gh/glab login prefills (issue #929).
+// forgeLogins holds the independent gh/glab probe results (issue #929, #960).
 type forgeLogins struct {
-	github string
-	gitlab string
+	github forgeProbe
+	gitlab forgeProbe
 }
 
 // probeForgeLogins probes gh and glab independently: github operators prefill
@@ -541,18 +681,145 @@ func probeForgeLogins() forgeLogins {
 	}
 }
 
+// reportForgeLogins prints the graded three-state report (issue #960): the
+// user can tell “not installed” apart from “installed but not logged in” and
+// knows which CLI needs attention. Interactive init replaces this report with
+// the actionable guidance (guideForgeLogins); other scopes keep it as a hint.
 func reportForgeLogins(stdout io.Writer, logins forgeLogins) {
-	entries := []struct{ kind, cli, label, login string }{
+	entries := []struct {
+		kind, cli, label string
+		probe            forgeProbe
+	}{
 		{"github", "gh", "GitHub", logins.github},
 		{"gitlab", "glab", "GitLab", logins.gitlab},
 	}
 	for _, e := range entries {
-		if e.login == "" {
-			fmt.Fprintf(stdout, "%s 未检测到 %s 登录；请先运行 %s auth login。\n", render.Status("warning"), e.label, e.cli)
-		} else {
-			fmt.Fprintf(stdout, "%s 已检测到 %s 登录：%s\n", render.Status("ok"), e.label, e.login)
+		switch {
+		case !e.probe.installed:
+			fmt.Fprintf(stdout, "%s 未检测到 %s CLI（%s）\n", render.Status("warning"), e.label, e.cli)
+		case e.probe.login == "":
+			fmt.Fprintf(stdout, "%s 检测到 %s 未登录；请运行 %s auth login。\n", render.Status("warning"), e.cli, e.cli)
+		default:
+			fmt.Fprintf(stdout, "%s 已检测到 %s 登录：%s\n", render.Status("ok"), e.label, e.probe.login)
 		}
 	}
+}
+
+// guideForgeLogins walks gh and glab through the interactive three-state
+// diagnosis (issue #960 §1): missing → offer install, installed-not-logged →
+// offer the official auth login, logged → silent. Every step is confirm-first
+// and degrades on failure so the wizard always continues. Returns the
+// best-known probes for the operator recording below.
+func guideForgeLogins(in *bufio.Reader, out io.Writer) forgeLogins {
+	return forgeLogins{
+		github: guideForgeLogin(in, out, "github"),
+		gitlab: guideForgeLogin(in, out, "gitlab"),
+	}
+}
+
+// guideForgeLogin runs the three-state guidance for one forge CLI. Install and
+// login failures degrade to manual instructions instead of aborting: project
+// binding, agent probing and operator recording below still run (issue #960
+// §2 红线). Sift never takes over the CLI's credential lifecycle — auth login
+// is the official command passed through with stdio attached.
+func guideForgeLogin(in *bufio.Reader, out io.Writer, kind string) forgeProbe {
+	cli := forgeCLI(kind)
+	label := forgeLabel(kind)
+	probe := probeForgeLogin(kind)
+	if !probe.installed {
+		fmt.Fprintf(out, "%s 未检测到 %s CLI（%s）\n", render.Status("warning"), label, cli)
+		if !askYes(in, out, "是否现在安装 "+cli) {
+			return probe
+		}
+		if err := installForgeCLI(kind, out); err != nil {
+			fmt.Fprintf(out, "%s 自动安装 %s 失败：%v\n  官方安装指引（含各平台安装命令）：%s\n", render.Status("warning"), cli, err, forgeInstallURL(kind))
+			return probe
+		}
+		probe = probeForgeLogin(kind)
+		if !probe.installed {
+			fmt.Fprintf(out, "%s 安装后仍未在 PATH 中找到 %s，请按官方指引手动安装：%s\n", render.Status("warning"), cli, forgeInstallURL(kind))
+			return probe
+		}
+	}
+	if probe.login == "" {
+		fmt.Fprintf(out, "%s 检测到 %s 未登录\n", render.Status("warning"), cli)
+		if !askYes(in, out, "是否现在运行官方 "+cli+" auth login") {
+			return probe
+		}
+		if err := setupCmd.run(cli, "auth", "login"); err != nil {
+			fmt.Fprintf(out, "%s %s auth login 未完成：%v；登录态仍归官方 CLI，可稍后手动运行 %s auth login。\n", render.Status("warning"), cli, err, cli)
+			return probe
+		}
+		probe = probeForgeLogin(kind)
+		if probe.login == "" {
+			fmt.Fprintf(out, "%s 仍未能确认 %s 登录；可稍后手动运行 %s auth login 后重跑 sift init。\n", render.Status("warning"), cli, cli)
+			return probe
+		}
+	}
+	fmt.Fprintf(out, "%s 已检测到 %s 登录：%s\n", render.Status("ok"), label, probe.login)
+	return probe
+}
+
+// installForgeCLI installs the forge CLI through the degradation matrix
+// (issue #960 §2): brew on macOS, apt/dnf/yum on Linux. The caller already
+// confirmed; every failure returns an error so the caller degrades to the
+// official manual path — installs never block the wizard.
+func installForgeCLI(kind string, out io.Writer) error {
+	cli := forgeCLI(kind)
+	switch runtime.GOOS {
+	case "darwin":
+		if !setupCmd.lookup("brew") {
+			return errors.New("未检测到 Homebrew")
+		}
+		return setupCmd.run("brew", "install", cli)
+	case "linux":
+		if setupCmd.lookup("apt-get") {
+			// Debian/Ubuntu: gh is not in the default source; point at the
+			// official repo guidance, then run the install for the user.
+			fmt.Fprintf(out, "  %s Debian/Ubuntu：%s 不在默认源，先按官方指引添加仓库：%s\n", render.Status("info"), cli, forgeInstallURL(kind))
+			return setupCmd.run("sudo", "apt-get", "install", "-y", cli)
+		}
+		for _, pm := range []string{"dnf", "yum"} {
+			if setupCmd.lookup(pm) {
+				return setupCmd.run("sudo", pm, "install", "-y", cli)
+			}
+		}
+		return errors.New("未检测到 apt/dnf/yum 包管理器")
+	}
+	return fmt.Errorf("暂不支持在 %s 平台自动安装", runtime.GOOS)
+}
+
+// forgeLabel returns the display name for a forge kind.
+func forgeLabel(kind string) string {
+	if kind == "gitlab" {
+		return "GitLab"
+	}
+	return "GitHub"
+}
+
+// forgeInstallURL returns the official installation page of one forge CLI.
+// The full install command matrix lives once in docs/guides/installation.md;
+// the wizard prints only this pointer (issue #960 引用不复制).
+func forgeInstallURL(kind string) string {
+	if kind == "gitlab" {
+		return "https://gitlab.com/gitlab-org/cli"
+	}
+	return "https://cli.github.com/"
+}
+
+// askYes renders a confirm question with default yes. Every install/login
+// step of the wizard is confirm-first, never silent (issue #960 §2 红线);
+// Enter or any y/yes/是 confirms, everything else declines. stdin EOF is a
+// decline, never the default: `sift init </dev/null` must not install or
+// login without an explicit answer (issue #960 P1). prompt returns "" only
+// on EOF — an explicit empty line (Enter) still resolves to the "y" default.
+func askYes(in *bufio.Reader, out io.Writer, question string) bool {
+	ans := strings.ToLower(strings.TrimSpace(prompt(in, out, question+"（y/n）", "y")))
+	switch ans {
+	case "y", "yes", "是":
+		return true
+	}
+	return false
 }
 
 // parseOperatorSpec splits an --operator value into per-forge names. Plain

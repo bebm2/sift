@@ -27,6 +27,8 @@ Sift 同时支持 GitHub 和 GitLab。它不是另一个看板，也不托管你
 - 一个可从终端启动的 Coding Agent。向导可识别 Claude Code、Codex CLI、Cursor CLI、pi、Gemini CLI、Aider、Qwen Code、Cody 等，也可登记其他可执行文件；**只有 Cursor GUI、不含 `cursor` CLI 时不能作为后台 Agent 启动**；
 - 该 Agent 所需的账号、API Key 或订阅。Sift 不附送模型额度，运行会消耗你自己的额度；开始前请确认供应商计费与 [`brain.daily_token_limit`](docs/specs/config.md#34-brain)。
 
+缺失的依赖（gh/glab/Agent）`sift init` 会自动检测并引导安装/登录，命令矩阵见[安装指南](docs/guides/installation.md#依赖缺失的引导)。
+
 先验证认证和 Agent：
 
 ```bash
