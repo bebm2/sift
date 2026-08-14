@@ -360,7 +360,11 @@ func prompt(in *bufio.Reader, out io.Writer, label, fallback string) string {
 	}
 	line, err := in.ReadString('\n')
 	if err != nil && len(line) == 0 {
-		return fallback
+		// EOF is not an answer: never substitute the default (issue #960 P1),
+		// otherwise `sift init </dev/null` would silently confirm an install
+		// or login whose fallback is y. Callers treat the empty result as
+		// skip/decline and continue the wizard.
+		return ""
 	}
 	if line = strings.TrimSpace(line); line == "" {
 		return fallback
@@ -805,11 +809,14 @@ func forgeInstallURL(kind string) string {
 
 // askYes renders a confirm question with default yes. Every install/login
 // step of the wizard is confirm-first, never silent (issue #960 §2 红线);
-// Enter or any y/yes/是 confirms, everything else declines.
+// Enter or any y/yes/是 confirms, everything else declines. stdin EOF is a
+// decline, never the default: `sift init </dev/null` must not install or
+// login without an explicit answer (issue #960 P1). prompt returns "" only
+// on EOF — an explicit empty line (Enter) still resolves to the "y" default.
 func askYes(in *bufio.Reader, out io.Writer, question string) bool {
 	ans := strings.ToLower(strings.TrimSpace(prompt(in, out, question+"（y/n）", "y")))
 	switch ans {
-	case "", "y", "yes", "是":
+	case "y", "yes", "是":
 		return true
 	}
 	return false

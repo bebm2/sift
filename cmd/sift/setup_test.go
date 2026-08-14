@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1188,7 +1189,8 @@ func TestReportForgeLoginsGraded(t *testing.T) {
 
 // TestAskYes pins the confirm-first semantics: Enter and y/yes/是 confirm,
 // anything else (n/no, unexpected text) declines — installs are never silent
-// (issue #960 §2 红线).
+// (issue #960 §2 红线). stdin EOF is a decline too, never the default y
+// (issue #960 P1): `sift init </dev/null` must not confirm anything.
 func TestAskYes(t *testing.T) {
 	for _, tt := range []struct {
 		answer, name string
@@ -1201,6 +1203,7 @@ func TestAskYes(t *testing.T) {
 		{"n\n", "n", false},
 		{"no\n", "no", false},
 		{"garbage\n", "unexpected", false},
+		{"", "eof", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
@@ -1209,6 +1212,100 @@ func TestAskYes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInitEOFDeclinesConfirmations pins the issue #960 P1 regression at the
+// wizard level with the fake runner: stdin EOF must never confirm an
+// install/login default, so `sift init </dev/null` degrades to printed
+// guidance with zero executed commands while the config flow still completes;
+// an explicit newline line, by contrast, still confirms the default yes.
+func TestInitEOFDeclinesConfirmations(t *testing.T) {
+	t.Run("empty stdin skips installs and logins", func(t *testing.T) {
+		home := initTestRepo(t)
+		gitOnlyPATH(t)
+		// gh missing (install offer) and glab installed-but-not-logged
+		// (login offer): every confirm answer is stdin EOF.
+		fake := &fakeCommand{found: map[string]bool{"glab": true}}
+		fake.outputFn = func(name string, args ...string) (string, error) {
+			if name == "glab" {
+				return "", errors.New("glab not logged in")
+			}
+			return "", errors.New("fake command: not found")
+		}
+		replaceSetupCmd(t, fake)
+
+		var out bytes.Buffer
+		if code := runWithInput([]string{"sift", "init"}, strings.NewReader(""), &out, io.Discard); code != 0 {
+			t.Fatalf("init = %d: %s", code, out.String())
+		}
+		if len(fake.runs) != 0 {
+			t.Fatalf("EOF must decline every install/login: fake runs = %#v", fake.runs)
+		}
+		for _, want := range []string{
+			"未检测到 GitHub CLI（gh）", "是否现在安装 gh",
+			"检测到 glab 未登录", "是否现在运行官方 glab auth login",
+			"手动安装 pi",
+		} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("declined guidance missing %q:\n%s", want, out.String())
+			}
+		}
+		snap, err := config.Load(home, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Config.Projects) != 1 || len(snap.Config.Agents) != 0 ||
+			len(snap.Config.Operators.GitHub)+len(snap.Config.Operators.GitLab) != 0 {
+			t.Fatalf("EOF must keep the flow going with project binding only: %#v", snap.Config)
+		}
+	})
+
+	t.Run("explicit newline still confirms default yes", func(t *testing.T) {
+		home := initTestRepo(t)
+		gitOnlyPATH(t)
+		// Platform package manager plus npm visible so Enter-confirmed
+		// installs actually run and are recorded by the fake runner.
+		found := map[string]bool{"npm": true}
+		if runtime.GOOS == "linux" {
+			found["apt-get"] = true
+		} else {
+			found["brew"] = true
+		}
+		fake := &fakeCommand{found: found}
+		fake.outputFn = func(name string, args ...string) (string, error) {
+			if name == "pi" {
+				return "pi 0.9.9\n", nil
+			}
+			return "", errors.New("fake command: not found")
+		}
+		replaceSetupCmd(t, fake)
+
+		var out bytes.Buffer
+		// Answers: gh install=Enter (yes) ; glab install=n ; pi=Enter (yes) ;
+		// operator=Enter. Explicit newlines, never EOF: defaults confirm.
+		if code := runWithInput([]string{"sift", "init"}, strings.NewReader("\nn\n\n\n"), &out, io.Discard); code != 0 {
+			t.Fatalf("init = %d: %s", code, out.String())
+		}
+		var wantGh []string
+		if runtime.GOOS == "linux" {
+			wantGh = []string{"sudo", "apt-get", "install", "-y", "gh"}
+		} else {
+			wantGh = []string{"brew", "install", "gh"}
+		}
+		wantPi := []string{"npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"}
+		if len(fake.runs) != 2 ||
+			strings.Join(fake.runs[0], " ") != strings.Join(wantGh, " ") ||
+			strings.Join(fake.runs[1], " ") != strings.Join(wantPi, " ") {
+			t.Fatalf("Enter-confirmed installs = %#v, want %v then %v", fake.runs, wantGh, wantPi)
+		}
+		snap, err := config.Load(home, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Config.Agents) != 1 || snap.Config.Agents[0].ID != "pi" {
+			t.Fatalf("agents = %#v, want pi registered", snap.Config.Agents)
+		}
+	})
 }
 
 // TestPiAuthLikely pins the weak login signal: the auth file or a common API
