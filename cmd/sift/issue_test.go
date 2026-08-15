@@ -234,4 +234,7 @@ func TestIssueHelpRegistered(t *testing.T) {
 	if !strings.Contains(out.String(), "sift issue [问题]") {
 		t.Fatalf("help lacks usage:\n%s", out.String())
 	}
+	if !strings.Contains(out.String(), "sift issue new") {
+		t.Fatalf("help lacks new subcommand:\n%s", out.String())
+	}
 }

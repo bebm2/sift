@@ -79,7 +79,7 @@ sift timeline
 sift logs <run-id>
 ```
 
-不烧 token 地看 Issue 池：`sift issue` 直接列出各绑定项目的 open issue；带自然语言问题时（如 `sift issue "#42 的讨论核心分歧是什么？"`）会做一次只读取证后回答（v1 只读，无法触达任何写路径）。
+不烧 token 地看 Issue 池：`sift issue` 直接列出各绑定项目的 open issue；带自然语言问题时（如 `sift issue "#42 的讨论核心分歧是什么？"`）会做一次只读取证后回答（v1 只读，无法触达任何写路径）。想把想法变成 issue 但不想写长文：`sift issue new` 多轮讨论起草，人确认后登记（默认不打触发标签）。
 
 不确定下一步时可用会话式入口 `sift pi`（注入 Sift 操作 skill 的 pi 会话，agent 只读取证后回答）。
 

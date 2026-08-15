@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -118,6 +120,30 @@ func (f *Fake) GetIssue(_ context.Context, p ProjectRef, id string) (Issue, erro
 		}
 	}
 	return Issue{}, &ClassifiedError{Class: ErrSemanticConflict, Summary: "unknown issue " + id}
+}
+
+// CreateIssue scripts the issue-creation write for the CLI register gate
+// (issue #999). The fake allocates the next numeric id, timestamps the new
+// issue as the newest, and records it so subsequent listing/dedupe reads
+// observe it.
+func (f *Fake) CreateIssue(_ context.Context, p ProjectRef, title, body string, labels []string, author string) (Issue, error) {
+	if strings.TrimSpace(title) == "" {
+		return Issue{}, &ClassifiedError{Class: ErrContractViolation, Summary: "issue title is empty"}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := projectKey(p)
+	max := 0
+	for _, i := range f.issues[k] {
+		if n, err := strconv.Atoi(i.ID); err == nil && n > max {
+			max = n
+		}
+	}
+	id := strconv.Itoa(max + 1)
+	i := Issue{ID: id, Title: title, Body: body, Author: author, URL: "fake://issues/" + id, State: IssueOpen, Labels: sortDedupe(labels)}
+	f.issues[k] = append(f.issues[k], i)
+	f.issueTimes[k+"\x00"+i.ID] = time.Now()
+	return i, nil
 }
 func (f *Fake) ListIssueComments(_ context.Context, p ProjectRef, id string, since Cursor) ([]Comment, Cursor, error) {
 	return f.listComments(p, id, since)

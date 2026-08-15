@@ -100,3 +100,71 @@ func TestListOpenIssuesRejectsBadPageCap(t *testing.T) {
 		t.Fatalf("maxPages=0 accepted, want error")
 	}
 }
+
+func TestCreateIssueEncodesPerPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		kind     Kind
+		wantPath string
+		payload  string
+	}{
+		{"github", KindGitHub, "/repos/o/r/issues", `{"title":"T","body":"B","labels":["a","b"]}`},
+		{"gitlab", KindGitLab, "/projects/o%2Fr/issues", `{"title":"T","body":"B","labels":"a,b"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotMethod, gotStdin string
+			a := NewAdapter(tc.kind, "", func(_ context.Context, _ string, args []string, in []byte) ([]byte, []byte, error) {
+				gotPath, gotStdin = args[1], string(in)
+				for i, a := range args {
+					if a == "--method" && i+1 < len(args) {
+						gotMethod = args[i+1]
+					}
+				}
+				row := `{"number":9,"iid":9,"title":"T","body":"B","html_url":"https://x/9","web_url":"https://x/9","state":"open","updated_at":"2026-01-01T00:00:01Z","user":{"login":"me"},"author":{"username":"me"}}`
+				if tc.kind == KindGitLab {
+					row = strings.Replace(row, `"state":"open"`, `"state":"opened"`, 1)
+				}
+				return []byte(row), nil, nil
+			})
+			issue, err := a.CreateIssue(context.Background(), ProjectRef{Kind: tc.kind, Host: "h", ProjectKey: "o/r"}, "T", "B", []string{"a", "b"})
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if issue.ID != "9" || issue.URL == "" || issue.State != IssueOpen {
+				t.Fatalf("issue=%+v", issue)
+			}
+			if !strings.Contains(gotPath, tc.wantPath) {
+				t.Fatalf("path=%q, want substring %q", gotPath, tc.wantPath)
+			}
+			if gotMethod != "POST" {
+				t.Fatalf("method=%q, want POST", gotMethod)
+			}
+			if gotStdin != tc.payload {
+				t.Fatalf("stdin=%s, want %s", gotStdin, tc.payload)
+			}
+		})
+	}
+}
+
+func TestCreateIssueRejectsEmptyTitle(t *testing.T) {
+	a := NewGitHub("", nil)
+	if _, err := a.CreateIssue(context.Background(), ProjectRef{Kind: KindGitHub, ProjectKey: "o/r"}, "  ", "b", nil); err == nil {
+		t.Fatalf("empty title accepted")
+	}
+}
+
+func TestFakeCreateIssueAllocatesNextID(t *testing.T) {
+	f := NewFake()
+	p := ProjectRef{Kind: KindGitHub, Host: "h", ProjectKey: "o/r"}
+	f.AddIssue(p, Issue{ID: "3", Title: "old", Author: "a", URL: "u"})
+	created, err := f.CreateIssue(context.Background(), p, "新问题", "正文", []string{"x"}, "operator")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if created.ID != "4" || created.State != IssueOpen || created.Author != "operator" {
+		t.Fatalf("created=%+v", created)
+	}
+	if _, err := f.CreateIssue(context.Background(), p, " ", "b", nil, "o"); err == nil {
+		t.Fatalf("fake accepted empty title")
+	}
+}
