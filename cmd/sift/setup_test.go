@@ -1214,7 +1214,7 @@ func TestInitNonInteractivePathsSkipGuidance(t *testing.T) {
 		if code := runWithInput([]string{"sift", "init", "--offline"}, strings.NewReader(""), &out, io.Discard); code != 0 {
 			t.Fatalf("init offline = %d: %s", code, out.String())
 		}
-		for _, forbidden := range []string{"是否现在安装", "是否现在运行官方", "推荐安装 pi", "未检测到 GitHub CLI", "已检测到 GitHub 登录", "收尾三合一", "全部就绪"} {
+		for _, forbidden := range []string{"是否现在安装", "是否现在运行官方", "推荐安装 pi", "未检测到 GitHub CLI", "已检测到 GitHub 登录", "收尾三步", "全部就绪"} {
 			if strings.Contains(out.String(), forbidden) {
 				t.Fatalf("offline init must skip all guidance/report, got %q in %q", forbidden, out.String())
 			}
@@ -1469,13 +1469,15 @@ func TestSetupCloseoutDoctorRendersPerCheckGuidance(t *testing.T) {
 	})
 	var out bytes.Buffer
 	setupCloseoutDoctor(bufio.NewReader(strings.NewReader("\n")), &out, home)
-	for _, want := range []string{"Sift 诊断", "结论：有错误（退出码 2）", "需要修复（error", "check-error", "需要注意（warning", "check-warning"} {
+	// The wizard prints only the aggregated conclusion (full listing belongs to
+	// `sift doctor`); the error must appear as a numbered actionable problem.
+	for _, want := range []string{"✗ 自检发现 1 个需要处理的问题", "check-error"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("doctor guidance missing %q:\n%s", want, out.String())
 		}
 	}
-	if strings.Contains(out.String(), "修复指引") {
-		t.Fatalf("old flat guidance header must not appear: %q", out.String())
+	if strings.Contains(out.String(), "Sift 诊断") {
+		t.Fatalf("full doctor dump must not appear in the wizard: %q", out.String())
 	}
 }
 
@@ -1500,26 +1502,17 @@ func TestSetupCloseoutDoctorGroupsKnownV0Boundaries(t *testing.T) {
 	})
 	var out bytes.Buffer
 	setupCloseoutDoctor(bufio.NewReader(strings.NewReader("\n")), &out, home)
-	// Known boundaries collapse to one count line in the guidance section
-	// (the full renderDoctor listing above still shows every id — that part is
-	// the diagnostic, not the guidance).
-	if !strings.Contains(out.String(), "另有 4 项同 UID 安全设计边界的已知提示") {
+	// Known boundaries collapse to one count line; no full dump, no per-id list.
+	if !strings.Contains(out.String(), "另有 4 项同 UID 安全设计边界提示（设计内行为，无需处理）") {
 		t.Fatalf("V0 boundary count line missing:\n%s", out.String())
 	}
-	// The guidance section must not list the boundary ids under a repair or
-	// attention heading; after the conclusion line only the count line follows.
-	conclusion := strings.Index(out.String(), "结论：")
-	if conclusion < 0 {
-		t.Fatal("conclusion line missing")
-	}
-	guidance := out.String()[conclusion:]
-	for _, banned := range []string{"tm6:", "operator-token", "security-posture:", "process-group:"} {
-		if strings.Contains(guidance, banned) {
-			t.Fatalf("guidance section must not list known boundary %q: %q", banned, guidance)
+	for _, banned := range []string{"tm6:sift-home", "operator-token-readable-by-agent", "security-posture:darwin", "process-group:codex"} {
+		if strings.Contains(out.String(), banned) {
+			t.Fatalf("boundary id %q must be collapsed, not listed: %q", banned, out.String())
 		}
 	}
-	if strings.Contains(guidance, "需要修复") {
-		t.Fatalf("V0 boundaries must not be listed as repairable errors: %q", guidance)
+	if strings.Contains(out.String(), "需要处理") {
+		t.Fatalf("V0 boundaries must not be listed as repairable errors: %q", out.String())
 	}
 }
 
@@ -1863,9 +1856,8 @@ func TestInteractiveInitCloseoutThreeSteps(t *testing.T) {
 		t.Fatalf("init = %d: %s", code, out.String())
 	}
 	for _, want := range []string{
-		"收尾三合一",
-		"运行离线自检（sift doctor --offline）",
-		"Sift 诊断",
+		"收尾三步",
+		"运行环境自检",
 		"安装用户级服务并启动（sift service install）",
 		"fake service install",
 		"fake service status",
