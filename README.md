@@ -79,6 +79,8 @@ sift timeline
 sift logs <run-id>
 ```
 
+不烧 token 地看 Issue 池：`sift issue` 直接列出各绑定项目的 open issue；带自然语言问题时（如 `sift issue "#42 的讨论核心分歧是什么？"`）会做一次只读取证后回答（v1 只读，无法触达任何写路径）。
+
 不确定下一步时可用会话式入口 `sift pi`（注入 Sift 操作 skill 的 pi 会话，agent 只读取证后回答）。
 
 需要人决定时，请复制 Sift 发布到 Issue/PR/MR 评论中的**完整命令**；批准命令包含本次 Run ID 和一次性 nonce，不能简写成 `/sift approve`。
