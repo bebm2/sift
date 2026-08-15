@@ -1,7 +1,7 @@
 ---
 status: active
 created: 2026-08-04
-last_updated: 2026-08-14
+last_updated: 2026-08-15
 summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 ---
 
@@ -20,7 +20,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 | M5 Attention/Command/Report/Brain/指标 | ✅ 完成 | PASS WITH NOTES | Interrupt 全功能、Command、Report、Channel、九项指标 |
 | M6 tmux + 完整故障矩阵 | ✅ 完成 | PASS WITH NOTES | tmux 第二后端、PTY、V2/V4 双后端全矩阵、阶段门归档 |
 | **M7 真实 Agent + PoC 取证** | 🔬 **PoC 已验证** | — | **Pi Brain+Agent 双 forge 端到端跑通** |
-| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 合入 main(#907–#910)；**Release v0.1.0 已发布**（四组合归档 + checksums，`curl\|bash` 一键安装实测通过 #913/#914）。A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后 |
+| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 合入 main(#907–#910)；**Release 已迭代至 v0.5.11**（初跑旅程快速迭代线，`curl\|bash` 一键安装实测通过 #913/#914）。A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后 |
 
 ## M7 PoC 验证成果(本轮)
 
@@ -89,10 +89,26 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 
 另：补存 #913/#915 审核存档（早期 review 分支未合入 main 的遗漏，PR #975）；清理 7 个残留 worktree 与远端分支。
 
+## 真实首跑验证轮（2026-08-14/15，v0.5.8–v0.5.11）
+
+收尾三合一（#961）合入后，用 v0.5.9 二进制在真实 GitLab（gitlab.hexinfo.cn / platform/hexark）跑全流程，暴露的缺陷逐个修复并当日发版（v0.5.9→v0.5.11）：
+
+| # | 内容 | 状态 | PR/Release |
+|---|---|---|---|
+| #986 | 收尾幂等重跑 + glab label create 参数式语法（`-n/-c/-R`） | ✅ 合并 | #988（v0.5.9） |
+| #967 | launchctl stub 退出码对齐 + unloaded 分类收敛 | ✅ 合并 | #984（v0.5.9） |
+| — | 收尾 doctor 自检按严重度分组输出（#961 体验补强） | ✅ 合并 | #989（v0.5.9）；getting-started 同步 #990 |
+| #987 | glab label 颜色 `#` 前缀 + 查重 tab 表格匹配（真机复现 409/400） | ✅ 合并 | #991（v0.5.10），真机闭环验证 |
+| #992 | Agent 选择拒绝词 `n/no/N` 不再注册假 agent（真机复现 config 污染） | ✅ 合并 | #991（v0.5.10）；P2（管道提示错位）转 #927 |
+| — | label 查重前置不扰民（已存在静默跳过、两次确认收敛为一次）+ doctor 指引人话化 + `sift pi` TTY 修复 | ✅ 合并 | #994（v0.5.11） |
+| #993 | Agent launch env（HOME/PATH）在 init 资格测试时冻结，不经 shell wrapper | ✅ 合并 | #995（v0.5.11）+ schema 再生成 |
+
 ## 遗留 / 延期
 
 - **M7 完整门禁**:≥3 并行 Run + P50<60s 测量、手机端审批证据、凭证存储 spike
-- **#883 性能 profile**:M7 真实负载绑定
+- **#883 性能 profile**:M7 真实负载绑定（应随 M7 并行 Run 片一并做，不再单独排期）
+- **#963 `sift issue` 语义入口 v1（只读）**:依赖 #960/#961/#962 均已闭合，已解锁待启动
+- **#927 backlog**:新增 #992-P2（管道/连续输入时收尾提示错位，flush 时序评估）；tmux crash-windows flake 已加超时缓解，彻底稳定化仍待
 - **wrapper handoff 精调**:`waiting_human` 上的 `kill`/`retry`/`approve` 操作验证
 - **M8 A10 干净机验收**:干净 macOS + systemd Linux 从发布归档安装跑通 + 四组合冒烟证据(人工门禁,待 M7)
 - **M8 live 跨版本升级**:不丢 DB 状态 + 较新 schema 拒旧 daemon(待 M7 真实数据;契约级回归已随 #903)
