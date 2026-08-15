@@ -1128,9 +1128,13 @@ func isSocket(path string) bool {
 // The trigger label name comes from the just-written config (labels.trigger,
 // default sift:run, config.md §3.14).
 func setupCloseout(home config.Home, kind, projectKey string, in *bufio.Reader, stdout, stderr io.Writer) {
-	fmt.Fprintln(stdout, "\n收尾三合一（直接回车默认执行，可输入 n 跳过）：")
-	setupCloseoutDoctor(in, stdout, home)
+	fmt.Fprintln(stdout, "\n收尾三步（直接回车默认执行，可输入 n 跳过）：")
+	// Service runs first: with the daemon up, the doctor step then reports the
+	// steady state instead of transient reds (outbox backlog, sqlite missing,
+	// version:daemon unreadable) that are merely "daemon not started yet"
+	// artifacts (issue feedback: 暂态红被当成待修复项)。
 	setupCloseoutService(in, stdout, stderr, home)
+	setupCloseoutDoctor(in, stdout, home)
 	label := "sift:run"
 	if snap, err := config.Load(home, time.Now()); err == nil {
 		label = snap.Config.Labels.Trigger
@@ -1144,15 +1148,11 @@ func setupCloseout(home config.Home, kind, projectKey string, in *bufio.Reader, 
 // runbook; it never blocks the following steps. The runbook owns the repair
 // steps (引用不复制), so this only points per check.
 func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
-	if !askYes(in, out, "运行离线自检（sift doctor --offline）") {
+	if !askYes(in, out, "运行环境自检") {
 		return
 	}
 	value := setupDoctorRun(home)
-	renderDoctor(out, value)
 	result := normalizeDoctorResult(value)
-	if doctorExitCode(result) == 0 {
-		return
-	}
 	checks, _ := result["checks"].([]any)
 	var errors, warnings, known []string
 	for _, raw := range checks {
@@ -1168,25 +1168,113 @@ func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
 			warnings = append(warnings, id)
 		}
 	}
+	// The wizard prints only the aggregated conclusion; the full per-check
+	// listing is `sift doctor`'s job. A second full dump here was noise users
+	// could not act on (issue feedback: 用户看了也不清楚).
+	switch {
+	case len(errors) > 0:
+		fmt.Fprintf(out, "  ✗ 自检发现 %d 个需要处理的问题：\n", len(errors))
+	case len(warnings) > 0:
+		fmt.Fprintf(out, "  ⚠ 自检通过，%d 类事项可暂缓（不影响使用）：\n", len(warnings))
+	default:
+		fmt.Fprintf(out, "  ✓ 自检通过（%d 项已知设计边界不计入）\n", len(known))
+	}
 	if len(errors) > 0 {
-		fmt.Fprintln(out, "需要修复（error，使用前必须先处理）：")
-		for _, id := range errors {
-			fmt.Fprintf(out, "  - %s：%s\n", id, doctorActionableHint(id))
+		for i, id := range errors {
+			fmt.Fprintf(out, "  %d. %s\n     %s\n", i+1, doctorProblemTitle(id), doctorAction(id))
 		}
 	}
-	if len(warnings) > 0 {
-		fmt.Fprintln(out, "需要注意（warning，可暂缓但建议处理）：")
-		for _, id := range warnings {
-			fmt.Fprintf(out, "  - %s：%s\n", id, doctorWarningHint(id))
-		}
+	// Aggregate deferrable warnings by kind across projects: three
+	// hooks:<project> rows collapse into one line naming the projects.
+	agg := aggregateWarningKinds(warnings)
+	for _, g := range agg {
+		fmt.Fprintf(out, "  - %s\n", g)
 	}
 	if len(known) > 0 {
-		// Known V0 boundaries need no action from the user; listing fifteen
-		// tm6:/process-group ids is noise, not guidance. A one-line count keeps
-		// the wizard readable while `sift doctor` still shows every check id.
-		fmt.Fprintf(out, "另有 %d 项同 UID 安全设计边界的已知提示（V0 设计内，非故障，无需处理；逐项见 sift doctor）\n", len(known))
+		fmt.Fprintf(out, "  另有 %d 项同 UID 安全设计边界提示（设计内行为，无需处理）\n", len(known))
+	}
+	if len(errors) > 0 || len(warnings) > 0 {
+		fmt.Fprintln(out, "  （逐项诊断可随时运行 sift doctor）")
 	}
 	printFrozenLaunchEnvNote(out, home)
+}
+
+// doctorProblemTitle states the user-visible problem, not the check id.
+func doctorProblemTitle(id string) string {
+	switch {
+	case strings.HasPrefix(id, "agent-cli:"):
+		return "Coding Agent 无法启动（" + strings.TrimPrefix(id, "agent-cli:") + "）"
+	case strings.HasPrefix(id, "policy:"):
+		return "项目策略基线无法读取（" + strings.TrimPrefix(id, "policy:") + "）"
+	case strings.HasPrefix(id, "hooks:"):
+		return "项目 hooks 基线无法读取（" + strings.TrimPrefix(id, "hooks:") + "）"
+	case strings.HasPrefix(id, "outbox:"):
+		return "远端操作队列异常（" + id + "）"
+	case strings.HasPrefix(id, "sqlite"):
+		return "本地数据库无法打开"
+	case strings.HasPrefix(id, "version:"):
+		return "版本/协议握手失败（" + id + "）"
+	default:
+		return id
+	}
+}
+
+// doctorAction says what to do now, in one short line per problem.
+func doctorAction(id string) string {
+	switch {
+	case strings.HasPrefix(id, "agent-cli:"):
+		return "不影响其他 Agent；到对应 CLI 安装/登录后重跑 sift doctor 确认"
+	case strings.HasPrefix(id, "policy:"):
+		return "进入该项目仓库检查 .sift/policy.yaml；不影响其他项目使用"
+	case strings.HasPrefix(id, "hooks:"):
+		return "重跑 cd <项目> && sift init 或等 daemon 首轮同步后自动建立"
+	case strings.HasPrefix(id, "outbox:"):
+		return "确认 daemon 运行（sift service status）；队列会自动重试，无需手动清理"
+	case strings.HasPrefix(id, "sqlite"):
+		return "不要删除 sift.db；运行 sift doctor --json 查看详情并按 troubleshooting 排查"
+	default:
+		return "运行 sift doctor 查看详情；见 docs/runbooks/troubleshooting.md"
+	}
+}
+
+// aggregateWarningKinds groups deferrable warnings by prefix across projects
+// and renders one plain-language, self-healing note per kind.
+func aggregateWarningKinds(ids []string) []string {
+	var hooksProjects []string
+	other := 0
+	hookLike := func(id string) bool { return strings.HasPrefix(id, "hooks:") }
+	hooksStorage := false
+	for _, id := range ids {
+		switch {
+		case hookLike(id):
+			if id == "hooks:storage" {
+				hooksStorage = true
+			} else if p := strings.TrimPrefix(id, "hooks:"); p != "" {
+				hooksProjects = append(hooksProjects, p)
+			}
+		case strings.HasPrefix(id, "outbox:"):
+			other++
+		case strings.HasPrefix(id, "attempts:"):
+			other++
+		case strings.HasPrefix(id, "version:wrapper"):
+			other++
+		default:
+			other++
+		}
+	}
+	var lines []string
+	if len(hooksProjects) > 0 || hooksStorage {
+		msg := "hooks 基线未建立"
+		if len(hooksProjects) > 0 {
+			msg += "（" + strings.Join(hooksProjects, "、") + "）"
+		}
+		msg += "：仓库刚接入时正常，daemon 首轮同步后自动建立，无需操作"
+		lines = append(lines, msg)
+	}
+	if other > 0 {
+		lines = append(lines, "其他 "+strconv.Itoa(other)+" 项可暂缓提示：不影响使用；运行 sift doctor 可逐项查看")
+	}
+	return lines
 }
 
 // printFrozenLaunchEnvNote closes the daemon-side visibility gap (issue #993
@@ -1219,42 +1307,6 @@ func knownV0Boundary(id string) bool {
 		id == "operator-token-readable-by-agent" ||
 		strings.HasPrefix(id, "security-posture:") ||
 		strings.HasPrefix(id, "process-group:")
-}
-
-// doctorActionableHint returns a targeted repair hint for an error check,
-// instead of pointing every check at the same runbook section (issue #961 收
-// 尾体验：error 需给可执行建议）。
-func doctorActionableHint(id string) string {
-	switch {
-	case strings.HasPrefix(id, "agent-cli:"):
-		return "该 Coding Agent 无法从终端启动（PATH 或依赖缺失）；安装/登录该 Agent 后重试"
-	case strings.HasPrefix(id, "policy:"):
-		return "项目策略基线无法解析；检查仓库 .sift/policy.yaml 与 git 状态后重试"
-	case strings.HasPrefix(id, "hooks:"):
-		return "项目 hooks 无法建立；检查仓库 git config core.hooksPath 与权限"
-	case strings.HasPrefix(id, "outbox:"):
-		return "outbox 积压未清；启动 daemon 后会自动重试"
-	default:
-		return "见 docs/runbooks/troubleshooting.md §3 Doctor 报告"
-	}
-}
-
-// doctorWarningHint explains an actionable warning in plain language. These
-// are deferrable, so the hint says what it means rather than demanding a
-// repair step (issue feedback: 裸 check id 用户看不懂).
-func doctorWarningHint(id string) string {
-	switch {
-	case strings.HasPrefix(id, "hooks:"):
-		return "项目 git hooks 基线尚未建立（仓库刚接入时正常；重跑 init 或稍后自动恢复）"
-	case strings.HasPrefix(id, "outbox:"):
-		return "有待处理的远端操作积压（daemon 运行时会自动重试，无需干预）"
-	case strings.HasPrefix(id, "attempts:"):
-		return "本地运行记录暂不可读（daemon 启动后建立）"
-	case strings.HasPrefix(id, "version:wrapper"):
-		return "wrapper 未随本 CLI 同目录安装（开发构建常见；发布安装不受影响）"
-	default:
-		return "详情见 sift doctor"
-	}
 }
 
 // normalizeDoctorResult projects a doctor result (typed checks from the
