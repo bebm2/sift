@@ -94,10 +94,14 @@ func (osHeadlessPi) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.
 
 var issuePi headlessPi = osHeadlessPi{}
 
-// runIssue dispatches `sift issue`: no arguments take the deterministic fast
-// path; every remaining argument joined by spaces is the question for the
-// evidence-backed slow path.
-func runIssue(args []string, home config.Home, stdout, stderr io.Writer) int {
+// runIssue dispatches `sift issue`: `new` enters the drafting session (only
+// as a bare `new` or followed by --flags, so an unquoted question starting
+// with the word "new" still takes the Q&A path); no arguments take the
+// deterministic fast path; everything else joined by spaces is the question.
+func runIssue(args []string, home config.Home, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "new" && (len(args) == 1 || strings.HasPrefix(args[1], "-")) {
+		return runIssueNew(args[1:], home, stdin, stdout, stderr)
+	}
 	if len(args) == 0 {
 		return listOpenIssues(home, stdout, stderr)
 	}

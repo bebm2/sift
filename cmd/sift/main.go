@@ -133,11 +133,12 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		}
 		return runPi(stdout, stderr)
 	}
-	// issue is the read-only semantic entry (issue #963): offline config plus
-	// forge CLI reads, and for a natural-language question one headless pi
-	// call. It never dials the daemon.
+	// issue is the semantic entry (issues #963/#999): offline config plus
+	// forge CLI reads; a natural-language question gets one headless pi call,
+	// `issue new` hosts the drafting discussion with the register gate. It
+	// never dials the daemon.
 	if command == "issue" {
-		return runIssue(cmdArgs, home, stdout, stderr)
+		return runIssue(cmdArgs, home, stdin, stdout, stderr)
 	}
 	if command == "install" {
 		return runInstall(cmdArgs, home, stdout, stderr)

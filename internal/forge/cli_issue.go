@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -224,4 +225,43 @@ func (a *Adapter) ListOpenIssues(ctx context.Context, p ProjectRef, maxPages int
 		return nil
 	})
 	return out, truncated, e
+}
+
+// CreateIssue opens a new issue on the project and returns the created
+// projection (issue #999: the register gate behind `sift issue new`). It is a
+// direct operator write — the actor is the human at the terminal confirming
+// the draft, so it never routes through the daemon outbox and carries no
+// intake semantics: no trigger label unless the caller passes one explicitly.
+// Platform encoding follows each API: GitHub takes labels as a string array,
+// GitLab as a comma-separated string.
+func (a *Adapter) CreateIssue(ctx context.Context, p ProjectRef, title, body string, labels []string) (Issue, error) {
+	if strings.TrimSpace(title) == "" {
+		return Issue{}, &ClassifiedError{Class: ErrContractViolation, Summary: "issue title is empty"}
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	var payload []byte
+	var e error
+	if a.Kind == KindGitHub {
+		payload, e = json.Marshal(struct {
+			Title  string   `json:"title"`
+			Body   string   `json:"body"`
+			Labels []string `json:"labels"`
+		}{title, body, labels})
+	} else {
+		payload, e = json.Marshal(struct {
+			Title  string `json:"title"`
+			Body   string `json:"body"`
+			Labels string `json:"labels"`
+		}{title, body, strings.Join(labels, ",")})
+	}
+	if e != nil {
+		return Issue{}, &ClassifiedError{Class: ErrContractViolation, Summary: "encode issue payload"}
+	}
+	var x rawIssue
+	if e := a.call(ctx, p, a.base(p)+"/issues", "POST", payload, &x); e != nil {
+		return Issue{}, e
+	}
+	return a.issue(x)
 }
