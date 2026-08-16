@@ -107,6 +107,18 @@ var commands = []commandMeta{
 		examples: []string{"sift pi"},
 	},
 	{
+		name:    "issue",
+		group:   groupQuery,
+		brief:   "issue [问题]",
+		summary: "列 open issue；带自然语言问题时只读取证后回答（v1 只读）",
+		usage:   "sift issue [问题]",
+		examples: []string{
+			"sift issue",
+			"sift issue \"这 20 个 issue 里哪些是相关的？\"",
+			"sift issue \"#42 的讨论核心分歧是什么？\"",
+		},
+	},
+	{
 		name:    "doctor",
 		group:   groupBasics,
 		brief:   "doctor",

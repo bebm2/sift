@@ -277,6 +277,18 @@ sift pi
 
 > 安全边界：skill 只是易用层，不是安全层。真正的闸门（approve 的一次性 nonce、policy fail-closed、`auto_merge` 默认关）都在 Sift CLI 内部，agent 无法绕过——把 CLI 交给 agent 用，最坏情况等价于一个手快的人类用户。pi 未安装时 `sift pi` 会打印与 init 相同的安装指引（不阻塞）。
 
+### 7.6 单发语义问答：`sift issue`
+
+不想进会话、只想问一句时，用单发语义入口（v1 只读）：
+
+```bash
+sift issue                                # 不烧 token：直接列各绑定项目的 open issue
+sift issue "这 20 个 issue 里哪些是相关的？"
+sift issue "#42 的讨论核心分歧是什么？"
+```
+
+带自然语言问题时，Sift 先自己从 forge 只读接口取证（open issue 列表 + 问题中提到的 `#N` 的正文与评论），再调用一次 headless pi 回答。**只读保证是架构性的**：模型侧工具白名单钉死为 `read`，没有任何写路径；快照里没取到的事实模型只能回答「取不到」。pi 未安装时降级为确定性列表 + 安装指引，不报错。
+
 ### 8. 审批或拒绝
 
 需要人工决定时，Sift 会在 Forge 评论中给出带 Run ID 和一次性 nonce 的完整命令，例如命令形态为：

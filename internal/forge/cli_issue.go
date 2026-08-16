@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strconv"
 	"time"
@@ -186,4 +187,41 @@ func (a *Adapter) ListIssueComments(c context.Context, p ProjectRef, id string, 
 }
 func (a *Adapter) ListChangeComments(c context.Context, p ProjectRef, id string, s Cursor) ([]Comment, Cursor, error) {
 	return a.listComments(c, p, TargetRef{Kind: TargetChange, ID: id}, s)
+}
+
+// ListOpenIssues returns the project's open issues ordered by most recent
+// update, walking at most maxPages API pages; truncated reports whether the
+// cap cut the walk short. It is the label-free, cursor-free counterpart of
+// ListIssuesByLabel backing the CLI's deterministic `sift issue` fast path
+// (issue #963): one user-interactive snapshot, never an intake cursor source.
+// GitHub issue listings interleave pull requests, so they are skipped here
+// exactly as in ListIssuesByLabel; the adapter does not charge API budget —
+// the actor is the operator at the terminal, same as running gh/glab by hand.
+func (a *Adapter) ListOpenIssues(ctx context.Context, p ProjectRef, maxPages int) ([]Issue, bool, error) {
+	if maxPages < 1 {
+		return nil, false, fmt.Errorf("maxPages must be >= 1")
+	}
+	path := a.base(p) + "/issues?state=open&sort=updated&direction=desc"
+	if a.Kind == KindGitLab {
+		path = a.base(p) + "/issues?state=opened&order_by=updated_at&sort=desc"
+	}
+	out := []Issue{}
+	truncated, e := a.pagesUpTo(ctx, p, path, maxPages, func(raw []byte) error {
+		var xs []rawIssue
+		if json.Unmarshal(raw, &xs) != nil {
+			return &ClassifiedError{Class: ErrContractViolation, Summary: "invalid issue list"}
+		}
+		for _, x := range xs {
+			if a.Kind == KindGitHub && x.Pull != nil {
+				continue
+			}
+			i, e := a.issue(x)
+			if e != nil {
+				return e
+			}
+			out = append(out, i)
+		}
+		return nil
+	})
+	return out, truncated, e
 }

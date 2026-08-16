@@ -267,21 +267,36 @@ func pagePath(p string, n int) string {
 	}
 	return p + sep + "page=" + strconv.Itoa(n) + "&per_page=100"
 }
+
+// pages walks every API page of a list endpoint (page size 100) until a
+// short page ends the listing.
 func (a *Adapter) pages(ctx context.Context, p ProjectRef, path string, fn func([]byte) error) error {
+	_, err := a.pagesUpTo(ctx, p, path, 0, fn)
+	return err
+}
+
+// pagesUpTo walks at most maxPages pages (0 = unbounded) and reports whether
+// the cap truncated the walk while a full page remained. Issue #963: the
+// CLI's one-shot `sift issue` listing is user-interactive, so it bounds the
+// walk instead of pulling every page of an unbounded repo.
+func (a *Adapter) pagesUpTo(ctx context.Context, p ProjectRef, path string, maxPages int, fn func([]byte) error) (bool, error) {
 	for n := 1; ; n++ {
 		var raw json.RawMessage
 		if e := a.call(ctx, p, pagePath(path, n), "GET", nil, &raw); e != nil {
-			return e
+			return false, e
 		}
 		if e := fn(raw); e != nil {
-			return e
+			return false, e
 		}
 		var xs []json.RawMessage
 		if json.Unmarshal(raw, &xs) != nil {
-			return &ClassifiedError{Class: ErrContractViolation, Summary: "list response is not an array"}
+			return false, &ClassifiedError{Class: ErrContractViolation, Summary: "list response is not an array"}
 		}
 		if len(xs) < 100 {
-			return nil
+			return false, nil
+		}
+		if maxPages > 0 && n >= maxPages {
+			return true, nil
 		}
 	}
 }
