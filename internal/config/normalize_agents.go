@@ -152,7 +152,8 @@ func normalizeProjects(raw []RawProject, agents []Agent) ([]Project, error) {
 
 	out := make([]Project, 0, len(raw))
 	ids := make(map[string]int)
-	repoSeen := make(map[string]string) // cleaned repo -> project id
+	repoSeen := make(map[string]string)  // cleaned repo -> project id
+	forgeSeen := make(map[string]string) // kind\x00host\x00key -> project id (issue #1002)
 	for i, p := range raw {
 		f := fmt.Sprintf("projects[%d]", i)
 		if p.ID == nil || *p.ID == "" {
@@ -220,6 +221,18 @@ func normalizeProjects(raw []RawProject, agents []Agent) ([]Project, error) {
 		cli := p.Forge.Kind.defaultCLI()
 		if p.Forge.CLI != nil && *p.Forge.CLI != "" {
 			cli = *p.Forge.CLI
+		}
+
+		// The storage layer enforces UNIQUE(forge_kind, forge_host,
+		// forge_project_key): two enabled projects with the same forge identity
+		// (different ids, e.g. test residue) made the daemon crash-loop on
+		// activation (issue #1002). Reject at load time with both ids named.
+		if enabled {
+			identity := string(*p.Forge.Kind) + "\x00" + host + "\x00" + *p.Forge.Project
+			if other, dup := forgeSeen[identity]; dup {
+				return nil, configError(f+".forge", "duplicate enabled forge identity %s/%s: project %q duplicates project %q; one forge project maps to one id — remove the duplicate entry", *p.Forge.Kind, *p.Forge.Project, *p.ID, other)
+			}
+			forgeSeen[identity] = *p.ID
 		}
 
 		out = append(out, Project{
