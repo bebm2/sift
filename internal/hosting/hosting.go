@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"text/template"
@@ -115,6 +116,66 @@ func ActionFromString(s string) (Action, error) {
 // hard failure (DESIGN §11 foreground mode is a supported, not autorestart,
 // configuration).
 var ErrNoBackend = errors.New("hosting: platform backend unavailable; run `sift daemon` in the foreground")
+
+// ErrUnitConflict is returned by CheckInstallConflict when a user-level unit
+// already exists on this machine but belongs to a different SIFT_HOME. The
+// launchd label (and the systemd user unit name) is machine-global: booting
+// out the existing unit to install another SIFT_HOME's daemon would kick the
+// user's real daemon into a crash-restart loop (issue #1001). The installer
+// must refuse and explain instead of overwriting.
+var ErrUnitConflict = errors.New("hosting: a user-level sift service already exists for a different SIFT_HOME")
+
+// CheckInstallConflict inspects an existing user-level unit for a foreign
+// SIFT_HOME before install writes a new one. It returns ErrUnitConflict
+// (wrapped with both homes) when the on-disk unit points elsewhere; nil when
+// no unit exists or it already matches this spec. A unit that cannot be
+// parsed is treated as a conflict: never overwrite what we cannot verify.
+func (s Spec) CheckInstallConflict() error {
+	data, err := os.ReadFile(s.UnitPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("hosting: read existing unit %s: %w", s.UnitPath, err)
+	}
+	switch s.Backend {
+	case BackendLaunchd:
+		// The plist carries SIFT_HOME in EnvironmentVariables; extract the
+		// <string> after the SIFT_HOME key.
+		re := regexp.MustCompile(`<key>SIFT_HOME</key>\s*<string>([^<]*)</string>`)
+		m := re.FindStringSubmatch(string(data))
+		if m == nil {
+			return fmt.Errorf("%w: cannot verify existing unit %s (no SIFT_HOME key); uninstall it first or align SIFT_HOME", ErrUnitConflict, s.UnitPath)
+		}
+		if existing := xmlUnescape(m[1]); existing != s.HomePath {
+			return fmt.Errorf("%w: existing unit serves %s, this install targets %s; one machine runs one user-level sift service — uninstall the existing one first (`sift service uninstall`) or reuse its SIFT_HOME", ErrUnitConflict, existing, s.HomePath)
+		}
+		return nil
+	case BackendSystemd:
+		// The unit sets SIFT_HOME=... in the [Service] environment.
+		re := regexp.MustCompile(`(?m)^Environment="?SIFT_HOME=([^"]*)"?`)
+		m := re.FindStringSubmatch(string(data))
+		if m == nil {
+			return fmt.Errorf("%w: cannot verify existing unit %s (no SIFT_HOME); uninstall it first or align SIFT_HOME", ErrUnitConflict, s.UnitPath)
+		}
+		if m[1] != s.HomePath {
+			return fmt.Errorf("%w: existing unit serves %s, this install targets %s; one machine runs one user-level sift service — uninstall the existing one first (`sift service uninstall`) or reuse its SIFT_HOME", ErrUnitConflict, m[1], s.HomePath)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+// xmlUnescape reverses the minimal escaping the plist template applies.
+func xmlUnescape(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&quot;", "\"")
+	s = strings.ReplaceAll(s, "&apos;", "'")
+	return s
+}
 
 // Spec is a fully-resolved, installable hosting unit. Every path is absolute;
 // the unit ExecStart follows the `current` release symlink so an upgrade only

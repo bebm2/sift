@@ -3,6 +3,7 @@ package hosting
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1314,5 +1315,67 @@ func TestFormulaDefaultsReleaseVersion(t *testing.T) {
 	f := Formula("", "")
 	if !strings.Contains(f, version.Release) {
 		t.Errorf("Formula with empty release does not fall back to %q", version.Release)
+	}
+}
+
+// TestCheckInstallConflictForeignHome pins the issue #1001 guard: an existing
+// launchd plist (or systemd unit) whose SIFT_HOME differs from this spec's
+// home must refuse install with ErrUnitConflict — the machine-global label
+// means overwriting it would kick the other home's daemon. A matching unit
+// stays installable (idempotent path), and an unparsable unit is treated as a
+// conflict rather than overwritten.
+func TestCheckInstallConflictForeignHome(t *testing.T) {
+	realHome := t.TempDir()
+	t.Setenv("HOME", realHome) // launchdUnitPath reads the user home
+	installFakeReleaseAt(t, realHome)
+
+	// A different home that also has a release, wanting to install.
+	otherHome := t.TempDir()
+	installFakeReleaseAt(t, otherHome)
+	spec, err := NewSpecFor(otherHome, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No existing unit: installable.
+	if err := spec.CheckInstallConflict(); err != nil {
+		t.Fatalf("no existing unit must not conflict: %v", err)
+	}
+
+	// Existing plist serving the real home: refuse.
+	agents := filepath.Join(realHome, "Library", "LaunchAgents")
+	if err := os.MkdirAll(agents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existingSpec, err := NewSpecFor(realHome, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installPlan, err := existingSpec.Plan(ActionInstall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(installPlan); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.CheckInstallConflict(); !errors.Is(err, ErrUnitConflict) {
+		t.Fatalf("foreign plist must conflict, got %v", err)
+	}
+
+	// Same home: the existing unit matches, install stays idempotent.
+	if err := existingSpec.CheckInstallConflict(); err != nil {
+		t.Fatalf("matching unit must not conflict: %v", err)
+	}
+
+	// Unparsable unit: treated as a conflict, never overwritten.
+	unitDir := filepath.Dir(spec.UnitPath)
+	if err := os.MkdirAll(unitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existingSpec.UnitPath, []byte("<plist>junk without sift home"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := existingSpec.CheckInstallConflict(); !errors.Is(err, ErrUnitConflict) {
+		t.Fatalf("unparsable unit must conflict, got %v", err)
 	}
 }
