@@ -1008,6 +1008,18 @@ func runService(args []string, home config.Home, stdout, stderr io.Writer) int {
 		report(stderr, err)
 		return 1
 	}
+	// Install (and the restart path that re-writes the unit) must never
+	// overwrite a unit that serves a different SIFT_HOME: the launchd label
+	// is machine-global, and booting out a foreign unit kicks the user's real
+	// daemon into a crash loop (issue #1001). Fail closed with guidance.
+	if action == hosting.ActionInstall {
+		if err := spec.CheckInstallConflict(); err != nil {
+			fmt.Fprintln(stderr, "✗ 无法安装用户级服务：")
+			fmt.Fprintf(stderr, "  %v\n", err)
+			fmt.Fprintln(stderr, "  当前机器已有另一个 SIFT_HOME 的用户级服务；同一台机器只应运行一个 sift 用户级服务。")
+			return 1
+		}
+	}
 	plan, err := spec.Plan(action)
 	if err != nil {
 		report(stderr, err)
