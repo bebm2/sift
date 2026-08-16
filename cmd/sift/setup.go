@@ -1333,8 +1333,12 @@ func normalizeDoctorResult(value any) map[string]any {
 // like the standalone command; a non-zero install exit prints the
 // troubleshooting pointer and the wizard continues with step 3.
 func setupCloseoutService(in *bufio.Reader, out, errOut io.Writer, home config.Home) {
-	var statusOut bytes.Buffer
-	setupServiceRun("status", home, &statusOut, errOut)
+	// The status probe's raw stderr (e.g. "hosting: no current release installed …
+	// readlink …") leaked into the wizard before the y/n ask — English paths
+	// the user cannot act on (issue #1003). Capture it; only the human line
+	// matters here, the full detail stays with `sift service install`.
+	var statusOut, probeErr bytes.Buffer
+	setupServiceRun("status", home, &statusOut, &probeErr)
 	status := statusOut.String()
 	io.Copy(out, &statusOut)
 	if serviceStatusRunning(status) {
@@ -1344,11 +1348,29 @@ func setupCloseoutService(in *bufio.Reader, out, errOut io.Writer, home config.H
 	if !askYes(in, out, "安装用户级服务并启动（sift service install）") {
 		return
 	}
-	if code := setupServiceRun("install", home, out, errOut); code != 0 {
-		fmt.Fprintln(out, "  ✗ service install 失败；排查步骤见 docs/runbooks/troubleshooting.md §2（无 supervisor 时按提示前台运行 `sift daemon`）")
+	var installOut, installErr bytes.Buffer
+	if code := setupServiceRun("install", home, &installOut, &installErr); code != 0 {
+		fmt.Fprintln(out, "  ✗ service install 失败："+serviceFailureReason(installErr.String()))
+		fmt.Fprintln(out, "    完整输出可运行 `sift service install` 查看；无 supervisor 时可前台运行 `sift daemon`")
 		return
 	}
-	setupServiceRun("status", home, out, errOut)
+	io.Copy(out, &installOut)
+	setupServiceRun("status", home, out, out)
+}
+
+// serviceFailureReason renders one human line for a failed install: the
+// ErrUnitConflict guidance (issue #1001) verbatim, the release-missing hint
+// for dev builds, otherwise a generic pointer. Raw stderr stays out of the
+// wizard (issue #1003).
+func serviceFailureReason(rawErr string) string {
+	switch {
+	case strings.Contains(rawErr, "already exists for a different SIFT_HOME"):
+		return strings.TrimSpace(rawErr)
+	case strings.Contains(rawErr, "no current release installed"):
+		return "尚未从 release 归档安装（开发构建常见）；正式安装后重试，或先用前台 `sift daemon`"
+	default:
+		return "见 docs/runbooks/troubleshooting.md §2"
+	}
 }
 
 // serviceStatusRunning reports whether a `sift service status` render already

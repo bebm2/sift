@@ -95,8 +95,8 @@ func swapIssueNew(t *testing.T, pi *turnPi, w *fakeWriter, f *fakeIssueForge) {
 const draftFenceReply = "好的，草稿如下：\n\n```issue\n给 sift issue 增加批量关闭能力\n\n## 背景\n管理 20+ open issue 时逐个关很繁琐。\n\n## 验收\n- `sift issue close 1,2,3` 幂等\n```\n有其他想补充的吗？"
 
 func TestIssueNewRegistersAfterDiscussion(t *testing.T) {
-	home := testHome(t)
 	issueTestProject(t)
+	home := testHome(t)
 	pi := &turnPi{replies: []string{draftFenceReply, "已按你的补充更新草稿：\n\n```issue\n给 sift issue 增加批量关闭能力\n\n## 背景\n管理 20+ open issue 时逐个关很繁琐。\n\n## 验收\n- `sift issue close 1,2,3` 幂等\n- 支持 --dry-run\n```\n还有别的吗？"}}
 	w := &fakeWriter{}
 	swapIssueNew(t, pi, w, &fakeIssueForge{})
@@ -140,8 +140,8 @@ func TestIssueNewRegistersAfterDiscussion(t *testing.T) {
 }
 
 func TestIssueNewTriggerLabelOptIn(t *testing.T) {
-	home := testHome(t)
 	issueTestProject(t)
+	home := testHome(t)
 	pi := &turnPi{replies: []string{draftFenceReply}}
 	w := &fakeWriter{}
 	swapIssueNew(t, pi, w, &fakeIssueForge{})
@@ -159,8 +159,8 @@ func TestIssueNewTriggerLabelOptIn(t *testing.T) {
 }
 
 func TestIssueNewRegisterWithoutDraftRendersThenCancels(t *testing.T) {
-	home := testHome(t)
 	issueTestProject(t)
+	home := testHome(t)
 	pi := &turnPi{replies: []string{"我先问两个问题…", draftFenceReply}}
 	w := &fakeWriter{}
 	swapIssueNew(t, pi, w, &fakeIssueForge{})
@@ -180,8 +180,8 @@ func TestIssueNewRegisterWithoutDraftRendersThenCancels(t *testing.T) {
 }
 
 func TestIssueNewDedupeWarnsAndRequiresSecondConfirm(t *testing.T) {
-	home := testHome(t)
 	issueTestProject(t)
+	home := testHome(t)
 	pi := &turnPi{replies: []string{draftFenceReply}}
 	w := &fakeWriter{}
 	f := &fakeIssueForge{issues: []forge.Issue{
@@ -200,8 +200,8 @@ func TestIssueNewDedupeWarnsAndRequiresSecondConfirm(t *testing.T) {
 }
 
 func TestIssueNewRefFetchIsDeterministic(t *testing.T) {
-	home := testHome(t)
 	issueTestProject(t)
+	home := testHome(t)
 	pi := &turnPi{replies: []string{"收到，纳入讨论"}}
 	w := &fakeWriter{}
 	f := &fakeIssueForge{
@@ -228,8 +228,8 @@ func TestIssueNewRefFetchIsDeterministic(t *testing.T) {
 }
 
 func TestIssueNewPiMissingExitsWithGuidance(t *testing.T) {
-	home := testHome(t)
 	issueTestProject(t)
+	home := testHome(t)
 	old := issuePi
 	issuePi = missingPi{}
 	t.Cleanup(func() { issuePi = old })
@@ -273,8 +273,8 @@ func TestIssueNewAmbiguousProjectRequiresFlag(t *testing.T) {
 }
 
 func TestIssueNewRegisterFailureKeepsSession(t *testing.T) {
-	home := testHome(t)
 	issueTestProject(t)
+	home := testHome(t)
 	pi := &turnPi{replies: []string{draftFenceReply}}
 	w := &fakeWriter{err: errors.New("401 unauthorized")}
 	swapIssueNew(t, pi, w, &fakeIssueForge{})
@@ -321,9 +321,15 @@ func TestIssueNewDispatchGuard(t *testing.T) {
 }
 
 // testHome wraps freshHome for readability in this file.
+// testHome resolves the current SIFT_HOME without re-isolating. Callers that
+// register a project first (issueTestProject) have already freshHome'd;
+// calling freshHome again here would point at a *different* empty home and
+// the command under test would see no projects (issue #1002 fallout).
 func testHome(t *testing.T) config.Home {
 	t.Helper()
-	_ = freshHome(t)
+	if os.Getenv("SIFT_HOME") == "" {
+		_ = freshHome(t)
+	}
 	home, err := config.ResolveHome()
 	if err != nil {
 		t.Fatal(err)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/xsift/sift/internal/config"
 )
@@ -68,6 +69,15 @@ func (d *DB) ActivateConfig(ctx context.Context, snapshot *config.Snapshot, bina
 			isolation_reason=NULL, capabilities_json='{}', capabilities_checked_at_ms=NULL,
 			updated_at_ms=excluded.updated_at_ms`, p.ID, snapshotID, string(p.Forge.Kind), p.Forge.Host,
 			p.Forge.Project, p.Repo, boolInt(p.Enabled), nowMS, nowMS); err != nil {
+			// A UNIQUE(forge_kind,forge_host,forge_project_key) hit means another
+			// enabled project already claims this forge identity. Config load is
+			// the primary guard (issue #1002), but a pre-existing row from an
+			// earlier config must not crash-loop the daemon: skip this project
+			// (leave it disabled) and keep activating the rest.
+			if isUniqueViolation(err) {
+				fmt.Printf("sift daemon: project %s skipped: duplicate forge identity %s/%s (another enabled project claims it)\n", p.ID, p.Forge.Kind, p.Forge.Project)
+				continue
+			}
 			return fmt.Errorf("storage: activate project %s: %w", p.ID, err)
 		}
 	}
@@ -75,4 +85,16 @@ func (d *DB) ActivateConfig(ctx context.Context, snapshot *config.Snapshot, bina
 		return fmt.Errorf("storage: commit config activation: %w", err)
 	}
 	return nil
+}
+
+// isUniqueViolation reports whether err is a SQLite UNIQUE constraint failure
+// (SQLITE_CONSTRAINT_UNIQUE, extended code 2067) via the modernc driver's
+// error string. The daemon uses it to skip — not crash on — a project whose
+// forge identity is already claimed by another enabled row (issue #1002).
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") || strings.Contains(s, "(2067)")
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -82,6 +83,11 @@ func swapIssuePi(t *testing.T, p *fakeHeadlessPi) {
 // offline add path and returns its repo path.
 func issueTestProject(t *testing.T) string {
 	t.Helper()
+	// Isolate SIFT_HOME first: addTestProject goes through the real offline
+	// add path, which without this writes the demo project into the *real*
+	// ~/.sift/config.yaml (issue #1002 — that is exactly how eight demo*
+	// entries landed in a live config and crash-looped the daemon).
+	freshHome(t)
 	repo := filepath.Join(t.TempDir(), "demo")
 	addTestProject(t, repo, "git@github.com:owner/demo.git")
 	return repo
@@ -236,5 +242,26 @@ func TestIssueHelpRegistered(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "sift issue new") {
 		t.Fatalf("help lacks new subcommand:\n%s", out.String())
+	}
+}
+
+// TestRealHomeUntouchedByIssueTests is the issue #1002 regression guard: the
+// earlier issue tests registered demo projects into the *real* ~/.sift (no
+// freshHome), which crash-looped a live daemon. issueTestProject must isolate
+// via freshHome before the real offline add path runs.
+func TestIssueTestProjectIsolatesHome(t *testing.T) {
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no user home:", err)
+	}
+	realConfig := filepath.Join(userHome, ".sift", "config.yaml")
+	before, errBefore := os.ReadFile(realConfig)
+	repo := issueTestProject(t)
+	after, errAfter := os.ReadFile(realConfig)
+	if errBefore == nil && errAfter == nil && !bytes.Equal(before, after) {
+		t.Fatal("issueTestProject modified the real ~/.sift/config.yaml")
+	}
+	if repo == "" {
+		t.Fatal("issueTestProject returned empty repo")
 	}
 }

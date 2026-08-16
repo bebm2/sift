@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -382,4 +383,32 @@ func mustLoadYAML(t *testing.T, yaml string) *Snapshot {
 		t.Fatalf("load: %v", err)
 	}
 	return snap
+}
+
+// TestLoadRejectsDuplicateForgeIdentity pins the issue #1002 guard: two
+// enabled projects sharing kind+host+project (different ids) must fail config
+// load with both ids named, instead of crash-looping the daemon on the
+// storage UNIQUE(forge_kind,forge_host,forge_project_key) constraint.
+func TestLoadRejectsDuplicateForgeIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `version: 1
+projects:
+  - id: demo
+    repo: /tmp/a
+    forge: {kind: github, project: owner/demo}
+  - id: demo-2
+    repo: /tmp/b
+    forge: {kind: github, project: owner/demo}
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(Home{Path: dir}, time.Now())
+	if err == nil {
+		t.Fatal("duplicate forge identity accepted")
+	}
+	if !strings.Contains(err.Error(), "demo-2") || !strings.Contains(err.Error(), "demo") {
+		t.Fatalf("error must name both ids: %v", err)
+	}
 }
