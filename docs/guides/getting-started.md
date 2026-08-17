@@ -283,11 +283,12 @@ sift pi
 
 ```bash
 sift issue                                # 不烧 token：直接列各绑定项目的 open issue
+sift issue list                           # 同上；list/ls 是保留子命令，--all 扩到全部项目
 sift issue "这 20 个 issue 里哪些是相关的？"
 sift issue "#42 的讨论核心分歧是什么？"
 ```
 
-带自然语言问题时，Sift 先自己从 forge 只读接口取证（open issue 列表 + 问题中提到的 `#N` 的正文与评论），再调用一次 headless pi 回答。**只读保证是架构性的**：模型侧工具白名单钉死为 `read`，没有任何写路径；快照里没取到的事实模型只能回答「取不到」。pi 未安装时降级为确定性列表 + 安装指引，不报错。
+带自然语言问题时，Sift 先自己从 forge 只读接口取证（open issue 列表 + 问题中提到的 `#N` 的正文与评论），再调用一次 headless pi 回答。**只读保证是架构性的**：模型侧工具白名单钉死为 `read`，没有任何写路径；快照里没取到的事实模型只能回答「取不到」。写动词（`close`/`reopen`/`edit`/`comment`/`label`/`assign`）作首词会被直接拒绝并提示改用 gh/glab，不会烧 pi 调用。pi 未安装时降级为确定性列表 + 安装指引，不报错。
 
 ### 7.7 讨论式起草：`sift issue new`
 
