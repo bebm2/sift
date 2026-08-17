@@ -230,6 +230,114 @@ func TestIssueNoProjectsHint(t *testing.T) {
 	}
 }
 
+// TestIssueListLsAliasDeterministic pins issue #1012 acceptance #1: `list`/
+// `ls` (bare or with --flags) route to the deterministic listing with zero pi
+// calls — the gh/kubectl muscle memory must not burn tokens. An unknown flag
+// after the alias is a usage error, also without a pi call.
+func TestIssueListLsAliasDeterministic(t *testing.T) {
+	issueTestProject(t)
+	swapIssueForge(t, &fakeIssueForge{issues: []forge.Issue{
+		{ID: "7", Title: "修复登录超时", State: forge.IssueOpen, Author: "alice", URL: "https://x/7"},
+	}})
+	pi := &fakeHeadlessPi{}
+	swapIssuePi(t, pi)
+
+	for _, args := range [][]string{
+		{"list"},
+		{"ls"},
+		{"list", "--all"},
+	} {
+		var out, errB bytes.Buffer
+		if code := runWithInput(append([]string{"sift", "issue"}, args...), strings.NewReader(""), &out, &errB); code != 0 {
+			t.Fatalf("issue %v exit=%d stderr=%s", args, code, errB.String())
+		}
+		if !strings.Contains(out.String(), "#7") {
+			t.Fatalf("issue %v listing missing:\n%s", args, out.String())
+		}
+	}
+	var out, errB bytes.Buffer
+	if code := runWithInput([]string{"sift", "issue", "list", "--foo"}, strings.NewReader(""), &out, &errB); code != 2 {
+		t.Fatalf("list --foo exit=%d, want 2 (stderr=%s)", code, errB.String())
+	}
+	if pi.called != 0 {
+		t.Fatalf("pi called %d times on list/ls paths, want 0", pi.called)
+	}
+}
+
+// TestIssueListAllAliasWidens pins `list --all` as the exact equivalent of
+// the bare `--all` path: it escapes the cwd-project scope.
+func TestIssueListAllAliasWidens(t *testing.T) {
+	_ = testHome(t)
+	repo := issueTestProject(t)
+	t.Chdir(repo)
+	far := filepath.Join(t.TempDir(), "far")
+	addTestProject(t, far, "git@github.com:owner/far.git")
+	swapIssueForge(t, &fakeIssueForge{issues: []forge.Issue{
+		{ID: "7", Title: "demo issue", State: forge.IssueOpen, Author: "a", URL: "https://x/7"},
+	}})
+	var out, errB bytes.Buffer
+	if code := runWithInput([]string{"sift", "issue", "ls", "--all"}, strings.NewReader(""), &out, &errB); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, errB.String())
+	}
+	if !strings.Contains(out.String(), "owner/far") {
+		t.Fatalf("ls --all must widen beyond the cwd project:\n%s", out.String())
+	}
+}
+
+// TestIssueListNonFlagSuffixStillQuestion pins acceptance #3: the alias
+// followed by non-flag text ("list 哪些重复") stays on the Q&A path with the
+// full text as the question — a precise match, not a prefix match.
+func TestIssueListNonFlagSuffixStillQuestion(t *testing.T) {
+	issueTestProject(t)
+	swapIssueForge(t, &fakeIssueForge{issues: []forge.Issue{
+		{ID: "7", Title: "t", State: forge.IssueOpen, Author: "a", URL: "u"},
+	}})
+	pi := &fakeHeadlessPi{}
+	swapIssuePi(t, pi)
+
+	var out, errB bytes.Buffer
+	if code := runWithInput([]string{"sift", "issue", "list", "哪些重复"}, strings.NewReader(""), &out, &errB); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, errB.String())
+	}
+	if pi.called != 1 {
+		t.Fatalf("pi called %d times, want 1", pi.called)
+	}
+	if prompt := pi.args[3]; !strings.Contains(prompt, "list 哪些重复") {
+		t.Fatalf("question must keep the full text:\n%s", prompt)
+	}
+}
+
+// TestIssueWriteVerbsRefused pins acceptance #2: reserved write verbs as the
+// first word are explicitly refused — human guidance, non-zero exit, and the
+// pi seam never touched (the old behavior asked pi "close 42").
+func TestIssueWriteVerbsRefused(t *testing.T) {
+	freshHome(t)
+	pi := &fakeHeadlessPi{}
+	swapIssuePi(t, pi)
+
+	for _, argv := range [][]string{
+		{"close", "42"},
+		{"reopen", "42"},
+		{"edit", "42"},
+		{"comment", "42", "已完成"},
+		{"label", "42", "bug"},
+		{"assign", "42", "@alice"},
+		{"--all", "close", "42"}, // flags must not shadow the first word
+	} {
+		var out, errB bytes.Buffer
+		if code := runWithInput(append([]string{"sift", "issue"}, argv...), strings.NewReader(""), &out, &errB); code == 0 {
+			t.Fatalf("issue %v must exit non-zero", argv)
+		}
+		msg := errB.String()
+		if !strings.Contains(msg, "只读") || !strings.Contains(msg, "gh") {
+			t.Fatalf("issue %v lacks readonly guidance:\n%s", argv, msg)
+		}
+	}
+	if pi.called != 0 {
+		t.Fatalf("pi called %d times on write verbs, want 0", pi.called)
+	}
+}
+
 // TestIssueHelpRegistered ensures the command metadata row exists so help and
 // completion stay in sync with dispatch.
 func TestIssueHelpRegistered(t *testing.T) {
@@ -242,6 +350,13 @@ func TestIssueHelpRegistered(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "sift issue new") {
 		t.Fatalf("help lacks new subcommand:\n%s", out.String())
+	}
+	// Issue #1012: reserved words and the quoting advice are part of the
+	// contract, so they live in the metadata, not just in dispatch.
+	for _, want := range []string{"list", "ls", "引号"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("help lacks %q:\n%s", want, out.String())
+		}
 	}
 }
 

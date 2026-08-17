@@ -96,10 +96,23 @@ func (osHeadlessPi) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.
 
 var issuePi headlessPi = osHeadlessPi{}
 
+// issueWriteVerbs are the write verbs reserved on `sift issue` (issue
+// #1012): the command is read-only by architecture — the forge interface
+// has no write method — so a first-word hit is refused with human guidance
+// instead of being burned as a pi question. Reserving the words now means
+// implementing them for real later is not a breaking change.
+var issueWriteVerbs = map[string]bool{
+	"close": true, "reopen": true, "edit": true, "comment": true, "label": true, "assign": true,
+}
+
 // runIssue dispatches `sift issue`: `new` enters the drafting session (only
 // as a bare `new` or followed by --flags, so an unquoted question starting
-// with the word "new" still takes the Q&A path); no arguments take the
-// deterministic fast path; everything else joined by spaces is the question.
+// with the word "new" still takes the Q&A path); `list`/`ls` take the
+// deterministic listing under the same precise-match rule (gh/kubectl muscle
+// memory must not burn a pi call), with `--all` widening like the bare path;
+// a reserved write verb as the first word is refused outright; no arguments
+// take the deterministic fast path; everything else joined by spaces is the
+// question.
 func runIssue(args []string, home config.Home, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "new" && (len(args) == 1 || strings.HasPrefix(args[1], "-")) {
 		return runIssueNew(args[1:], home, stdin, stdout, stderr)
@@ -110,6 +123,25 @@ func runIssue(args []string, home config.Home, stdin io.Reader, stdout, stderr i
 	if len(args) > 0 && args[0] == "--all" {
 		all = true
 		args = args[1:]
+	}
+	// `list`/`ls` alias: bare word or a --flags suffix takes the listing
+	// (equivalent to the no-argument path); a non-flag suffix ("list 哪些重复")
+	// is a question that merely starts with the word and falls through.
+	if len(args) > 0 && (args[0] == "list" || args[0] == "ls") && (len(args) == 1 || strings.HasPrefix(args[1], "-")) {
+		for _, a := range args[1:] {
+			if a != "--all" {
+				report(stderr, fmt.Errorf("usage: sift issue list [--all]"))
+				return 2
+			}
+			all = true
+		}
+		return listOpenIssuesScoped(home, stdout, stderr, all)
+	}
+	// Reserved write verbs: refuse up front, never start a pi call — "close
+	// 42" is an intent, not a question (issue #1012 misroute).
+	if len(args) > 0 && issueWriteVerbs[args[0]] {
+		fmt.Fprintf(stderr, "✗ 「%s」是保留写动词，`sift issue` 当前只读：写操作请直接用 gh/glab（例如 gh issue close <编号>）或在 forge 界面完成。\n", args[0])
+		return 2
 	}
 	if all {
 		if len(args) == 0 {
