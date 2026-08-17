@@ -317,6 +317,7 @@ func TestIssueWriteVerbsRefused(t *testing.T) {
 
 	for _, argv := range [][]string{
 		{"close", "42"},
+		{"close 42"}, // quoted shell input must not bypass the reserved verb
 		{"reopen", "42"},
 		{"edit", "42"},
 		{"comment", "42", "已完成"},

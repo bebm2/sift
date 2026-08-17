@@ -147,6 +147,14 @@ sift doctor --offline   # daemon 不可用时的只读视图
 - policy/hooks/isolation/outbox/channel：按报告中的 project/run 标识修复根因；不要通过清库清除诊断。
 - `operator-token-readable-by-agent` / `unsafe-local`：这是 V0 明示的同 UID 安全边界，不是 chmod 能完全消除的误报；不要把 warning=1 宣称为沙箱闭合。
 
+若 doctor 明显变慢，先取一次阶段耗时而不是盲目增大 RPC timeout：
+
+```bash
+sift doctor --json | jq '.result.stage_ms'
+```
+
+`exec` 是 Agent/forge CLI 探活，`process_group` 是 Agent qualification，其他 key 是本地 SQLite、hook 与 policy 检查；字段完整契约见 [`control-plane.md` §6.2](../specs/control-plane.md#62-operator-方法)。它们是单次诊断值，不是性能 SLA。
+
 在线 doctor 失败且离线 doctor 正常，通常说明 daemon 未运行、CLI 与 service 使用不同 `SIFT_HOME`，或 operator socket/token 不匹配。
 
 ## 4. 升级故障

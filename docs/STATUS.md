@@ -1,7 +1,7 @@
 ---
 status: active
 created: 2026-08-04
-last_updated: 2026-08-15
+last_updated: 2026-08-17
 summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 ---
 
@@ -20,7 +20,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 | M5 Attention/Command/Report/Brain/指标 | ✅ 完成 | PASS WITH NOTES | Interrupt 全功能、Command、Report、Channel、九项指标 |
 | M6 tmux + 完整故障矩阵 | ✅ 完成 | PASS WITH NOTES | tmux 第二后端、PTY、V2/V4 双后端全矩阵、阶段门归档 |
 | **M7 真实 Agent + PoC 取证** | 🔬 **PoC 已验证** | — | **Pi Brain+Agent 双 forge 端到端跑通** |
-| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 合入 main(#907–#910)；**Release 已迭代至 v0.5.11**（初跑旅程快速迭代线，`curl\|bash` 一键安装实测通过 #913/#914）。A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后 |
+| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 合入 main(#907–#910)；**Release 已迭代至 v0.6.6**（初跑旅程、doctor 稳定性与持续编排迭代线，`curl\|bash` 一键安装实测通过 #913/#914）。A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后 |
 
 ## M7 PoC 验证成果(本轮)
 
@@ -103,12 +103,19 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 | — | label 查重前置不扰民（已存在静默跳过、两次确认收敛为一次）+ doctor 指引人话化 + `sift pi` TTY 修复 | ✅ 合并 | #994（v0.5.11） |
 | #993 | Agent launch env（HOME/PATH）在 init 资格测试时冻结，不经 shell wrapper | ✅ 合并 | #995（v0.5.11）+ schema 再生成 |
 
+## 近期稳定性与技术债收敛（2026-08-17）
+
+- **doctor 慢/超时**：#1007/#1008 先后关闭 poller 与 reconciler 的限流重试风暴；#1009 仅为 `ops.doctor` 扩展端到端 RPC 预算；#1011、#1014、#1015 将独立 CLI/项目探活并行、加入 `stage_ms` 诊断，并将 SQLite 读检查保持有序以避免伪 `database is locked`。真实 macOS 在线 doctor 已恢复为约 2–3 秒；排障入口见 [troubleshooting](runbooks/troubleshooting.md#3-doctor-报告)。
+- **`sift issue` 只读边界**：#1013 已合入 `list`/`ls` 和写动词拒绝；#927 中的引号写动词绕过已修复并由测试钉住。混合语义 `list --all <question>` 仍未定义，保持问答路径而非猜测。
+- **#927 consolidated backlog**：静态检查已入 CI；已移除 os.Executable 测试污染并缓解 tmux 时序。仅保留低优先级的管道 init 提示观感、安装器矩阵/fish 兼容、macOS 进程/tmux flaky 的持续观察；按价值另拆，不与 M7 门禁混用。
+- **#883 profile**：仍严格绑定 M7 的 ≥3 并行真实 Run；无该负载不得凭本机 doctor 数据声称完成 profile 或 P50 门禁。
+
 ## 遗留 / 延期
 
 - **M7 完整门禁**:≥3 并行 Run + P50<60s 测量、手机端审批证据、凭证存储 spike
 - **#883 性能 profile**:M7 真实负载绑定（应随 M7 并行 Run 片一并做，不再单独排期）
 - **#963 `sift issue` 语义入口 v1（只读）**:依赖 #960/#961/#962 均已闭合，已解锁待启动
-- **#927 backlog**:新增 #992-P2（管道/连续输入时收尾提示错位，flush 时序评估）；tmux crash-windows flake 已加超时缓解，彻底稳定化仍待
+- **#927 backlog**:管道/连续输入时收尾提示错位、安装器矩阵/fish 兼容及 macOS tmux/进程 flaky 持续观察；详见上节，不作为 M7 门禁替代
 - **wrapper handoff 精调**:`waiting_human` 上的 `kill`/`retry`/`approve` 操作验证
 - **M8 A10 干净机验收**:干净 macOS + systemd Linux 从发布归档安装跑通 + 四组合冒烟证据(人工门禁,待 M7)
 - **M8 live 跨版本升级**:不丢 DB 状态 + 较新 schema 拒旧 daemon(待 M7 真实数据;契约级回归已随 #903)
