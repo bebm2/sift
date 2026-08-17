@@ -1485,6 +1485,62 @@ func TestSetupCloseoutDoctorRendersPerCheckGuidance(t *testing.T) {
 // security-posture/process-group warnings are reported as known V0 same-UID
 // boundaries, not as faults requiring repair (issue #961 收尾体验: warning 不
 // 应与 error 混列为必须修复).
+func TestSetupCloseoutDoctorSeparatesCurrentAndOtherProjects(t *testing.T) {
+	_ = freshHome(t)
+	home, err := config.ResolveHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRepo, staleRepo := filepath.Join(t.TempDir(), "current"), filepath.Join(t.TempDir(), "stale")
+	doc := map[string]any{"version": 1}
+	addProject(doc, currentRepo, "gitlab", "platform/current", "gitlab.example")
+	addProject(doc, staleRepo, "gitlab", "poc/stale", "gitlab.example")
+	if err := writeSetupDocument(home, doc, false); err != nil {
+		t.Fatal(err)
+	}
+	current := registeredSetupProject(home, currentRepo)
+	if current.ID == "" {
+		t.Fatal("current project was not resolved from the just-written config")
+	}
+	stale := registeredSetupProject(home, staleRepo)
+	replaceSetupDoctor(t, func(config.Home) map[string]any {
+		return map[string]any{"checks": []any{
+			map[string]any{"id": "policy:" + stale.ID, "level": "error", "message": "git exit 128"},
+			map[string]any{"id": "hooks:" + stale.ID, "level": "warning", "message": "git exit 128"},
+			map[string]any{"id": "hooks:" + current.ID, "level": "warning", "message": "hooks state drifted from baseline"},
+		}}
+	})
+	var out bytes.Buffer
+	summary := setupCloseoutDoctorForProject(bufio.NewReader(strings.NewReader("\n")), &out, home, current)
+	for _, want := range []string{
+		"其他已登记项目 " + stale.ID + "（" + staleRepo + "）",
+		"sift project remove " + stale.ID,
+		"项目 hooks 无法读取（" + stale.ID + "（" + staleRepo + "））",
+		"hooks 状态与已保存基线不一致（" + current.ID + "（" + currentRepo + "））",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("closeout output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if summary.errors != 1 || summary.currentProjectErrors != 0 || summary.otherProjectErrors != 1 {
+		t.Fatalf("summary = %#v, want one other-project error only", summary)
+	}
+}
+
+func TestPrintSetupReadyDoesNotClaimFullReadyForOtherProjectError(t *testing.T) {
+	project := setupProjectContext{ID: "current", Kind: "gitlab"}
+	var out bytes.Buffer
+	printSetupReady(&out, project, "sift:run", closeoutDoctorSummary{errors: 1, otherProjectErrors: 1})
+	if strings.Contains(out.String(), "全部就绪") {
+		t.Fatalf("must not claim full readiness with an error: %q", out.String())
+	}
+	for _, want := range []string{"当前项目 current 已登记且自检无 error", "另有 1 个其他已登记项目需处理", "glab issue update"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output lacks %q: %q", want, out.String())
+		}
+	}
+}
+
 func TestSetupCloseoutDoctorGroupsKnownV0Boundaries(t *testing.T) {
 	_ = freshHome(t)
 	home, err := config.ResolveHome()
@@ -1856,6 +1912,9 @@ func TestInteractiveInitCloseoutThreeSteps(t *testing.T) {
 		t.Fatalf("init = %d: %s", code, out.String())
 	}
 	for _, want := range []string{
+		"当前项目已登记：demo",
+		"repo: ",
+		"forge: github:owner/repo",
 		"收尾三步",
 		"运行环境自检",
 		"安装用户级服务并启动（sift service install）",

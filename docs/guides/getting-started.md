@@ -159,17 +159,19 @@ sift init
 1. 从 `origin` 探测 GitHub/GitLab 和项目；
 2. 探测 PATH 中的 Agent 并让你选择；
 3. 从已登录的 Forge CLI 记录 operator；
-4. 写入 `~/.sift/config.yaml`。
+4. 写入 `~/.sift/config.yaml`，并明确显示本次登记的当前项目（ID、本地 repo 路径与 forge）。
+
+`~/.sift/config.yaml` 是本机 daemon 的项目登记与本机 Agent 配置；它可以管理多个仓库，重复运行 init 会保留其他登记项目，不会静默删除它们。仓库内 `.sift/policy.yaml` 只承载可评审的项目策略，按 base revision 读取；它不存本机路径、Agent 环境或凭据。
 
 配置写入后，向导会询问式引导「收尾三合一」（每步直接回车默认执行，或输入 `n` 跳过）：
 
-1. **离线自检**：内嵌执行 `sift doctor --offline` 的检查逻辑，有未通过项时按严重度分组给出指引（error 带针对性修复建议；`tm6:*`、`operator-token` 等同 UID 安全边界标注为「已知 V0 边界、非故障」），失败不阻塞；
+1. **离线自检**：内嵌执行 `sift doctor --offline` 的检查逻辑，有未通过项时按严重度分组给出指引（error 带针对性修复建议；`tm6:*`、`operator-token` 等同 UID 安全边界标注为「已知 V0 边界、非故障」）。它会明确区分当前项目和其他已登记项目：历史项目错误显示 ID、路径与 `sift project remove <项目 ID>` 的可选清理命令；有 error 时不会宣称“全部就绪”，失败不阻塞；
 2. **用户级服务**：复用 `sift service install` + `sift service status` 完成安装与启动，已运行的服务会跳过不重复安装；没有可用 supervisor 时提示前台运行 `sift daemon`；
 3. **触发 label**：以配置 `labels.trigger` 为准（默认 `sift:run`），先 `gh/glab label list` 查重，不存在时展示将执行的命令并确认后创建（gh 用位置参数，glab 用 `--name` 与 `#RRGGBB` 颜色）；已存在或失败都只降级不阻塞；重复运行 init 不会重复安装或重复创建。
 
 `--offline` 或 flags 全给时这三步全部跳过，非交互输出不变。
 
-**成功预期**：末尾显示已写入配置并完成收尾引导（或按 `n` 跳过）；`sift agent list` 和 `sift project list` 能看到所选 Agent/项目。
+**成功预期**：末尾显示已写入配置、当前项目 ID/路径/forge 与收尾引导（或按 `n` 跳过）；`sift agent list` 和 `sift project list` 能看到所选 Agent/项目。其他已登记项目仍有 error 时，先按其路径提示修复或显式 remove，再把全局 doctor 视为完全通过。
 
 **失败恢复**：
 
