@@ -120,7 +120,7 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 	// Project binding. forge.kind is per-project and derived from the git
 	// remote host; only an undetectable host triggers one prompt for that
 	// project (issue #929).
-	projectKind, projectHost, projectKey := "", "", ""
+	projectKind, projectHost, projectKey, projectRepo := "", "", "", ""
 	if scope != setupAgent {
 		projectPath := opt.project
 		if projectPath == "" {
@@ -171,6 +171,7 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 			// the platform default in forge.host. addProject omits the host
 			// only when it equals the platform default (issue #929 review F1).
 			addProject(doc, abs, projectKind, projectKey, projectHost)
+			projectRepo = abs
 		}
 	}
 
@@ -283,12 +284,16 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s 已写入 %s\n", render.Status("ok"), config.ConfigPath(home))
+	currentProject := registeredSetupProject(home, projectRepo)
+	if interactive && scope == setupAll {
+		printRegisteredSetupProject(stdout, currentProject)
+	}
 	announceConfigApplied(home, stdout, stderr)
 	// Interactive init only: the closing three-in-one (issue #961). Offline or
 	// flags-given runs skip it entirely so CI/scripted output stays unchanged;
 	// the wizard exit code keeps reflecting the config write itself (红线).
 	if interactive && scope == setupAll {
-		setupCloseout(home, projectKind, projectKey, in, stdout, stderr)
+		setupCloseout(home, currentProject, in, stdout, stderr)
 	}
 	return 0
 }
@@ -1127,20 +1132,20 @@ func isSocket(path string) bool {
 // defaults to yes and can be skipped; every failure degrades without aborting.
 // The trigger label name comes from the just-written config (labels.trigger,
 // default sift:run, config.md §3.14).
-func setupCloseout(home config.Home, kind, projectKey string, in *bufio.Reader, stdout, stderr io.Writer) {
+func setupCloseout(home config.Home, project setupProjectContext, in *bufio.Reader, stdout, stderr io.Writer) {
 	fmt.Fprintln(stdout, "\n收尾三步（直接回车默认执行，可输入 n 跳过）：")
 	// Service runs first: with the daemon up, the doctor step then reports the
 	// steady state instead of transient reds (outbox backlog, sqlite missing,
 	// version:daemon unreadable) that are merely "daemon not started yet"
 	// artifacts (issue feedback: 暂态红被当成待修复项)。
 	setupCloseoutService(in, stdout, stderr, home)
-	setupCloseoutDoctor(in, stdout, home)
+	doctorSummary := setupCloseoutDoctorForProject(in, stdout, home, project)
 	label := "sift:run"
 	if snap, err := config.Load(home, time.Now()); err == nil {
 		label = snap.Config.Labels.Trigger
 	}
-	setupCloseoutLabel(in, stdout, kind, projectKey, label)
-	printSetupReady(stdout, kind, label)
+	setupCloseoutLabel(in, stdout, project.Kind, project.Key, label)
+	printSetupReady(stdout, project, label, doctorSummary)
 }
 
 // setupCloseoutDoctor runs the embedded offline doctor (step 1). A non-zero
@@ -1148,24 +1153,33 @@ func setupCloseout(home config.Home, kind, projectKey string, in *bufio.Reader, 
 // runbook; it never blocks the following steps. The runbook owns the repair
 // steps (引用不复制), so this only points per check.
 func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
+	setupCloseoutDoctorForProject(in, out, home, setupProjectContext{})
+}
+
+// setupCloseoutDoctorForProject keeps the full daemon-wide diagnosis honest,
+// while identifying whether a project-scoped problem belongs to the repository
+// just registered by init or to another existing registration.
+func setupCloseoutDoctorForProject(in *bufio.Reader, out io.Writer, home config.Home, current setupProjectContext) closeoutDoctorSummary {
 	if !askYes(in, out, "运行环境自检") {
-		return
+		return closeoutDoctorSummary{}
 	}
 	value := setupDoctorRun(home)
 	result := normalizeDoctorResult(value)
 	checks, _ := result["checks"].([]any)
-	var errors, warnings, known []string
+	var errors, known []string
+	var warnings []closeoutDoctorCheck
 	for _, raw := range checks {
 		check, _ := raw.(map[string]any)
 		level, _ := check["level"].(string)
 		id, _ := check["id"].(string)
+		message, _ := check["message"].(string)
 		switch {
 		case level == "error":
 			errors = append(errors, id)
 		case level == "warning" && knownV0Boundary(id):
 			known = append(known, id)
 		case level == "warning":
-			warnings = append(warnings, id)
+			warnings = append(warnings, closeoutDoctorCheck{ID: id, Message: message})
 		}
 	}
 	// The wizard prints only the aggregated conclusion; the full per-check
@@ -1179,14 +1193,25 @@ func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
 	default:
 		fmt.Fprintf(out, "  ✓ 自检通过（%d 项已知设计边界不计入）\n", len(known))
 	}
+	summary := closeoutDoctorSummary{errors: len(errors)}
+	projects := registeredSetupProjects(home)
 	if len(errors) > 0 {
 		for i, id := range errors {
+			projectID := doctorProjectID(id)
+			if project, other := projects[projectID]; other && projectID != current.ID {
+				summary.otherProjectErrors++
+				fmt.Fprintf(out, "  %d. %s\n     %s\n", i+1, otherProjectDoctorTitle(id, project), otherProjectDoctorAction(project))
+				continue
+			}
+			if projectID != "" && projectID == current.ID {
+				summary.currentProjectErrors++
+			}
 			fmt.Fprintf(out, "  %d. %s\n     %s\n", i+1, doctorProblemTitle(id), doctorAction(id))
 		}
 	}
 	// Aggregate deferrable warnings by kind across projects: three
 	// hooks:<project> rows collapse into one line naming the projects.
-	agg := aggregateWarningKinds(warnings)
+	agg := aggregateWarningKinds(warnings, projects)
 	for _, g := range agg {
 		fmt.Fprintf(out, "  - %s\n", g)
 	}
@@ -1197,6 +1222,7 @@ func setupCloseoutDoctor(in *bufio.Reader, out io.Writer, home config.Home) {
 		fmt.Fprintln(out, "  （逐项诊断可随时运行 sift doctor）")
 	}
 	printFrozenLaunchEnvNote(out, home)
+	return summary
 }
 
 // doctorProblemTitle states the user-visible problem, not the check id.
@@ -1239,37 +1265,42 @@ func doctorAction(id string) string {
 
 // aggregateWarningKinds groups deferrable warnings by prefix across projects
 // and renders one plain-language, self-healing note per kind.
-func aggregateWarningKinds(ids []string) []string {
-	var hooksProjects []string
+func aggregateWarningKinds(warnings []closeoutDoctorCheck, projects map[string]setupProjectContext) []string {
+	var absent, drift, unreadable []string
 	other := 0
-	hookLike := func(id string) bool { return strings.HasPrefix(id, "hooks:") }
-	hooksStorage := false
-	for _, id := range ids {
+	projectName := func(id string) string {
+		if project, ok := projects[id]; ok && project.Repo != "" {
+			return id + "（" + project.Repo + "）"
+		}
+		return id
+	}
+	for _, warning := range warnings {
 		switch {
-		case hookLike(id):
-			if id == "hooks:storage" {
-				hooksStorage = true
-			} else if p := strings.TrimPrefix(id, "hooks:"); p != "" {
-				hooksProjects = append(hooksProjects, p)
+		case warning.ID == "hooks:storage":
+			other++
+		case strings.HasPrefix(warning.ID, "hooks:"):
+			project := strings.TrimPrefix(warning.ID, "hooks:")
+			switch warning.Message {
+			case "hooks baseline is absent":
+				absent = append(absent, projectName(project))
+			case "hooks state drifted from baseline":
+				drift = append(drift, projectName(project))
+			default:
+				unreadable = append(unreadable, projectName(project))
 			}
-		case strings.HasPrefix(id, "outbox:"):
-			other++
-		case strings.HasPrefix(id, "attempts:"):
-			other++
-		case strings.HasPrefix(id, "version:wrapper"):
-			other++
 		default:
 			other++
 		}
 	}
 	var lines []string
-	if len(hooksProjects) > 0 || hooksStorage {
-		msg := "hooks 基线未建立"
-		if len(hooksProjects) > 0 {
-			msg += "（" + strings.Join(hooksProjects, "、") + "）"
-		}
-		msg += "：仓库刚接入时正常，daemon 首轮同步后自动建立，无需操作"
-		lines = append(lines, msg)
+	if len(absent) > 0 {
+		lines = append(lines, "hooks 基线未建立（"+strings.Join(absent, "、")+"）：仓库刚接入时正常，daemon 首轮同步后自动建立，无需操作")
+	}
+	if len(drift) > 0 {
+		lines = append(lines, "hooks 状态与已保存基线不一致（"+strings.Join(drift, "、")+"）：运行 sift doctor 查看详情；不影响其他项目使用")
+	}
+	if len(unreadable) > 0 {
+		lines = append(lines, "项目 hooks 无法读取（"+strings.Join(unreadable, "、")+"）：确认对应路径仍是 Git 仓库；历史项目可用 sift project remove <项目 ID> 清理")
 	}
 	if other > 0 {
 		lines = append(lines, "其他 "+strconv.Itoa(other)+" 项可暂缓提示：不影响使用；运行 sift doctor 可逐项查看")
@@ -1481,9 +1512,16 @@ func triggerLabelListed(output, label string) bool {
 // expectation. The numeric intervals (60s idle / 15s active) are expected
 // semantics only; the authoritative defaults live once in config.md §3.5 and
 // are linked, never copied (引用不复制, issue #961).
-func printSetupReady(out io.Writer, kind, label string) {
-	fmt.Fprintf(out, "全部就绪。给一个 Issue 打上 %s 后，约 60 秒内出现在 sift ps：\n", label)
-	if kind == "gitlab" {
+func printSetupReady(out io.Writer, project setupProjectContext, label string, doctor closeoutDoctorSummary) {
+	switch {
+	case doctor.errors == 0:
+		fmt.Fprintf(out, "全部就绪。给一个 Issue 打上 %s 后，约 60 秒内出现在 sift ps：\n", label)
+	case project.ID != "" && doctor.otherProjectErrors == doctor.errors:
+		fmt.Fprintf(out, "当前项目 %s 已登记且自检无 error；另有 %d 个其他已登记项目需处理。确认当前项目无 error 后，可给 Issue 打上 %s：\n", project.ID, doctor.otherProjectErrors, label)
+	default:
+		fmt.Fprintf(out, "配置已写入，但自检仍有 %d 个需要处理的问题；修复后再给 Issue 打上 %s：\n", doctor.errors, label)
+	}
+	if project.Kind == "gitlab" {
 		fmt.Fprintf(out, "  glab issue update <N> --label %q\n", label)
 	} else {
 		fmt.Fprintf(out, "  gh issue edit <N> --add-label %q\n", label)
