@@ -54,65 +54,31 @@ func doctorWithVersions(ctx context.Context, offline bool, home config.Home, cli
 		cfg = snapshot.Config
 	}
 	dbPath := filepath.Join(home.Path, "sift.db")
-	// The cfg-scoped stages (CLI probes, per-agent qualification, per-project
-	// hooks/policy) and the db reads are mutually independent; run them all
-	// concurrently so doctor's wall time is the slowest probe, not the sum
-	// (real measurement: serial ~5s → parallel ~1.2s; issue feedback: doctor
-	// 为何这么慢). Results are appended after Wait; the final sort by id
-	// makes collection order irrelevant.
-	var (
-		wg                       sync.WaitGroup
-		execChecks, pgChecks     []doctorCheck
-		hookChecksOut, polChecks []doctorCheck
-		sqlChecks, verChecks     []doctorCheck
-		obChecks, attChecks      []doctorCheck
-	)
-	// stageTiming uses one slot per stage (written by exactly one goroutine,
-	// read after Wait): a shared map would be a concurrent-write fatal.
-	type stageTiming struct {
-		name string
-		ms   int64
-	}
-	stageTimings := make([]stageTiming, 0, 8)
-	var stageMu sync.Mutex
-	run := func(name string, dst *[]doctorCheck, fn func() []doctorCheck) {
-		wg.Add(1)
-		stageMu.Lock()
-		stageTimings = append(stageTimings, stageTiming{name: name})
-		slot := len(stageTimings) - 1
-		stageMu.Unlock()
-		go func() {
-			defer wg.Done()
-			t0 := time.Now()
-			*dst = fn()
-			stageMu.Lock()
-			stageTimings[slot].ms = time.Since(t0).Milliseconds()
-			stageMu.Unlock()
-		}()
+	// The expensive CLI and per-project probes parallelize internally. Keep
+	// database-backed stages ordered: separate SQLite connections can contend
+	// with a migration or a non-WAL test database, turning a healthy doctor
+	// result into spurious "database is locked" errors.
+	stages := make(map[string]int64, 8)
+	run := func(name string, fn func() []doctorCheck) []doctorCheck {
+		t0 := time.Now()
+		result := fn()
+		stages[name] = time.Since(t0).Milliseconds()
+		return result
 	}
 	if cfg != nil {
-		run("exec", &execChecks, func() []doctorCheck { return executableChecks(ctx, cfg) })
-		run("process_group", &pgChecks, func() []doctorCheck { return processGroupChecks(ctx, dbPath, cfg) })
-		run("hooks", &hookChecksOut, func() []doctorCheck { return hookChecks(ctx, dbPath, cfg) })
-		run("policy", &polChecks, func() []doctorCheck { return projectPolicyChecks(ctx, cfg) })
+		checks = append(checks, run("exec", func() []doctorCheck { return executableChecks(ctx, cfg) })...)
+		checks = append(checks, run("process_group", func() []doctorCheck { return processGroupChecks(ctx, dbPath, cfg) })...)
 	}
-	run("sqlite", &sqlChecks, func() []doctorCheck { return []doctorCheck{sqliteCheck(ctx, dbPath)} })
-	run("version", &verChecks, func() []doctorCheck {
+	checks = append(checks, run("sqlite", func() []doctorCheck { return []doctorCheck{sqliteCheck(ctx, dbPath)} })...)
+	checks = append(checks, run("version", func() []doctorCheck {
 		return versionChecks(ctx, dbPath, clientVersion, clientProtocolMajor, liveDaemon)
-	})
-	run("outbox", &obChecks, func() []doctorCheck { return outboxChecks(ctx, dbPath) })
-	run("attempts", &attChecks, func() []doctorCheck { return attemptChecks(ctx, dbPath) })
-	wg.Wait()
-	checks = append(checks, execChecks...)
-	checks = append(checks, pgChecks...)
-	checks = append(checks, sqlChecks...)
-	checks = append(checks, verChecks...)
-	checks = append(checks, obChecks...)
+	})...)
+	checks = append(checks, run("outbox", func() []doctorCheck { return outboxChecks(ctx, dbPath) })...)
 	if cfg != nil {
-		checks = append(checks, hookChecksOut...)
-		checks = append(checks, polChecks...)
+		checks = append(checks, run("hooks", func() []doctorCheck { return hookChecks(ctx, dbPath, cfg) })...)
+		checks = append(checks, run("policy", func() []doctorCheck { return projectPolicyChecks(ctx, cfg) })...)
 	}
-	checks = append(checks, attChecks...)
+	checks = append(checks, run("attempts", func() []doctorCheck { return attemptChecks(ctx, dbPath) })...)
 	checks = append(checks, homePermissions(home.Path, offline)...)
 	checks = append(checks, platformPostureChecks()...)
 	checks = append(checks, tm6ExposureChecks()...)
@@ -129,10 +95,6 @@ func doctorWithVersions(ctx context.Context, offline bool, home config.Home, cli
 		if check.Level == "warning" {
 			exitCode = 1
 		}
-	}
-	stages := make(map[string]int64, len(stageTimings))
-	for _, st := range stageTimings {
-		stages[st.name] = st.ms
 	}
 	return map[string]any{"offline": offline, "exit_code": exitCode, "security_posture": "unsafe-local", "checks": checks, "stage_ms": stages}
 }
