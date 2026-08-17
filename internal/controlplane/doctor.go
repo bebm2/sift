@@ -67,25 +67,41 @@ func doctorWithVersions(ctx context.Context, offline bool, home config.Home, cli
 		sqlChecks, verChecks     []doctorCheck
 		obChecks, attChecks      []doctorCheck
 	)
-	run := func(dst *[]doctorCheck, fn func() []doctorCheck) {
+	// stageTiming uses one slot per stage (written by exactly one goroutine,
+	// read after Wait): a shared map would be a concurrent-write fatal.
+	type stageTiming struct {
+		name string
+		ms   int64
+	}
+	stageTimings := make([]stageTiming, 0, 8)
+	var stageMu sync.Mutex
+	run := func(name string, dst *[]doctorCheck, fn func() []doctorCheck) {
 		wg.Add(1)
+		stageMu.Lock()
+		stageTimings = append(stageTimings, stageTiming{name: name})
+		slot := len(stageTimings) - 1
+		stageMu.Unlock()
 		go func() {
 			defer wg.Done()
+			t0 := time.Now()
 			*dst = fn()
+			stageMu.Lock()
+			stageTimings[slot].ms = time.Since(t0).Milliseconds()
+			stageMu.Unlock()
 		}()
 	}
 	if cfg != nil {
-		run(&execChecks, func() []doctorCheck { return executableChecks(ctx, cfg) })
-		run(&pgChecks, func() []doctorCheck { return processGroupChecks(ctx, dbPath, cfg) })
-		run(&hookChecksOut, func() []doctorCheck { return hookChecks(ctx, dbPath, cfg) })
-		run(&polChecks, func() []doctorCheck { return projectPolicyChecks(ctx, cfg) })
+		run("exec", &execChecks, func() []doctorCheck { return executableChecks(ctx, cfg) })
+		run("process_group", &pgChecks, func() []doctorCheck { return processGroupChecks(ctx, dbPath, cfg) })
+		run("hooks", &hookChecksOut, func() []doctorCheck { return hookChecks(ctx, dbPath, cfg) })
+		run("policy", &polChecks, func() []doctorCheck { return projectPolicyChecks(ctx, cfg) })
 	}
-	run(&sqlChecks, func() []doctorCheck { return []doctorCheck{sqliteCheck(ctx, dbPath)} })
-	run(&verChecks, func() []doctorCheck {
+	run("sqlite", &sqlChecks, func() []doctorCheck { return []doctorCheck{sqliteCheck(ctx, dbPath)} })
+	run("version", &verChecks, func() []doctorCheck {
 		return versionChecks(ctx, dbPath, clientVersion, clientProtocolMajor, liveDaemon)
 	})
-	run(&obChecks, func() []doctorCheck { return outboxChecks(ctx, dbPath) })
-	run(&attChecks, func() []doctorCheck { return attemptChecks(ctx, dbPath) })
+	run("outbox", &obChecks, func() []doctorCheck { return outboxChecks(ctx, dbPath) })
+	run("attempts", &attChecks, func() []doctorCheck { return attemptChecks(ctx, dbPath) })
 	wg.Wait()
 	checks = append(checks, execChecks...)
 	checks = append(checks, pgChecks...)
@@ -114,7 +130,11 @@ func doctorWithVersions(ctx context.Context, offline bool, home config.Home, cli
 			exitCode = 1
 		}
 	}
-	return map[string]any{"offline": offline, "exit_code": exitCode, "security_posture": "unsafe-local", "checks": checks}
+	stages := make(map[string]int64, len(stageTimings))
+	for _, st := range stageTimings {
+		stages[st.name] = st.ms
+	}
+	return map[string]any{"offline": offline, "exit_code": exitCode, "security_posture": "unsafe-local", "checks": checks, "stage_ms": stages}
 }
 
 func runtimeCheck() doctorCheck {
