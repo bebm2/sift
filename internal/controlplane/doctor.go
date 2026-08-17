@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -51,18 +52,51 @@ func doctorWithVersions(ctx context.Context, offline bool, home config.Home, cli
 		checks = append(checks, errorCheck("config", err))
 	} else {
 		cfg = snapshot.Config
-		checks = append(checks, executableChecks(ctx, cfg)...)
-		checks = append(checks, processGroupChecks(ctx, filepath.Join(home.Path, "sift.db"), cfg)...)
 	}
 	dbPath := filepath.Join(home.Path, "sift.db")
-	checks = append(checks, sqliteCheck(ctx, dbPath))
-	checks = append(checks, versionChecks(ctx, dbPath, clientVersion, clientProtocolMajor, liveDaemon)...)
-	checks = append(checks, outboxChecks(ctx, dbPath)...)
-	if cfg != nil {
-		checks = append(checks, hookChecks(ctx, dbPath, cfg)...)
-		checks = append(checks, projectPolicyChecks(ctx, cfg)...)
+	// The cfg-scoped stages (CLI probes, per-agent qualification, per-project
+	// hooks/policy) and the db reads are mutually independent; run them all
+	// concurrently so doctor's wall time is the slowest probe, not the sum
+	// (real measurement: serial ~5s → parallel ~1.2s; issue feedback: doctor
+	// 为何这么慢). Results are appended after Wait; the final sort by id
+	// makes collection order irrelevant.
+	var (
+		wg                       sync.WaitGroup
+		execChecks, pgChecks     []doctorCheck
+		hookChecksOut, polChecks []doctorCheck
+		sqlChecks, verChecks     []doctorCheck
+		obChecks, attChecks      []doctorCheck
+	)
+	run := func(dst *[]doctorCheck, fn func() []doctorCheck) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			*dst = fn()
+		}()
 	}
-	checks = append(checks, attemptChecks(ctx, dbPath)...)
+	if cfg != nil {
+		run(&execChecks, func() []doctorCheck { return executableChecks(ctx, cfg) })
+		run(&pgChecks, func() []doctorCheck { return processGroupChecks(ctx, dbPath, cfg) })
+		run(&hookChecksOut, func() []doctorCheck { return hookChecks(ctx, dbPath, cfg) })
+		run(&polChecks, func() []doctorCheck { return projectPolicyChecks(ctx, cfg) })
+	}
+	run(&sqlChecks, func() []doctorCheck { return []doctorCheck{sqliteCheck(ctx, dbPath)} })
+	run(&verChecks, func() []doctorCheck {
+		return versionChecks(ctx, dbPath, clientVersion, clientProtocolMajor, liveDaemon)
+	})
+	run(&obChecks, func() []doctorCheck { return outboxChecks(ctx, dbPath) })
+	run(&attChecks, func() []doctorCheck { return attemptChecks(ctx, dbPath) })
+	wg.Wait()
+	checks = append(checks, execChecks...)
+	checks = append(checks, pgChecks...)
+	checks = append(checks, sqlChecks...)
+	checks = append(checks, verChecks...)
+	checks = append(checks, obChecks...)
+	if cfg != nil {
+		checks = append(checks, hookChecksOut...)
+		checks = append(checks, polChecks...)
+	}
+	checks = append(checks, attChecks...)
 	checks = append(checks, homePermissions(home.Path, offline)...)
 	checks = append(checks, platformPostureChecks()...)
 	checks = append(checks, tm6ExposureChecks()...)
@@ -142,17 +176,29 @@ func wrapperVersionChecks(ctx context.Context, daemonPath string) []doctorCheck 
 }
 
 func executableChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
-	checks := make([]doctorCheck, 0, len(cfg.Agents)+len(cfg.Projects)*2+2)
+	// Probes are independent of each other and each may take up to its own
+	// command deadline (network-backed forge auth being the slowest). Running
+	// them serially summed 5s+ on a five-agent setup and was the real reason
+	// doctor felt broken; run them concurrently so the wall time is the slowest
+	// probe, not the sum (issue feedback: doctor 为何这么慢).
+	type probe struct {
+		id  string
+		run func() doctorCheck
+	}
+	var probes []probe
+	mk := func(id string, run func() doctorCheck) { probes = append(probes, probe{id: id, run: run}) }
 	for _, agent := range cfg.Agents {
-		checks = append(checks, qualificationCommandCheck(ctx, "agent-cli:"+agent.ID, agent.Executable, agent.VersionArgs, agent.LaunchEnv))
+		a := agent
+		mk("agent-cli:"+a.ID, func() doctorCheck {
+			return qualificationCommandCheck(ctx, "agent-cli:"+a.ID, a.Executable, a.VersionArgs, a.LaunchEnv)
+		})
 	}
 	if cfg.Brain.Executable != "" {
-		checks = append(checks, commandCheck(ctx, "brain-cli", cfg.Brain.Executable, cfg.Brain.VersionArgs))
+		mk("brain-cli", func() doctorCheck { return commandCheck(ctx, "brain-cli", cfg.Brain.Executable, cfg.Brain.VersionArgs) })
 	}
 	if configUsesTmux(cfg) {
-		checks = append(checks, commandCheck(ctx, "tmux", "tmux", []string{"-V"}))
+		mk("tmux", func() doctorCheck { return commandCheck(ctx, "tmux", "tmux", []string{"-V"}) })
 	}
-
 	seen := map[string]bool{}
 	for _, project := range cfg.Projects {
 		if !project.Enabled {
@@ -163,32 +209,55 @@ func executableChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 			continue
 		}
 		seen[key] = true
-		checks = append(checks,
-			commandCheck(ctx, "forge-cli:"+project.ID+":version", project.Forge.CLI, []string{"--version"}),
-			commandCheck(ctx, "forge-cli:"+project.ID+":login", project.Forge.CLI, []string{"auth", "status", "--hostname", project.Forge.Host}),
-		)
+		p := project
+		mk("forge-cli:"+p.ID+":version", func() doctorCheck {
+			return commandCheck(ctx, "forge-cli:"+p.ID+":version", p.Forge.CLI, []string{"--version"})
+		})
+		mk("forge-cli:"+p.ID+":login", func() doctorCheck {
+			return commandCheck(ctx, "forge-cli:"+p.ID+":login", p.Forge.CLI, []string{"auth", "status", "--hostname", p.Forge.Host})
+		})
 	}
+	checks := make([]doctorCheck, len(probes))
+	var wg sync.WaitGroup
+	for i := range probes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			checks[i] = probes[i].run()
+		}(i)
+	}
+	wg.Wait()
 	return checks
 }
 
 func processGroupChecks(ctx context.Context, dbPath string, cfg *config.Config) []doctorCheck {
-	checks := make([]doctorCheck, 0, len(cfg.Agents))
-	for _, agent := range cfg.Agents {
-		q, err := runtimepkg.BuildQualification(runtimepkg.QualificationInput{AgentID: agent.ID, Args: agent.Args, TaskTransport: string(agent.TaskTransport), VersionArgs: agent.VersionArgs, Executable: agent.Executable, LaunchEnv: agent.LaunchEnv, Context: ctx})
-		if err != nil {
-			checks = append(checks, doctorCheck{ID: "process-group:" + agent.ID, Level: "warning", Message: "process-group qualification identity is unavailable", Details: map[string]any{"agent_id": agent.ID, "status": "process-group-unverified", "reason": "identity_incomplete"}})
-			continue
-		}
-		status, reason, statusErr := storage.ReadTopologyQualificationStatus(ctx, dbPath, q.Key)
-		if statusErr != nil {
-			status, reason = "process-group-unverified", "no-record"
-		}
-		level, message := "warning", "process-group qualification is not verified"
-		if status == "process-group-verified" {
-			level, message = "ok", "process-group qualification is verified"
-		}
-		checks = append(checks, doctorCheck{ID: "process-group:" + agent.ID, Level: level, Message: message, Details: map[string]any{"agent_id": agent.ID, "status": status, "reason": reason, "qualification_key": q.Key, "method_version": q.MethodVersion, "executable_path": q.ExecutablePath, "goos": q.GOOS, "goarch": q.GOARCH}})
+	// BuildQualification probes each agent's --version to digest the output
+	// (1.8s for five agents, serially) — the heaviest doctor stage after the
+	// CLI probes. Agents are independent, so build concurrently; the caller
+	// sorts checks by id (issue feedback: doctor 为何这么慢).
+	checks := make([]doctorCheck, len(cfg.Agents))
+	var wg sync.WaitGroup
+	for i, agent := range cfg.Agents {
+		wg.Add(1)
+		go func(i int, agent config.Agent) {
+			defer wg.Done()
+			q, err := runtimepkg.BuildQualification(runtimepkg.QualificationInput{AgentID: agent.ID, Args: agent.Args, TaskTransport: string(agent.TaskTransport), VersionArgs: agent.VersionArgs, Executable: agent.Executable, LaunchEnv: agent.LaunchEnv, Context: ctx})
+			if err != nil {
+				checks[i] = doctorCheck{ID: "process-group:" + agent.ID, Level: "warning", Message: "process-group qualification identity is unavailable", Details: map[string]any{"agent_id": agent.ID, "status": "process-group-unverified", "reason": "identity_incomplete"}}
+				return
+			}
+			status, reason, statusErr := storage.ReadTopologyQualificationStatus(ctx, dbPath, q.Key)
+			if statusErr != nil {
+				status, reason = "process-group-unverified", "no-record"
+			}
+			level, message := "warning", "process-group qualification is not verified"
+			if status == "process-group-verified" {
+				level, message = "ok", "process-group qualification is verified"
+			}
+			checks[i] = doctorCheck{ID: "process-group:" + agent.ID, Level: level, Message: message, Details: map[string]any{"agent_id": agent.ID, "status": status, "reason": reason, "qualification_key": q.Key, "method_version": q.MethodVersion, "executable_path": q.ExecutablePath, "goos": q.GOOS, "goarch": q.GOARCH}}
+		}(i, agent)
 	}
+	wg.Wait()
 	return checks
 }
 
@@ -202,31 +271,48 @@ func hookChecks(ctx context.Context, dbPath string, cfg *config.Config) []doctor
 		byProject[b.ProjectID] = b.Digest
 	}
 	checks := make([]doctorCheck, 0, len(cfg.Projects))
+	// Per-project git fingerprinting (several git subprocesses each) is the
+	// slowest doctor stage after the CLI probes; projects are independent, so
+	// capture them concurrently. The caller sorts all checks by id, so order
+	// here does not matter (issue feedback: doctor 为何这么慢).
+	var (
+		wg      sync.WaitGroup
+		enabled []config.Project
+	)
 	for _, project := range cfg.Projects {
-		if !project.Enabled {
-			continue
-		}
-		snapshot, err := hooks.Capture(ctx, project.Repo)
-		if err != nil {
-			checks = append(checks, doctorCheck{ID: "hooks:" + project.ID, Level: "warning", Message: err.Error(), Details: map[string]any{"project_id": project.ID}})
-			continue
-		}
-		details := map[string]any{"project_id": project.ID, "git_config_digest": snapshot.GitConfigDigest, "effective_hooks_path": snapshot.EffectiveHooksPath, "hooks_directory_digest": snapshot.DirectoryDigest, "digest": snapshot.Digest}
-		if snapshot.CoreHooksPathValue != nil {
-			details["core_hooks_path"] = *snapshot.CoreHooksPathValue
-		}
-		baseline, ok := byProject[project.ID]
-		if !ok {
-			checks = append(checks, doctorCheck{ID: "hooks:" + project.ID, Level: "warning", Message: "hooks baseline is absent", Details: details})
-			continue
-		}
-		details["baseline_digest"] = baseline
-		if baseline != snapshot.Digest {
-			checks = append(checks, doctorCheck{ID: "hooks:" + project.ID, Level: "warning", Message: "hooks state drifted from baseline", Details: details})
-		} else {
-			checks = append(checks, doctorCheck{ID: "hooks:" + project.ID, Level: "ok", Message: "hooks match baseline", Details: details})
+		if project.Enabled {
+			enabled = append(enabled, project)
 		}
 	}
+	results := make([]doctorCheck, len(enabled))
+	for i, project := range enabled {
+		wg.Add(1)
+		go func(i int, project config.Project) {
+			defer wg.Done()
+			snapshot, err := hooks.Capture(ctx, project.Repo)
+			if err != nil {
+				results[i] = doctorCheck{ID: "hooks:" + project.ID, Level: "warning", Message: err.Error(), Details: map[string]any{"project_id": project.ID}}
+				return
+			}
+			details := map[string]any{"project_id": project.ID, "git_config_digest": snapshot.GitConfigDigest, "effective_hooks_path": snapshot.EffectiveHooksPath, "hooks_directory_digest": snapshot.DirectoryDigest, "digest": snapshot.Digest}
+			if snapshot.CoreHooksPathValue != nil {
+				details["core_hooks_path"] = *snapshot.CoreHooksPathValue
+			}
+			baseline, ok := byProject[project.ID]
+			if !ok {
+				results[i] = doctorCheck{ID: "hooks:" + project.ID, Level: "warning", Message: "hooks baseline is absent", Details: details}
+				return
+			}
+			details["baseline_digest"] = baseline
+			if baseline != snapshot.Digest {
+				results[i] = doctorCheck{ID: "hooks:" + project.ID, Level: "warning", Message: "hooks state drifted from baseline", Details: details}
+			} else {
+				results[i] = doctorCheck{ID: "hooks:" + project.ID, Level: "ok", Message: "hooks match baseline", Details: details}
+			}
+		}(i, project)
+	}
+	wg.Wait()
+	checks = append(checks, results...)
 	return checks
 }
 
@@ -235,57 +321,82 @@ func projectPolicyChecks(ctx context.Context, cfg *config.Config) []doctorCheck 
 		projectID string
 		hash      string
 	}
-	observed := make([]observedPolicy, 0, len(cfg.Projects))
 	checks := make([]doctorCheck, 0, len(cfg.Projects)*2)
-	for _, project := range cfg.Projects {
-		if !project.Enabled {
-			continue
+	// Per-project policy reads run git in the repo; run them concurrently and
+	// keep the cfg.Projects order via index slots (the drift baseline below
+	// takes observed[0], so order must stay stable). The caller sorts the
+	// final checks by id (issue feedback: doctor 为何这么慢).
+	var enabledIdx []int
+	for i, project := range cfg.Projects {
+		if project.Enabled {
+			enabledIdx = append(enabledIdx, i)
 		}
-		baseSHA, data, missing, err := readProjectPolicy(ctx, project.Repo)
-		if err != nil {
-			checks = append(checks, errorCheck("policy:"+project.ID, err))
-			continue
-		}
-		base := policy.Missing()
-		fileState := "missing"
-		if !missing {
-			base, err = policy.Parse(data)
-			if err != nil {
-				checks = append(checks, errorCheck("policy:"+project.ID, err))
-				continue
-			}
-			fileState = "valid"
-		}
-		// Doctor has no task-kind-specific certification projection to invent.
-		// The all-zero revision makes unavailable certification fail closed while
-		// still exposing the effective policy currently safe to use.
-		_, hash, _, qualification, err := policy.Assemble(base, cfg.GateDefaults, "doctor", policy.CertificationProjection{TaskKind: "doctor", CertificationVersion: strings.Repeat("0", 64)}, false)
-		if err != nil {
-			checks = append(checks, errorCheck("policy:"+project.ID, err))
-			continue
-		}
-		rulesVersion, err := config.CertificationRulesVersion(cfg.Certification)
-		if err != nil {
-			checks = append(checks, errorCheck("policy:"+project.ID, err))
-			continue
-		}
-		details := map[string]any{
-			"project_id": project.ID, "base_sha": baseSHA, "file_state": fileState,
-			"effective_policy_hash": hash, "certification_rules_version": rulesVersion, "certification_version": "unknown",
-			"auto_merge_qualification":  qualification.AutoMerge,
-			"explicit_scalar_overrides": explicitScalarOverrides(base),
-			"path_rules":                map[string][]string{"hard": base.Hard, "soft": base.Soft, "soft_exceptions": base.SoftExceptions},
-		}
-		level, message := "ok", "project policy matches global defaults"
-		if hasExplicitDrift(base) {
-			level, message = "warning", "project policy explicitly differs from global defaults"
-		}
-		if qualification.AutoMerge != policy.AutoMergeNotRequested {
-			level, message = "warning", "auto_merge requested but certification or CAS qualification is unavailable"
-		}
-		checks = append(checks, doctorCheck{ID: "policy:" + project.ID, Level: level, Message: message, Details: details})
-		observed = append(observed, observedPolicy{projectID: project.ID, hash: hash})
 	}
+	perProject := make([]doctorCheck, len(enabledIdx))
+	observed := make([]observedPolicy, len(enabledIdx))
+	var wg sync.WaitGroup
+	for slot, i := range enabledIdx {
+		project := cfg.Projects[i]
+		wg.Add(1)
+		go func(slot int, project config.Project) {
+			defer wg.Done()
+			baseSHA, data, missing, err := readProjectPolicy(ctx, project.Repo)
+			if err != nil {
+				perProject[slot] = errorCheck("policy:"+project.ID, err)
+				return
+			}
+			base := policy.Missing()
+			fileState := "missing"
+			if !missing {
+				base, err = policy.Parse(data)
+				if err != nil {
+					perProject[slot] = errorCheck("policy:"+project.ID, err)
+					return
+				}
+				fileState = "valid"
+			}
+			// Doctor has no task-kind-specific certification projection to invent.
+			// The all-zero revision makes unavailable certification fail closed while
+			// still exposing the effective policy currently safe to use.
+			_, hash, _, qualification, err := policy.Assemble(base, cfg.GateDefaults, "doctor", policy.CertificationProjection{TaskKind: "doctor", CertificationVersion: strings.Repeat("0", 64)}, false)
+			if err != nil {
+				perProject[slot] = errorCheck("policy:"+project.ID, err)
+				return
+			}
+			rulesVersion, err := config.CertificationRulesVersion(cfg.Certification)
+			if err != nil {
+				perProject[slot] = errorCheck("policy:"+project.ID, err)
+				return
+			}
+			details := map[string]any{
+				"project_id": project.ID, "base_sha": baseSHA, "file_state": fileState,
+				"effective_policy_hash": hash, "certification_rules_version": rulesVersion, "certification_version": "unknown",
+				"auto_merge_qualification":  qualification.AutoMerge,
+				"explicit_scalar_overrides": explicitScalarOverrides(base),
+				"path_rules":                map[string][]string{"hard": base.Hard, "soft": base.Soft, "soft_exceptions": base.SoftExceptions},
+			}
+			level, message := "ok", "project policy matches global defaults"
+			if hasExplicitDrift(base) {
+				level, message = "warning", "project policy explicitly differs from global defaults"
+			}
+			if qualification.AutoMerge != policy.AutoMergeNotRequested {
+				level, message = "warning", "auto_merge requested but certification or CAS qualification is unavailable"
+			}
+			perProject[slot] = doctorCheck{ID: "policy:" + project.ID, Level: level, Message: message, Details: details}
+			observed[slot] = observedPolicy{projectID: project.ID, hash: hash}
+		}(slot, project)
+	}
+	wg.Wait()
+	checks = append(checks, perProject...)
+	// Error paths leave their observed slot zeroed; drop them so the drift
+	// baseline is a successfully-read project (as the serial version did).
+	valid := observed[:0]
+	for _, o := range observed {
+		if o.projectID != "" {
+			valid = append(valid, o)
+		}
+	}
+	observed = valid
 	if len(observed) > 1 {
 		baseline := observed[0]
 		for _, current := range observed[1:] {
