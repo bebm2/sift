@@ -535,17 +535,30 @@ func TestEmitInterruptSummaryExpiryBoundaries(t *testing.T) {
 }
 
 func TestAdvanceInterruptExcludesStaleDailyMembersAndCancelsEmptyBatch(t *testing.T) {
+	// Commander-mode idle heartbeat (#1010) changes the contract: a daily
+	// summary batch that collected zero admitted members is still a digest
+	// surface. When the project has no active Run AND at least one Run has
+	// touched `updated_at_ms` inside IdleRunActivityWindowMS, the sealer
+	// publishes a single status_note line instead of silently cancelling.
+	// "Active" runs (status IN queued/running/waiting_human) and runs whose
+	// last activity is older than the window keep the original silent
+	// cancellation, so the matrix only diverges for cases where Advance
+	// drives the run to a terminal state within the window — currently just
+	// `close` below. The other cases retain their original expectation
+	// because they leave a run in waiting_human, which counts as active.
 	for _, tc := range []struct {
-		name     string
-		onExpire ExpireAction
-		onMax    ExpireAction
-		max      int
-		want     string
+		name       string
+		onExpire   ExpireAction
+		onMax      ExpireAction
+		max        int
+		wantStatus string
+		wantState  string
+		wantOps    int
 	}{
-		{"close", ExpireAutoReject, ExpireHold, 1, "closed"},
-		{"version change", ExpireEscalate, ExpireHold, 1, "open"},
-		{"expire hold", ExpireHold, ExpireHold, 1, "open"},
-		{"max hold", ExpireEscalate, ExpireHold, 0, "open"},
+		{"close", ExpireAutoReject, ExpireHold, 1, "closed", "sealed", 1},
+		{"version change", ExpireEscalate, ExpireHold, 1, "open", "cancelled", 0},
+		{"expire hold", ExpireHold, ExpireHold, 1, "open", "cancelled", 0},
+		{"max hold", ExpireEscalate, ExpireHold, 0, "open", "cancelled", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, path := openTestDB(t)
@@ -580,7 +593,7 @@ func TestAdvanceInterruptExcludesStaleDailyMembersAndCancelsEmptyBatch(t *testin
 			if err := db.db.QueryRow(`SELECT count(*) FROM attention_batch_members WHERE interrupt_id=? AND excluded_at_ms=?`, in.ID, testNow+expiry).Scan(&excluded); err != nil {
 				t.Fatal(err)
 			}
-			if status != tc.want || excluded != 1 {
+			if status != tc.wantStatus || excluded != 1 {
 				t.Fatalf("status/excluded = %s/%d", status, excluded)
 			}
 			if err := db.Close(); err != nil {
@@ -602,7 +615,7 @@ func TestAdvanceInterruptExcludesStaleDailyMembersAndCancelsEmptyBatch(t *testin
 			if err := db.db.QueryRow(`SELECT count(*) FROM outbox_operations WHERE kind='channel_publish'`).Scan(&operations); err != nil {
 				t.Fatal(err)
 			}
-			if state != "cancelled" || operations != 0 {
+			if state != tc.wantState || operations != tc.wantOps {
 				t.Fatalf("batch state/channel operations = %s/%d", state, operations)
 			}
 		})

@@ -79,3 +79,64 @@ func TestHTTPWebhookSenderHTTPDateRetryAfterUsesInjectedClock(t *testing.T) {
 		t.Fatalf("retry-after = %v, want 2000ms", err)
 	}
 }
+
+// TestWebhookAdapterAcceptsEmptyMembersWithStatusNote closes the contract
+// surface introduced by issue #1010: a "daily_summary" batch with no
+// admitted interrupts may carry status_note instead of members, and the
+// adapter must accept the empty-membership / status_note shape.
+func TestWebhookAdapterAcceptsEmptyMembersWithStatusNote(t *testing.T) {
+	const note = "昨日无待办事件；当前无活跃 Run —— 舰队空闲。若尚有未派发工作请开窗喂料"
+	payload := []byte(`{"batch_id":"daily:project-a:UTC:1700000000000:ops-slack:github:Z2l0aHViLmNvbQ:b3duZXIvcmVwby1wcm9qZWN0LXg:issue:NDI","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"secret_ref:SIFT_CHANNEL_OPS_SLACK","type":"webhook"},"delivery_id":"daily:project-a:UTC:1700000000000:ops-slack:github:Z2l0aHViLmNvbQ:b3duZXIvcmVwby1wcm9qZWN0LXg:issue:NDI:publish:1","delivery_kind":"attention_batch","due_at_ms":1700000000000,"forge_alert_target":{"forge_host":"github.com","forge_kind":"github","forge_project_key":"org/repo-project-a","target_id":"42","target_kind":"issue"},"members":[],"project_id":"project-a","rendered_text":"` + note + `","scope":"day","scope_id":"UTC:1700000000000","status_note":"` + note + `"}`)
+	key := "attention-batch:daily:project-a:UTC:1700000000000:ops-slack:github:Z2l0aHViLmNvbQ:b3duZXIvcmVwby1wcm9qZWN0LXg:issue:NDI:publish:1"
+	adapter := WebhookAdapter{
+		Resolver: resolverFunc(func(_ context.Context, ref string) (string, error) {
+			if ref != "SIFT_CHANNEL_OPS_SLACK" {
+				t.Fatalf("ref = %q", ref)
+			}
+			return "https://example.test/hook?token=secret", nil
+		}),
+		Sender: senderFunc(func(_ context.Context, endpoint, body string) (string, error) {
+			if !strings.Contains(body, note) {
+				t.Fatalf("status_note text missing from body: %q", body)
+			}
+			if !strings.Contains(body, "[sift "+key+"]") {
+				t.Fatalf("marker absent: %q", body)
+			}
+			return "remote-idle", nil
+		}),
+	}
+	if _, err := adapter.Publish(context.Background(), payload, key); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWebhookAdapterRejectsEmptyMembersWithoutStatusNote locks the negative
+// half of the contract: a batch payload with no members AND no status_note
+// must still be rejected as contract violation. The empty-memberships /
+// status_note pair is the only allowed shape; everything else fails closed.
+func TestWebhookAdapterRejectsEmptyMembersWithoutStatusNote(t *testing.T) {
+	payload := []byte(`{"batch_id":"daily:project-a:UTC:1700000000000:ops-slack:github:Z2l0aHViLmNvbQ:b3duZXIvcmVwby1wcm9qZWN0LXg:issue:NDI","batch_kind":"daily_summary","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"secret_ref:SIFT_CHANNEL_OPS_SLACK","type":"webhook"},"delivery_id":"daily:project-a:UTC:1700000000000:ops-slack:github:Z2l0aHViLmNvbQ:b3duZXIvcmVwby1wcm9qZWN0LXg:issue:NDI:publish:1","delivery_kind":"attention_batch","due_at_ms":1700000000000,"forge_alert_target":{"forge_host":"github.com","forge_kind":"github","forge_project_key":"org/repo-project-a","target_id":"42","target_kind":"issue"},"members":[],"project_id":"project-a","rendered_text":"","scope":"day","scope_id":"UTC:1700000000000"}`)
+	adapter := WebhookAdapter{
+		Resolver: resolverFunc(func(context.Context, string) (string, error) { return "https://example.test/?token=secret", nil }),
+		Sender:   senderFunc(func(context.Context, string, string) (string, error) { return "", errors.New("sender should not run") }),
+	}
+	if _, err := adapter.Publish(context.Background(), payload, "k"); !errors.Is(err, ErrContractViolation) {
+		t.Fatalf("empty members + no status_note error = %v, want ErrContractViolation", err)
+	}
+}
+
+// TestWebhookAdapterRejectsStatusNoteOnCriticalFusedBatch keeps the
+// commander-mode idle heartbeat scoped to "daily_summary". A "critical_fused"
+// batch must not be able to slip a status_note in to bypass the members
+// requirement — that would let critical fusion pretend to be a heartbeat.
+func TestWebhookAdapterRejectsStatusNoteOnCriticalFusedBatch(t *testing.T) {
+	const note = "昨日无待办事件；当前无活跃 Run —— 舰队空闲。若尚有未派发工作请开窗喂料"
+	payload := []byte(`{"batch_id":"critical:scope:ep:ops-slack:github:Z2l0aHViLmNvbQ:b3duZXIvcmVwby1wcm9qZWN0LXg:issue:NDI","batch_kind":"critical_fused","channel":{"capabilities":["text"],"id":"ops-slack","renderer":"plain-v1","target_ref":"secret_ref:SIFT_CHANNEL_OPS_SLACK","type":"webhook"},"delivery_id":"critical:scope:ep:ops-slack:github:Z2l0aHViLmNvbQ:b3duZXIvcmVwby1wcm9qZWN0LXg:issue:NDI:publish:1","delivery_kind":"attention_batch","due_at_ms":1700000000000,"forge_alert_target":{"forge_host":"github.com","forge_kind":"github","forge_project_key":"org/repo-project-a","target_id":"42","target_kind":"issue"},"members":[],"project_id":"project-a","rendered_text":"` + note + `","scope":"global","scope_id":"global:1700000000000","status_note":"` + note + `"}`)
+	adapter := WebhookAdapter{
+		Resolver: resolverFunc(func(context.Context, string) (string, error) { return "https://example.test/?token=secret", nil }),
+		Sender:   senderFunc(func(context.Context, string, string) (string, error) { return "", errors.New("sender should not run") }),
+	}
+	if _, err := adapter.Publish(context.Background(), payload, "k"); !errors.Is(err, ErrContractViolation) {
+		t.Fatalf("critical_fused with status_note error = %v, want ErrContractViolation", err)
+	}
+}

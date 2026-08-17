@@ -92,6 +92,8 @@ type DB struct {
 	interruptT4        InterruptT4Caller
 	interruptT6        InterruptT6Caller
 	gateReEvalIntr     GateReEvalInterruptEmission
+	idleDailySummaryMu sync.RWMutex
+	idleDailySummary   IdleDailySummaryConfig
 	channelPolicyMu    sync.RWMutex
 	channelAlertAfter  int
 	channelMaxAttempts int
@@ -180,6 +182,32 @@ func (d *DB) gateReEvalInterruptEmission() GateReEvalInterruptEmission {
 	d.wakeupMu.RLock()
 	defer d.wakeupMu.RUnlock()
 	return d.gateReEvalIntr
+}
+
+// IdleDailySummaryConfig carries the closed effective attention config used
+// by the commander-mode idle heartbeat pre-creation seam
+// (channel_batches.go:EnsureIdleDailySummaryBatches). Set once during daemon
+// assembly; zero-value means the seam is a no-op, which matches every test
+// that doesn't exercise the production idle path.
+type IdleDailySummaryConfig struct {
+	Channels       []InterruptChannel
+	DayTimezone    string
+	DailySummaryAt string
+}
+
+// SetIdleDailySummaryConfig installs the attention defaults used by
+// EnsureIdleDailySummaryBatches. The seam is intentionally a single tick-time
+// write so production and tests alike can opt out by leaving this unset.
+func (d *DB) SetIdleDailySummaryConfig(cfg IdleDailySummaryConfig) {
+	d.idleDailySummaryMu.Lock()
+	defer d.idleDailySummaryMu.Unlock()
+	d.idleDailySummary = cfg
+}
+
+func (d *DB) idleDailySummaryConfig() IdleDailySummaryConfig {
+	d.idleDailySummaryMu.RLock()
+	defer d.idleDailySummaryMu.RUnlock()
+	return d.idleDailySummary
 }
 
 // Path returns the database file path this handle opened.

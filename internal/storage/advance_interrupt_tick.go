@@ -48,5 +48,18 @@ func (d *DB) SupervisorInterruptTick(ctx context.Context, now int64) error {
 			return err
 		}
 	}
+	// Commander-mode idle heartbeat seam (#1010, NEED-FIX F1): pre-create
+	// empty daily_summary collecting batches for projects with Run activity
+	// inside IdleRunActivityWindowMS so a zero-interrupt day still has a
+	// batch row that PrepareDueAttentionBatches can seal into the single
+	// status_note line. The seam is opt-in: without
+	// SetIdleDailySummaryConfig (the default for tests) this is a no-op and
+	// the legacy "batch created when first interrupt joins" behavior is
+	// preserved verbatim. Runs before PrepareDueAttentionBatches so any new
+	// collecting row is selected by the same SELECT state='collecting'
+	// AND due_at_ms<=now that picks up populated batches.
+	if err := d.EnsureIdleDailySummaryBatches(ctx, now); err != nil {
+		return err
+	}
 	return d.PrepareDueAttentionBatches(ctx, now)
 }

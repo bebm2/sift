@@ -164,6 +164,17 @@ func assemble(db *storage.DB, cfg *config.Config, now func() time.Time, runner f
 	rerunClients := make(map[string]forgeworker.RerunCheckClient)
 	db.SetChannelPolicy(cfg.Attention.ChannelFailureAlertAfter, cfg.Outbox.MaxAttempts)
 	db.SetGateReEvalInterruptEmission(gateReEvalInterruptEmission(cfg.Attention, interruptChannels(cfg.Attention)))
+	// Commander-mode idle heartbeat seam (#1010, NEED-FIX F1): install the
+	// frozen channels + (day_timezone, daily_summary_at) that
+	// EnsureIdleDailySummaryBatches reads on every supervisor tick to
+	// pre-create empty collecting batches for active projects. Without this
+	// the seam is a no-op, preserving the legacy batch-on-first-interrupt
+	// behavior for any test that doesn't opt in.
+	db.SetIdleDailySummaryConfig(storage.IdleDailySummaryConfig{
+		Channels:       interruptChannels(cfg.Attention),
+		DayTimezone:    cfg.Attention.DayTimezone,
+		DailySummaryAt: cfg.Attention.DailySummaryAt,
+	})
 	// Channel payloads are already sealed by storage. The production consumer
 	// owns the only resolver and HTTP side effect; it is not project-scoped.
 	d.AddChannelWorker(&channelworker.Worker{
