@@ -95,7 +95,7 @@ sift doctor                  # 在线 doctor 确认 daemon 可达、无新告警
 
 合批的两条纪律：
 
-1. **每日一次 digest 时窗**（默认 Sift 的 `daily_summary`）：在那之前累积的 `waiting_human` interrupt 全部合批；时窗由 `day_timezone` + `daily_summary_at` 在 Sift 配置里固定。详见 [安装指南 → Channel 配置](installation.md)。
+1. **每日一次 digest 时窗**（默认 Sift 的 `daily_summary`）：在那之前累积的 `waiting_human` interrupt 全部合批；时窗由 `day_timezone` + `daily_summary_at` 在 Sift 配置里固定。详见 [`../specs/config.md` §3.9 `attention`](../specs/config.md#39-attention)。
 2. **不在 digest 时窗外响应 interrupt**（除 `critical_fused` 与 `merge_conflict` 这两类自动升级的）：daemon 会按 escalation 升级到最大封顶，落 `hold` 而不是再生成 digest。**接受 hold 的代价**——它就是消化批量 human attention 的工具。
 
 合批之外还有一类**空闲心跳**（§5），它不是 interrupt，所以不会打扰你；它只是告诉你「Sift 在跑但今天确实没你事」。
@@ -116,7 +116,7 @@ sift doctor                  # 在线 doctor 确认 daemon 可达、无新告警
 
 ## 5. 空闲心跳（自动）
 
-从 v0 开始（issue #1010），Sift 在每日 digest 合批时会区分三种状态：
+从 v0 开始（issue #1010），Sift 在每日 digest 合批时会区分四种状态：
 
 | 项目状态 | 当日 digest 行为 |
 |---|---|
@@ -124,6 +124,8 @@ sift doctor                  # 在线 doctor 确认 daemon 可达、无新告警
 | **无 interrupt + 有活跃 Run**（`queued` / `running` / `waiting_human`） | 静默不发——你已经有更新鲜的信号 |
 | **无 interrupt + 无活跃 Run + 最近 7 天有 Run 活动** | 发一条**单行状态心跳**：见下 |
 | 无 interrupt + 无活跃 Run + 最近 7 天无活动（dormant） | 静默不发——项目真休眠了，避免永久噪音 |
+
+**「最近 7 天有 Run 活动」指 `runs.updated_at_ms` 落在当前时刻往前 7 天的窗口里**。窗口外、或项目从未有过 Run 的项目都算 dormant。窗口长度在代码里是命名常量 `IdleRunActivityWindowMS`（`internal/storage/channel_batches.go`），目前不暴露为配置。
 
 状态心跳是一条**确定性的单行文本**，到点按 `daily_summary` 时窗发出：
 
@@ -136,8 +138,6 @@ sift doctor                  # 在线 doctor 确认 daemon 可达、无新告警
 - 不会被 `failure_review` 等分类升级。
 
 它只是让你（与你的 commander session）能区分「今天没邮件是因为 Sift 死了」与「今天没邮件是因为项目真的没事」——后者不需要你动，前者需要你翻 `sift doctor`。
-
-「7 天」是命名常量（`IdleRunActivityWindowMS`），目前不暴露为配置。后续若反馈需要可调，再以配置项形式外露——参见分析文档 §4 第 5 步的「信号齐备后评估」节奏。
 
 ## 6. 档位表（自主度）
 

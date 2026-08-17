@@ -26,6 +26,129 @@ const IdleRunActivityWindowMS = int64(7 * 24 * 60 * 60 * 1000)
 // signal. Critical_fuse / interrupt surfaces never use this string.
 const idleRunNoteText = "昨日无待办事件；当前无活跃 Run —— 舰队空闲。若尚有未派发工作请开窗喂料"
 
+// EnsureIdleDailySummaryBatches pre-creates empty "daily_summary" collecting
+// batches for every project that has touched a Run inside
+// IdleRunActivityWindowMS, so a zero-interrupt day still has a batch row that
+// PrepareDueAttentionBatches can seal into the commander-mode idle status_note.
+// Without this seam the daily_summary batch only materializes when the first
+// interrupt joins it (addBatchMemberTx), so a day with zero interrupts is a
+// silent miss and the human side loses the "still alive" signal.
+//
+// The seam is intentionally opt-in: with no IdleDailySummaryConfig installed
+// (the default for every existing test) it is a no-op, preserving the legacy
+// behavior. Production installs the config once during daemon assembly via
+// SetIdleDailySummaryConfig.
+//
+// Dormant projects (no Run activity inside the window, no rows at all) are
+// never pre-created, so a project that has truly gone quiet still decays into
+// silent cancellation — the 7d window remains the sole dormancy gate. The
+// per-project most recent Run's frozen forge target (forge_kind/host/forge_project_key,
+// issue/discussion target) is reused; an empty collector batch for a project
+// whose runs reference different targets will pick the single most recent
+// row's target, matching the per-project digest surface that
+// shouldPublishIdleNoteTx / EnqueueHandle resolve.
+func (d *DB) EnsureIdleDailySummaryBatches(ctx context.Context, nowMS int64) error {
+	cfg := d.idleDailySummaryConfig()
+	if len(cfg.Channels) == 0 || cfg.DailySummaryAt == "" {
+		return nil
+	}
+	due, ok := nextSummary(nowMS, cfg.DayTimezone, cfg.DailySummaryAt)
+	if !ok || due <= 0 {
+		return fmt.Errorf("storage: invalid idle daily summary clock %q/%q", cfg.DayTimezone, cfg.DailySummaryAt)
+	}
+	// Active projects (queued/running/waiting_human) still pre-create the
+	// empty batch: by the time the due fires the project may have dropped to
+	// idle, and shouldPublishIdleNoteTx inside prepareAttentionBatch is the
+	// authoritative branch decision. We only skip dormant projects.
+	rows, err := d.db.QueryContext(ctx, `SELECT p.id,
+		COALESCE((SELECT r.forge_kind FROM runs r WHERE r.project_id=p.id ORDER BY r.updated_at_ms DESC, r.id LIMIT 1), ''),
+		COALESCE((SELECT r.forge_host FROM runs r WHERE r.project_id=p.id ORDER BY r.updated_at_ms DESC, r.id LIMIT 1), ''),
+		COALESCE((SELECT r.forge_project_key FROM runs r WHERE r.project_id=p.id ORDER BY r.updated_at_ms DESC, r.id LIMIT 1), ''),
+		COALESCE((SELECT CASE WHEN r.issue_id IS NOT NULL THEN 'issue' ELSE r.discussion_target_kind END FROM runs r WHERE r.project_id=p.id ORDER BY r.updated_at_ms DESC, r.id LIMIT 1), ''),
+		COALESCE((SELECT COALESCE(r.issue_id, r.discussion_target_id) FROM runs r WHERE r.project_id=p.id ORDER BY r.updated_at_ms DESC, r.id LIMIT 1), ''),
+		MAX(r.updated_at_ms)
+		FROM projects p LEFT JOIN runs r ON r.project_id=p.id
+		WHERE p.enabled=1 AND p.health='active'
+		GROUP BY p.id
+		HAVING MAX(r.updated_at_ms) IS NOT NULL AND MAX(r.updated_at_ms) >= ?`, nowMS-IdleRunActivityWindowMS)
+	if err != nil {
+		return err
+	}
+	type pendingProject struct {
+		project, forgeKind, host, forgeProject, targetKind, targetID string
+	}
+	var projects []pendingProject
+	for rows.Next() {
+		var p pendingProject
+		var recent sql.NullInt64
+		if err := rows.Scan(&p.project, &p.forgeKind, &p.host, &p.forgeProject, &p.targetKind, &p.targetID, &recent); err != nil {
+			rows.Close()
+			return err
+		}
+		if !recent.Valid || recent.Int64 < nowMS-IdleRunActivityWindowMS {
+			continue
+		}
+		if p.forgeKind == "" || p.host == "" || p.forgeProject == "" || p.targetKind == "" || p.targetID == "" {
+			// A row in runs without a complete forge target is a test
+			// fixture, not a production fleet signal. Skip rather than
+			// guess a target identity.
+			continue
+		}
+		projects = append(projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, p := range projects {
+		if err := d.ensureProjectIdleBatches(ctx, p, due, nowMS); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureProjectIdleBatches pre-creates one empty "daily_summary" collecting
+// batch per enabled channel for a single project, unless one already exists
+// for (project, channel, due). The batch carries the same channel snapshot
+// the dispatcher will later freeze into the batch_deliveries / outbox
+// payloads so the heartbeat and a populated daily_summary on a future day
+// share an immutable channel projection.
+//
+// Empty batches that survive PrepareDueAttentionBatches with zero admitted
+// members hit the existing idle branch in prepareAttentionBatch; a project
+// that grows an active Run between pre-creation and due is the canonical
+// reason shouldPublishIdleNoteTx returns false — the seam does not need a
+// second activity check here.
+func (d *DB) ensureProjectIdleBatches(ctx context.Context, p struct {
+	project, forgeKind, host, forgeProject, targetKind, targetID string
+}, due, nowMS int64) error {
+	cfg := d.idleDailySummaryConfig()
+	for _, channel := range cfg.Channels {
+		snapshot := channel.snapshot()
+		enc := base64.RawURLEncoding.EncodeToString
+		batchID := fmt.Sprintf("daily:%s:%s:%d:%s:%s:%s:%s:%s:%s", p.project, cfg.DayTimezone, due, channel.ID, p.forgeKind, enc([]byte(p.host)), enc([]byte(p.forgeProject)), p.targetKind, enc([]byte(p.targetID)))
+		deliveryID := batchID + ":publish:1"
+		scope := "day"
+		scopeID := cfg.DayTimezone + ":" + fmt.Sprint(due)
+		// Idempotent: if a batch with this identity already exists (the
+		// populated-batch path added it earlier via addBatchMemberTx), the
+		// INSERT OR IGNORE is a no-op and we move on. The unique index on
+		// (project_id,kind,channel_id,scope,scope_id,forge_*) keeps identity
+		// collisions safe across paths.
+		if _, err := d.db.ExecContext(ctx, `INSERT OR IGNORE INTO attention_batches
+			(id, state, project_id, channel_id, channel_snapshot_json, forge_kind, forge_host, forge_project_key,
+			 target_kind, target_id, kind, delivery_id, scope, scope_id, due_at_ms, created_at_ms, updated_at_ms)
+			VALUES (?, 'collecting', ?, ?, ?, ?, ?, ?, ?, ?, 'daily_summary', ?, ?, ?, ?, ?, ?)`,
+			batchID, p.project, channel.ID, string(snapshot), p.forgeKind, p.host, p.forgeProject, p.targetKind, p.targetID, deliveryID, scope, scopeID, due, nowMS, nowMS); err != nil {
+			return fmt.Errorf("storage: ensure idle daily batch: %w", err)
+		}
+	}
+	return nil
+}
+
 func (d *DB) PrepareDueAttentionBatches(ctx context.Context, nowMS int64) error {
 	rows, err := d.db.QueryContext(ctx, `SELECT id FROM attention_batches WHERE state='collecting' AND due_at_ms<=? ORDER BY due_at_ms,id`, nowMS)
 	if err != nil {
