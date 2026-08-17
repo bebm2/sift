@@ -234,3 +234,49 @@ func TestPollerAdvancesCursorOnlyAfterPersist(t *testing.T) {
 		t.Fatalf("replay created %d pending items, want 1 (receipt idempotent)", len(items))
 	}
 }
+
+// rateLimitedClient fails every poll with the budget-exhausted class, so the
+// poller's error path runs on every tick (issue: rate-limited project
+// retried every supervisor second, 13k+ error lines, doctor starved).
+type rateLimitedClient struct{ *forge.Fake }
+
+func (c *rateLimitedClient) ListIssuesByLabel(_ context.Context, _ forge.ProjectRef, _ string, _ forge.Cursor) ([]forge.Issue, forge.Cursor, error) {
+	return nil, "", &forge.ClassifiedError{Class: forge.ErrRateLimited, Summary: "forge api budget exhausted for project"}
+}
+
+// TestPollerRateLimitedErrorBacksOff pins the real-incident fix: after a
+// rate-limited poll failure, the project's NextPollAtMS must move into the
+// future (slow interval) so the next tick skips it instead of hammering.
+func TestPollerRateLimitedErrorBacksOff(t *testing.T) {
+	ctx := context.Background()
+	db := openPollerDB(t)
+	if err := db.SeedProjectForTest(ctx, "cfg-p", "proj", pollNow); err != nil {
+		t.Fatal(err)
+	}
+	p := &Poller{
+		DB:    db,
+		Forge: &rateLimitedClient{Fake: forge.NewFake()},
+		Projects: []Project{{ID: "proj", TriggerLabel: "sift",
+			Ref: forge.ProjectRef{Kind: forge.KindGitHub, Host: "github.com", ProjectKey: "o/r"}}},
+		Now: func() time.Time { return time.UnixMilli(pollNow) },
+		Idle: time.Minute, Active: 30 * time.Second, Slow: 5 * time.Minute,
+	}
+	if err := p.PollOnce(ctx); err == nil {
+		t.Fatal("rate-limited poll must surface the error")
+	}
+	cur, err := db.IntakeCursor(ctx, "proj", "issues")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.NextPollAtMS <= pollNow {
+		t.Fatalf("NextPollAtMS=%d not backed off (now=%d): the next tick would retry immediately", cur.NextPollAtMS, pollNow)
+	}
+	want := pollNow + int64(5*time.Minute/time.Millisecond)
+	if cur.NextPollAtMS != want {
+		t.Fatalf("NextPollAtMS=%d, want slow interval %d", cur.NextPollAtMS, want)
+	}
+	// The very next tick must skip the project entirely (no forge call).
+	if err := p.PollOnce(ctx); err != nil {
+		t.Fatalf("backed-off project must not error again this tick: %v", err)
+	}
+}
