@@ -20,7 +20,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 | M5 Attention/Command/Report/Brain/指标 | ✅ 完成 | PASS WITH NOTES | Interrupt 全功能、Command、Report、Channel、九项指标 |
 | M6 tmux + 完整故障矩阵 | ✅ 完成 | PASS WITH NOTES | tmux 第二后端、PTY、V2/V4 双后端全矩阵、阶段门归档 |
 | **M7 真实 Agent + PoC 取证** | 🔬 **PoC 已验证** | — | **Pi Brain+Agent 双 forge 端到端跑通** |
-| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 合入 main(#907–#910)；**Release 已迭代至 v0.6.6**（初跑旅程、doctor 稳定性与持续编排迭代线，`curl\|bash` 一键安装实测通过 #913/#914）。A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后 |
+| **M8 发布** | 🔄 **自动化核心完成** | — | §8.1–8.4 合入 main(#907–#910)；**Release 已迭代至 v0.6.7**（初跑旅程、doctor 稳定性与持续编排迭代线，`curl\|bash` 一键安装实测通过 #913/#914）。A10 干净机 + live 跨版本升级 = 人工门禁，待 M7 通过后 |
 
 ## M7 PoC 验证成果(本轮)
 
@@ -107,7 +107,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 
 - **doctor 慢/超时**：#1007/#1008 先后关闭 poller 与 reconciler 的限流重试风暴；#1009 仅为 `ops.doctor` 扩展端到端 RPC 预算；#1011、#1014、#1015 将独立 CLI/项目探活并行、加入 `stage_ms` 诊断，并将 SQLite 读检查保持有序以避免伪 `database is locked`。真实 macOS 在线 doctor 已恢复为约 2–3 秒；排障入口见 [troubleshooting](runbooks/troubleshooting.md#3-doctor-报告)。
 - **`sift issue` 只读边界**：#1013 已合入 `list`/`ls` 和写动词拒绝；#927 中的引号写动词绕过已修复并由测试钉住。混合语义 `list --all <question>` 仍未定义，保持问答路径而非猜测。
-- **#927 consolidated backlog**：静态检查已入 CI；已移除 os.Executable 测试污染并缓解 tmux 时序。仅保留低优先级的管道 init 提示观感、安装器矩阵/fish 兼容、macOS 进程/tmux flaky 的持续观察；按价值另拆，不与 M7 门禁混用。
+- **#927 consolidated backlog**：静态检查已入 CI；已移除 os.Executable 测试污染并缓解 tmux 时序。#1017 关闭 `sift issue` 引号写动词绕过；#1018 让 init 明示当前项目，并把其他已登记项目的 doctor 问题带路径/显式 remove 指引呈现，避免 error 后误称“全部就绪”。仅保留低优先级的管道 init 提示观感、安装器矩阵/fish 兼容、macOS 进程/tmux flaky 的持续观察；按价值另拆，不与 M7 门禁混用。
 - **#883 profile**：仍严格绑定 M7 的 ≥3 并行真实 Run；无该负载不得凭本机 doctor 数据声称完成 profile 或 P50 门禁。
 
 ## 遗留 / 延期
