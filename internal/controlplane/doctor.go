@@ -480,13 +480,12 @@ func qualificationCommandCheck(ctx context.Context, id, name string, args []stri
 	}
 	stdout, stderr, err := runtimepkg.ProbeVersionEnv(ctx, path, args, runtimepkg.FrozenEnvList(launchEnv), 0)
 	if err != nil {
-		output := strings.TrimSpace(string(append(stdout, stderr...)))
-		if output != "" {
-			return errorCheck(id, fmt.Errorf("%s: %w", output, err))
-		}
+		// Version probes can print arbitrary agent output. Do not place it in a
+		// durable doctor result: --json is an automation surface and errors may
+		// contain credentials or local implementation details.
 		return errorCheck(id, err)
 	}
-	return doctorCheck{ID: id, Level: "ok", Message: "command is available", Details: map[string]any{"path": path, "output": strings.TrimSpace(string(append(stdout, stderr...)))}}
+	return doctorCheck{ID: id, Level: "ok", Message: "command is available", Details: map[string]any{"path": path, "output": safeProbeOutput(append(stdout, stderr...))}}
 }
 
 func commandCheck(ctx context.Context, id, name string, args []string) doctorCheck {
@@ -506,12 +505,37 @@ func commandCheck(ctx context.Context, id, name string, args []string) doctorChe
 		output, err = cmd.CombinedOutput()
 	}
 	if err != nil {
-		if text := strings.TrimSpace(string(output)); text != "" {
-			return errorCheck(id, fmt.Errorf("%s: %w", text, err))
-		}
+		// auth status may emit token metadata or server URLs on stderr. The
+		// stable check id plus exit status is sufficient for a doctor failure;
+		// raw child output never belongs in operator JSON or logs.
 		return errorCheck(id, err)
 	}
-	return doctorCheck{ID: id, Level: "ok", Message: "command is available", Details: map[string]any{"path": path, "output": strings.TrimSpace(string(output))}}
+	details := map[string]any{"path": path}
+	if strings.HasSuffix(id, ":login") {
+		details["authenticated"] = true
+	} else {
+		details["output"] = safeProbeOutput(output)
+	}
+	return doctorCheck{ID: id, Level: "ok", Message: "command is available", Details: details}
+}
+
+// safeProbeOutput retains one short, display-only version line. It prevents a
+// CLI's multi-line diagnostic (notably forge auth status) from becoming part
+// of doctor JSON, terminal output, logs, or copied support reports.
+func safeProbeOutput(output []byte) string {
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			continue
+		}
+		const maxRunes = 160
+		runes := []rune(line)
+		if len(runes) > maxRunes {
+			return string(runes[:maxRunes]) + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 func sqliteCheck(ctx context.Context, path string) doctorCheck {

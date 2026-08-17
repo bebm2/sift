@@ -132,9 +132,14 @@ sift daemon
 ## 3. Doctor 报告
 
 ```bash
-sift doctor             # daemon 可用时的完整在线视图
-sift doctor --offline   # daemon 不可用时的只读视图
+sift doctor             # 默认用户摘要：当前项目优先、行动项优先
+sift doctor --details   # 完整但脱敏的检查表
+sift doctor --debug     # 开发诊断：check 字段、路径与阶段耗时
+sift doctor --offline   # daemon 不可用时的只读用户摘要
+sift doctor --json      # 自动化使用的机器结果（同样脱敏）
 ```
+
+默认摘要不会把每个已通过的 Agent/权限/CLI 探活平铺出来；它区分当前目录项目、其他已登记项目、运行环境与已知 V0 边界。其他项目的 Git/policy 问题会给出路径和显式 `sift project remove <项目 ID>` 选项，但绝不自动删除项目。`--details` 与 `--debug` 都不输出 Forge auth 原始文本、token、scope 或多行子进程输出。
 
 退出码语义见 [`../specs/config.md` §7](../specs/config.md#7-sift-doctor-基线退出码)。
 

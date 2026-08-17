@@ -206,16 +206,14 @@ func TestHumanDoctorRendersStatusesAndExitCodes(t *testing.T) {
 	for _, wantCode := range []int{0, 1, 2} {
 		result["exit_code"] = wantCode
 		var out bytes.Buffer
-		if code := emitDoctor(&out, io.Discard, result, false); code != wantCode {
+		if code := emitDoctorWithOptions(&out, io.Discard, result, doctorOptions{}); code != wantCode {
 			t.Fatalf("doctor exit code = %d, want %d", code, wantCode)
 		}
-		for _, icon := range []string{"✓", "⚠", "✗"} {
-			if !strings.Contains(out.String(), icon) {
-				t.Fatalf("doctor output %q lacks %s", out.String(), icon)
-			}
+		if !strings.Contains(out.String(), "Sift 状态：") || !strings.Contains(out.String(), "完整安全检查") {
+			t.Fatalf("doctor summary output = %q", out.String())
 		}
-		if !strings.Contains(out.String(), "Sift 诊断") || !strings.Contains(out.String(), "退出码") {
-			t.Fatalf("doctor output = %q", out.String())
+		if strings.Contains(out.String(), "ok-check") || strings.Contains(out.String(), "warning-check") {
+			t.Fatalf("default doctor must hide non-actionable check rows: %q", out.String())
 		}
 	}
 }

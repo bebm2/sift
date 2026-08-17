@@ -147,17 +147,15 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runService(cmdArgs, home, stdout, stderr)
 	}
 	if command == "doctor" {
-		jsonOutput, offline, ok := doctorFlags(cmdArgs)
+		doctorOpt, ok := parseDoctorOptions(cmdArgs)
 		if !ok {
-			report(stderr, fmt.Errorf("usage: sift doctor [--offline] [--json]"))
+			report(stderr, fmt.Errorf("usage: sift doctor [--offline] [--details] [--debug] [--json]"))
 			return 2
 		}
-		if offline {
+		if doctorOpt.offline {
 			result := controlplane.OfflineDoctor(home)
-			return emitDoctor(stdout, stderr, result, jsonOutput)
+			return emitDoctorWithOptions(stdout, stderr, result, doctorOpt)
 		}
-		// Keep the protocol envelope untouched when explicitly requested.
-		_ = jsonOutput
 	}
 	if command == "report" {
 		return runReport(cmdArgs, home, stdout, stderr)
@@ -211,8 +209,8 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runAttach(response, home, stdout, stderr, jsonOutput)
 	}
 	if command == "doctor" {
-		jsonOutput, _, _ := doctorFlags(cmdArgs)
-		return runDoctor(response, stdout, stderr, jsonOutput)
+		doctorOpt, _ := parseDoctorOptions(cmdArgs)
+		return runDoctorWithOptions(response, stdout, stderr, doctorOpt)
 	}
 	if jsonOutput {
 		// The JSON envelope is the RPC surface: keep it byte-identical with
@@ -287,16 +285,16 @@ func splitJSONFlag(args []string) (rest []string, jsonOutput bool) {
 // major before this function receives it; an unvalidated response is never
 // allowed to influence doctor output. A validated handshake rejection surfaces
 // as the version:daemon error the mismatch implies and exits 2.
-func runDoctor(response controlplane.Response, stdout, stderr io.Writer, jsonOutput bool) int {
+func runDoctorWithOptions(response controlplane.Response, stdout, stderr io.Writer, options doctorOptions) int {
 	if !response.EnvelopeValidated() {
 		report(stderr, fmt.Errorf("invalid daemon response for doctor"))
 		return 1
 	}
 	if !response.OK {
 		if response.Error != nil && (response.Error.Code == "unsupported_protocol" || response.Error.Code == "unsupported_binary") {
-			return emitDoctor(stdout, stderr, doctorMismatchResult(response), jsonOutput)
+			return emitDoctorWithOptions(stdout, stderr, doctorMismatchResult(response), options)
 		}
-		if jsonOutput {
+		if options.jsonOutput {
 			if err := printJSON(stdout, response); err != nil {
 				report(stderr, err)
 			}
@@ -305,13 +303,13 @@ func runDoctor(response controlplane.Response, stdout, stderr io.Writer, jsonOut
 		fmt.Fprintln(stdout, "✗ 守护进程返回错误")
 		return 1
 	}
-	if jsonOutput {
+	if options.jsonOutput {
 		if err := printJSON(stdout, response); err != nil {
 			report(stderr, err)
 			return 1
 		}
 	} else {
-		renderDoctor(stdout, response.Result)
+		renderDoctorWithOptions(stdout, response.Result, options)
 	}
 	return doctorExitCode(response.Result)
 }
@@ -344,14 +342,14 @@ func doctorMismatchResult(response controlplane.Response) map[string]any {
 
 // emitDoctor prints the offline doctor result and maps its exit_code to the
 // process exit status (config.md §7).
-func emitDoctor(stdout, stderr io.Writer, result map[string]any, jsonOutput bool) int {
-	if jsonOutput {
+func emitDoctorWithOptions(stdout, stderr io.Writer, result map[string]any, options doctorOptions) int {
+	if options.jsonOutput {
 		if err := printJSON(stdout, result); err != nil {
 			report(stderr, err)
 			return 1
 		}
 	} else {
-		renderDoctor(stdout, result)
+		renderDoctorWithOptions(stdout, result, options)
 	}
 	return doctorExitCode(result)
 }
@@ -379,22 +377,43 @@ func doctorExitCode(result any) int {
 	return 2
 }
 
-func doctorFlags(args []string) (jsonOutput, offline, ok bool) {
-	jsonOutput = os.Getenv("SIFT_JSON") == "1"
+type doctorOptions struct {
+	jsonOutput bool
+	offline    bool
+	details    bool
+	debug      bool
+}
+
+func parseDoctorOptions(args []string) (doctorOptions, bool) {
+	options := doctorOptions{jsonOutput: os.Getenv("SIFT_JSON") == "1"}
 	for _, arg := range args {
 		switch arg {
 		case "--json":
-			jsonOutput = true
+			options.jsonOutput = true
 		case "--offline":
-			offline = true
+			options.offline = true
+		case "--details":
+			options.details = true
+		case "--debug":
+			options.debug = true
 		default:
-			return false, false, false
+			return doctorOptions{}, false
 		}
 	}
-	return jsonOutput, offline, true
+	// JSON is the stable machine envelope. Human render modes cannot be mixed
+	// into it, and debug is an expanded form of details.
+	if options.jsonOutput && (options.details || options.debug) {
+		return doctorOptions{}, false
+	}
+	if options.debug {
+		options.details = true
+	}
+	return options, true
 }
 
-func renderDoctor(w io.Writer, value any) {
+// renderDoctorFull is the opt-in expanded human view. It deliberately uses
+// the same sanitized result as --json, never child-process raw output.
+func renderDoctorFull(w io.Writer, value any, debug bool) {
 	// Normalize typed offline checks to the same shape used by the online RPC.
 	var result map[string]any
 	body, marshalErr := json.Marshal(value)
@@ -422,6 +441,9 @@ func renderDoctor(w io.Writer, value any) {
 	labels := []string{"正常", "有警告", "有错误"}
 	if code >= 0 && code < len(labels) {
 		fmt.Fprintf(w, "\n结论：%s（退出码 %d）\n", labels[code], code)
+	}
+	if debug {
+		renderDoctorStages(w, result)
 	}
 }
 
