@@ -258,7 +258,7 @@ func TestPollerRateLimitedErrorBacksOff(t *testing.T) {
 		Forge: &rateLimitedClient{Fake: forge.NewFake()},
 		Projects: []Project{{ID: "proj", TriggerLabel: "sift",
 			Ref: forge.ProjectRef{Kind: forge.KindGitHub, Host: "github.com", ProjectKey: "o/r"}}},
-		Now: func() time.Time { return time.UnixMilli(pollNow) },
+		Now:  func() time.Time { return time.UnixMilli(pollNow) },
 		Idle: time.Minute, Active: 30 * time.Second, Slow: 5 * time.Minute,
 	}
 	if err := p.PollOnce(ctx); err == nil {
