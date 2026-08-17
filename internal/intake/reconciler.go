@@ -22,7 +22,20 @@ type Reconciler struct {
 	Now           func() time.Time
 	Certification config.Certification
 	Isolated      func(Project, error)
+
+	// backoffUntil tracks per-project cooldowns after a failed pass. The
+	// reconciler has no durable cursor, so an error return otherwise means the
+	// next supervisor tick (1s) re-hits the same forge immediately — the
+	// real-incident error storm (rate limited, 13k+ lines) starved the control
+	// plane while launchd showed the daemon alive (issue follow-up to the
+	// intake poller fix).
+	backoffUntil map[string]int64
 }
+
+// reconcileBackoff is the cooldown applied per failed pass: budget-class
+// failures get the slow-poll scale, other transients a shorter pause.
+const reconcileBackoff = 5 * time.Minute
+const reconcileBackoffShort = 1 * time.Minute
 
 // ReconcileOnce performs one independent reconciliation pass per project.
 // An auth/capability failure quarantines only that project, matching intake's
@@ -35,7 +48,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	if now.IsZero() {
 		now = time.UnixMilli(1)
 	}
+	if r.backoffUntil == nil {
+		r.backoffUntil = make(map[string]int64)
+	}
 	for _, project := range r.Projects {
+		if until, cooling := r.backoffUntil[project.ID]; cooling && now.UnixMilli() < until {
+			continue
+		}
 		isolated, err := r.DB.ProjectIsolated(ctx, project.ID)
 		if err != nil {
 			return err
@@ -52,8 +71,16 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 				}
 				continue
 			}
+			// Cool the project down before surfacing the error: the next tick
+			// must not re-hit the same forge call.
+			cooldown := reconcileBackoffShort
+			if errors.As(err, &classified) && errors.Is(err, forge.ErrRateLimited) {
+				cooldown = reconcileBackoff
+			}
+			r.backoffUntil[project.ID] = now.Add(cooldown).UnixMilli()
 			return err
 		}
+		delete(r.backoffUntil, project.ID)
 	}
 	return nil
 }
