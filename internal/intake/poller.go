@@ -71,6 +71,21 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 				}
 				continue
 			}
+			// A failed poll must still push the next attempt away: without this,
+			// the cursor keeps its old NextPollAtMS and the next supervisor tick
+			// (1s) retries immediately — a rate-limited project hammered its forge
+			// 13k+ times and the error storm starved the control plane (real
+			// incident: doctor i/o timeout while launchd showed the daemon alive).
+			// Budget-class failures back off to the slow interval; other transient
+			// errors to the idle interval.
+			backoff := p.Idle
+			if errors.As(err, &ce) && errors.Is(err, forge.ErrRateLimited) {
+				backoff = p.Slow
+			}
+			if backoff <= 0 {
+				backoff = time.Minute
+			}
+			_ = p.DB.PersistIntakeBatch(ctx, storage.PersistIntakeBatchCmd{ProjectID: project.ID, Stream: "issues", Cursor: cursor.Cursor, PollMode: "slow", NextPollAtMS: now.Add(backoff).UnixMilli(), NowMS: now.UnixMilli(), Items: nil})
 			return err
 		}
 	}
