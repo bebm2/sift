@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -323,7 +325,21 @@ func (s *Server) operatorRequest(req Request) Response {
 		if !onlyKeys(req.Params) {
 			return failure(req.RequestID, "invalid_request", "invalid params", false)
 		}
+		doctorStart := time.Now()
 		result := doctorWithVersions(context.Background(), false, s.Home, req.ClientVersion, req.ProtocolMajor, &storage.DoctorDaemonVersion{BinaryVersion: Version, ProtocolMajor: ProtocolMajor})
+		// Doctor latency is a supported UX property (issue feedback: doctor 为
+		// 何这么慢); log the total and per-stage split so a slow environment is
+		// diagnosable from siftd.err.log instead of guesswork.
+		if stages, ok := result["stage_ms"].(map[string]int64); ok && len(stages) > 0 {
+			parts := make([]string, 0, len(stages))
+			for name, ms := range stages {
+				parts = append(parts, fmt.Sprintf("%s=%dms", name, ms))
+			}
+			sort.Strings(parts)
+			log.Printf("siftd: ops.doctor total=%s [%s]", time.Since(doctorStart).Round(time.Millisecond), strings.Join(parts, " "))
+		} else {
+			log.Printf("siftd: ops.doctor total=%s", time.Since(doctorStart).Round(time.Millisecond))
+		}
 		if s.db != nil {
 			projections, err := s.db.ChannelDiagnostics(context.Background())
 			if err != nil {
