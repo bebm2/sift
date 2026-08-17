@@ -265,3 +265,35 @@ func TestIssueTestProjectIsolatesHome(t *testing.T) {
 		t.Fatal("issueTestProject returned empty repo")
 	}
 }
+
+// TestCwdEnabledProjectScopesListing pins the issue-feedback fix: when the
+// working directory sits inside exactly one enabled project's repo, `sift
+// issue` (list and question) defaults to that project only; other projects'
+// forges are not touched. --all restores the full view.
+func TestCwdEnabledProjectScopesListing(t *testing.T) {
+	_ = testHome(t)
+	repo := issueTestProject(t) // registers demo@github/owner/demo under repo
+	t.Chdir(repo)
+	// Register a second enabled project with a repo far away.
+	far := filepath.Join(t.TempDir(), "far")
+	addTestProject(t, far, "git@github.com:owner/far.git")
+	swapIssueForge(t, &fakeIssueForge{issues: []forge.Issue{
+		{ID: "7", Title: "demo issue", State: forge.IssueOpen, Author: "a", URL: "https://x/7"},
+	}})
+	var out, errB strings.Builder
+	if code := runWithInput([]string{"sift", "issue"}, strings.NewReader(""), &out, &errB); code != 0 {
+		t.Fatalf("exit=%d err=%s", code, errB.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "当前目录项目 demo") {
+		t.Fatalf("listing must announce the cwd project:\n%s", got)
+	}
+	if strings.Contains(got, "owner/far") {
+		t.Fatalf("cwd scope must not touch other projects:\n%s", got)
+	}
+	// --all widens back to every project.
+	out.Reset()
+	if code := runWithInput([]string{"sift", "issue", "--all"}, strings.NewReader(""), &out, &errB); code == 0 && !strings.Contains(out.String(), "far") {
+		t.Fatalf("--all must list every project:\n%s", out.String())
+	}
+}

@@ -21,7 +21,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -102,6 +104,19 @@ func runIssue(args []string, home config.Home, stdin io.Reader, stdout, stderr i
 	if len(args) > 0 && args[0] == "new" && (len(args) == 1 || strings.HasPrefix(args[1], "-")) {
 		return runIssueNew(args[1:], home, stdin, stdout, stderr)
 	}
+	// --all opts out of the cwd-project scoping everywhere (issue feedback:
+	// hexark 目录不应查其他项目，但偶尔仍要全局视图)。
+	all := false
+	if len(args) > 0 && args[0] == "--all" {
+		all = true
+		args = args[1:]
+	}
+	if all {
+		if len(args) == 0 {
+			return listOpenIssuesAll(home, stdout, stderr)
+		}
+		return answerIssueQuestionAll(strings.Join(args, " "), home, stdout, stderr)
+	}
 	if len(args) == 0 {
 		return listOpenIssues(home, stdout, stderr)
 	}
@@ -128,10 +143,52 @@ func loadIssueProjects(home config.Home, w io.Writer) (projects []config.Project
 	return projects, true, nil
 }
 
-// listOpenIssues is the fast path: per enabled project, the open-issue
-// snapshot via the forge CLI. A failing project is reported and fails the run
-// (exit 1) but never hides the other projects' listings.
+// cwdEnabledProject returns the enabled project whose repo contains the
+// current working directory, if there is exactly one such project. Commands
+// scoped by cwd (issue list/question) default to it: running inside a
+// registered repo should not fan out to every other project's forge (issue
+// feedback: hexark 目录下查 gh 项目噪音)。
+func cwdEnabledProject(projects []config.Project) (config.Project, bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return config.Project{}, false
+	}
+	if cwd, err = filepath.EvalSymlinks(cwd); err != nil {
+		return config.Project{}, false
+	}
+	var match config.Project
+	found := false
+	for _, p := range projects {
+		if p.Repo == "" {
+			continue
+		}
+		repo := p.Repo
+		if resolved, err := filepath.EvalSymlinks(p.Repo); err == nil {
+			repo = resolved
+		}
+		if cwd == repo || strings.HasPrefix(cwd, repo+string(os.PathSeparator)) {
+			if found { // nested registrations: ambiguous, keep the full listing
+				return config.Project{}, false
+			}
+			match, found = p, true
+		}
+	}
+	return match, found
+}
+
+// listOpenIssues is the fast path: cwd-scoped when the working directory sits
+// inside exactly one enabled project's repo (the common case — you are in the
+// repo you care about), all projects otherwise.
 func listOpenIssues(home config.Home, stdout, stderr io.Writer) int {
+	return listOpenIssuesScoped(home, stdout, stderr, false)
+}
+
+// listOpenIssuesAll is the --all variant: every enabled project, no cwd scope.
+func listOpenIssuesAll(home config.Home, stdout, stderr io.Writer) int {
+	return listOpenIssuesScoped(home, stdout, stderr, true)
+}
+
+func listOpenIssuesScoped(home config.Home, stdout, stderr io.Writer, all bool) int {
 	projects, ok, err := loadIssueProjects(home, stdout)
 	if err != nil {
 		report(stderr, fmt.Errorf("读取配置失败：%w", err))
@@ -139,6 +196,13 @@ func listOpenIssues(home config.Home, stdout, stderr io.Writer) int {
 	}
 	if !ok {
 		return 0
+	}
+	if !all {
+		if p, inRepo := cwdEnabledProject(projects); inRepo {
+			// Scoped listing: one line says which project and that --all widens.
+			fmt.Fprintf(stdout, "当前目录项目 %s（sift issue --all 查看全部项目）\n\n", p.ID)
+			projects = []config.Project{p}
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -178,6 +242,14 @@ func renderOpenIssues(w io.Writer, p config.Project, issues []forge.Issue, trunc
 // answerIssueQuestion is the slow path: gather evidence deterministically,
 // then one headless pi call with the pack on stdin and tools pinned to read.
 func answerIssueQuestion(question string, home config.Home, stdout, stderr io.Writer) int {
+	return answerIssueQuestionScoped(question, home, stdout, stderr, false)
+}
+
+func answerIssueQuestionAll(question string, home config.Home, stdout, stderr io.Writer) int {
+	return answerIssueQuestionScoped(question, home, stdout, stderr, true)
+}
+
+func answerIssueQuestionScoped(question string, home config.Home, stdout, stderr io.Writer, all bool) int {
 	projects, ok, err := loadIssueProjects(home, stdout)
 	if err != nil {
 		report(stderr, fmt.Errorf("读取配置失败：%w", err))
@@ -185,6 +257,12 @@ func answerIssueQuestion(question string, home config.Home, stdout, stderr io.Wr
 	}
 	if !ok {
 		return 0
+	}
+	if !all {
+		if p, inRepo := cwdEnabledProject(projects); inRepo {
+			fmt.Fprintf(stdout, "✓ 当前目录项目 %s，仅针对它取证（--all 查全部）\n", p.ID)
+			projects = []config.Project{p}
+		}
 	}
 	if _, e := issuePi.LookPath("pi"); e != nil {
 		fmt.Fprintln(stderr, "⚠ 未检测到 pi，本次降级为确定性列表；装好 pi 后再用自然语言提问。")
