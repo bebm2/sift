@@ -11,7 +11,7 @@ summary: 从安全试跑或已有仓库完成首个 Sift Run
 - **路径 A：Bluff Template**——已可从 Template 建立独立的安全试炼场；
 - **路径 B：已有仓库**——现在可用，建议先选一个可丢弃的小 Issue。
 
-安装和升级细节以 [安装指南](installation.md) 为准；这里聚焦从零到首个 Run。
+安装和升级细节以 [安装指南](installation.md) 为准；这里聚焦从零到首个 Run。完成首跑后如需把项目推进到「每天只看 30–60 分钟也前进」，进入进阶路径[单人半自主](continuous-orchestration.md)（指挥官模式 v0：指挥者会话 + Sift 执行层）。
 
 ## 0. 前置检查
 
@@ -345,3 +345,7 @@ sift rm <run-id>         # 终态后从默认列表归档，历史仍保留
 - Forge 是 Issue、Change、审批和合并状态的最终事实源。
 
 完成首个小 Run 后，再逐步扩大任务范围、调整 `.sift/policy.yaml` 和预算；不要在未观察真实 Agent/Forge 行为前直接开启自动合并。
+
+## 进阶路径：单人半自主
+
+完成首个 Run 之后，最常见的下一步是「想让项目持续推进到我不用每天盯盘」。本指南不覆盖那条路：它是另一个独立的使用模式，与「装好 Sift、跑通首跑」有相当不同的默认上下文与纪律（每日 digest 合批、`plan:<id>` 串联、空闲心跳、信号记录等）。请进入[持续推进项目：指挥者模式 v0](continuous-orchestration.md)，与配套分析文档[持续推进编排需求分析](../analysis/2026-08-17-continuous-project-orchestration.md)一起阅读。

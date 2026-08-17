@@ -66,6 +66,11 @@ type webhookPayload struct {
 	} `json:"forge_alert_target"`
 	RenderedText string            `json:"rendered_text"`
 	Members      []json.RawMessage `json:"members"`
+	// StatusNote carries a commander-mode idle heartbeat line on a
+	// "daily_summary" batch whose members list is empty by design. It is
+	// mutually exclusive with Members (whichever carries the day's payload)
+	// and is never set on interrupt or critical_fused batches.
+	StatusNote string `json:"status_note"`
 }
 
 type batchMember struct {
@@ -212,7 +217,16 @@ func (a WebhookAdapter) Publish(ctx context.Context, payload []byte, operationKe
 			return nil, fmt.Errorf("%w: interrupt payload", ErrContractViolation)
 		}
 	} else if p.DeliveryKind == "attention_batch" {
-		if !only(payload, "delivery_kind", "delivery_id", "batch_id", "batch_kind", "channel", "project_id", "forge_alert_target", "scope", "scope_id", "due_at_ms", "members", "rendered_text") || !required(payload, "batch_id", "batch_kind", "project_id", "scope", "scope_id", "due_at_ms", "forge_alert_target", "members") || p.BatchID == "" || (p.BatchKind != "daily_summary" && p.BatchKind != "critical_fused") || (p.Scope != "day" && p.Scope != "global" && p.Scope != "run") || p.ProjectID == "" || p.ForgeAlertTarget.ForgeKind == "" || (p.ForgeAlertTarget.ForgeKind != "github" && p.ForgeAlertTarget.ForgeKind != "gitlab") || p.ForgeAlertTarget.ForgeHost == "" || p.ForgeAlertTarget.ForgeProjectKey == "" || (p.ForgeAlertTarget.TargetKind != "issue" && p.ForgeAlertTarget.TargetKind != "change") || p.ForgeAlertTarget.TargetID == "" || len(p.Members) == 0 {
+		// Empty-members / status_note path (#1010): a "daily_summary" batch may
+		// carry no admitted interrupts on purpose when the fleet has gone idle
+		// within IdleRunActivityWindowMS. In that case `members` is empty and
+		// `status_note` carries the deterministic single-line text. The path
+		// is strictly scoped to daily_summary — critical_fused batches must
+		// always carry members, and status_note on a critical surface is
+		// rejected as contract violation.
+		statusNoteAllowed := p.BatchKind == "daily_summary" && len(p.Members) == 0 && p.StatusNote != ""
+		criticalFusedWithStatusNote := p.BatchKind == "critical_fused" && p.StatusNote != ""
+		if !only(payload, "delivery_kind", "delivery_id", "batch_id", "batch_kind", "channel", "project_id", "forge_alert_target", "scope", "scope_id", "due_at_ms", "members", "rendered_text", "status_note") || !required(payload, "batch_id", "batch_kind", "project_id", "scope", "scope_id", "due_at_ms", "forge_alert_target") || (!statusNoteAllowed && len(p.Members) == 0) || criticalFusedWithStatusNote || p.BatchID == "" || (p.BatchKind != "daily_summary" && p.BatchKind != "critical_fused") || (p.Scope != "day" && p.Scope != "global" && p.Scope != "run") || p.ProjectID == "" || p.ForgeAlertTarget.ForgeKind == "" || (p.ForgeAlertTarget.ForgeKind != "github" && p.ForgeAlertTarget.ForgeKind != "gitlab") || p.ForgeAlertTarget.ForgeHost == "" || p.ForgeAlertTarget.ForgeProjectKey == "" || (p.ForgeAlertTarget.TargetKind != "issue" && p.ForgeAlertTarget.TargetKind != "change") || p.ForgeAlertTarget.TargetID == "" {
 			return nil, fmt.Errorf("%w: batch payload", ErrContractViolation)
 		}
 		last := ""

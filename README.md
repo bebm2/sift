@@ -116,6 +116,7 @@ Sift 是仍在快速演进的本地自动化工具。GitHub/GitLab 控制面、p
 | 文档 | 内容 |
 |---|---|
 | [Getting Started](docs/guides/getting-started.md) | 两条首次使用路径、成功预期、失败恢复和清理 |
+| [持续推进项目：指挥者模式 v0](docs/guides/continuous-orchestration.md) | 单人半自主持续推进项目（外部指挥 + Sift 执行）|
 | [安装指南](docs/guides/installation.md) | release 校验、安装、升级与 service |
 | [故障排查](docs/runbooks/troubleshooting.md) | daemon、socket、配置与升级问题 |
 | [配置规格](docs/specs/config.md) | `~/.sift/config.yaml` 字段、默认值与预算 |
