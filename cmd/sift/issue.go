@@ -137,11 +137,14 @@ func runIssue(args []string, home config.Home, stdin io.Reader, stdout, stderr i
 		}
 		return listOpenIssuesScoped(home, stdout, stderr, all)
 	}
-	// Reserved write verbs: refuse up front, never start a pi call — "close
-	// 42" is an intent, not a question (issue #1012 misroute).
-	if len(args) > 0 && issueWriteVerbs[args[0]] {
-		fmt.Fprintf(stderr, "✗ 「%s」是保留写动词，`sift issue` 当前只读：写操作请直接用 gh/glab（例如 gh issue close <编号>）或在 forge 界面完成。\n", args[0])
-		return 2
+	// Reserved write verbs: refuse up front, never start a pi call — quoted
+	// input still has an imperative first word, e.g. `sift issue "close 42"`.
+	if len(args) > 0 {
+		words := strings.Fields(args[0])
+		if len(words) > 0 && issueWriteVerbs[words[0]] {
+			fmt.Fprintf(stderr, "✗ 「%s」是保留写动词，`sift issue` 当前只读：写操作请直接用 gh/glab（例如 gh issue close <编号>）或在 forge 界面完成。\n", words[0])
+			return 2
+		}
 	}
 	if all {
 		if len(args) == 0 {

@@ -409,11 +409,12 @@ attempt 为空时选择最大 attempt_no；`offset>=0`，`limit=1..262144`。res
   "offline": false,
   "exit_code": 1,
   "security_posture": "unsafe-local",
-  "checks": [{"id":"operator-token-readable-by-agent","level":"warning","message":"...","details":{}}]
+  "checks": [{"id":"operator-token-readable-by-agent","level":"warning","message":"...","details":{}}],
+  "stage_ms": {"exec": 1400, "process_group": 862, "sqlite": 44}
 }
 ```
 
-`exit_code=0|1|2` 与 [`config.md`](config.md) §7 一致；`level=ok|info|warning|error`，checks 按 id 升序。details 是按 check id 绑定的 closed schema，不得成为任意 JSON 逃生口。
+`exit_code=0|1|2` 与 [`config.md`](config.md) §7 一致；`level=ok|info|warning|error`，checks 按 id 升序。details 是按 check id 绑定的 closed schema，不得成为任意 JSON 逃生口。`stage_ms` 是本次诊断各阶段的毫秒耗时（非 SLA、不得参与 exit code）；可能出现的 key 固定为 `exec`、`process_group`、`sqlite`、`version`、`outbox`、`hooks`、`policy`、`attempts`。缺少 config 时不产生依赖 config 的阶段 key。
 
 最终诊断还必须包含 `version:daemon` / `version:wrapper` 的 CLI、daemon、wrapper 协议主版本配对，`outbox:backlog` 与 `outbox:push-failures`，以及 `security-posture:darwin`、`security-posture:linux` 两行。V0 两平台均为 `unsafe-local`；`tm6:*` 逐条列出同 UID 下的 `~/.sift/`、已登录 forge CLI、operator token/运维 socket、共享 `.git`/worktree、进程组逃逸、run token 与 bootstrap 凭据暴露面。资格结论不表示这些暴露面已闭合。
 
