@@ -468,3 +468,38 @@ func (c *authForProjectClient) GetIssue(ctx context.Context, p forge.ProjectRef,
 	}
 	return c.Fake.GetIssue(ctx, p, id)
 }
+
+// rateLimitedGetIssue fails every candidate GetIssue with the budget class.
+type rateLimitedGetIssue struct{ *forge.Fake }
+
+func (c *rateLimitedGetIssue) GetIssue(_ context.Context, _ forge.ProjectRef, _ string) (forge.Issue, error) {
+	return forge.Issue{}, &forge.ClassifiedError{Class: forge.ErrRateLimited, Summary: "forge api budget exhausted for project"}
+}
+
+// TestReconcilerRateLimitedCoolsDown pins the follow-up to the intake poller
+// fix: a rate-limited reconcile pass must cool the project down so the next
+// tick skips it (no durable cursor here; the cooldown is in-memory).
+func TestReconcilerRateLimitedCoolsDown(t *testing.T) {
+	db, project := reconcilerDB(t, "cool")
+	ctx := context.Background()
+	if err := db.SeedForgeRunForTest(ctx, "run-1", project.ID, "cfg-"+project.ID, "7", reconcilerNow); err != nil {
+		t.Fatal(err)
+	}
+	now := time.UnixMilli(reconcilerNow)
+	r := &Reconciler{
+		DB: db, Forge: &rateLimitedGetIssue{Fake: forge.NewFake()},
+		Projects: []Project{project},
+		Now:      func() time.Time { return now },
+	}
+	if err := r.ReconcileOnce(ctx); err == nil {
+		t.Fatal("rate-limited reconcile must surface the error")
+	}
+	now = now.Add(time.Second)
+	if err := r.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("cooling project must be skipped, got %v", err)
+	}
+	now = now.Add(5 * time.Minute)
+	if err := r.ReconcileOnce(ctx); err == nil {
+		t.Fatal("after cooldown the failure surfaces again")
+	}
+}
