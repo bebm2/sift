@@ -193,7 +193,16 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		report(stderr, err)
 		return 2
 	}
-	response, err := controlplane.OperatorRequest(home, method, params)
+	// ops.doctor serially probes every agent/forge executable on the daemon
+	// side (each probe has its own multi-second command deadline), so its RPC
+	// deadline is scaled to the doctor budget (15×command deadline + margin)
+	// instead of the interactive 5s default (real incident: healthy daemon,
+	// slow CLIs, doctor always timed out while status/ps answered instantly).
+	rpcDeadline := 5 * time.Second
+	if method == "ops.doctor" {
+		rpcDeadline = controlplane.DoctorRPCDeadline
+	}
+	response, err := controlplane.OperatorRequestTimeout(home, method, params, rpcDeadline)
 	if err != nil {
 		reportDaemonUnavailable(home, stderr, err)
 		return 1

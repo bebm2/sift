@@ -18,6 +18,16 @@ import (
 // OperatorRequest sends one operator RPC. It deliberately has no database
 // fallback: all operator commands are daemon requests.
 func OperatorRequest(home config.Home, method string, params map[string]any) (Response, error) {
+	return OperatorRequestTimeout(home, method, params, deadline)
+}
+
+// OperatorRequestTimeout is OperatorRequest with an explicit RPC deadline.
+// The default 5s deadline suits interactive commands, but ops.doctor runs
+// every agent/forge executable probe serially (each probe may take up to its
+// own command deadline), so its RPC needs a proportionally larger budget —
+// otherwise a healthy daemon with slow CLIs looks "down" (real incident:
+// doctor i/o timeout while service status and sift ps answered instantly).
+func OperatorRequestTimeout(home config.Home, method string, params map[string]any, rpcDeadline time.Duration) (Response, error) {
 	token, err := readOperatorToken(filepath.Join(home.Path, "operator.token"))
 	if err != nil {
 		return Response{}, err
@@ -26,12 +36,12 @@ func OperatorRequest(home config.Home, method string, params map[string]any) (Re
 	if err != nil {
 		return Response{}, err
 	}
-	c, err := net.DialTimeout("unix", socketPath(home.Path, "siftd.sock"), deadline)
+	c, err := net.DialTimeout("unix", socketPath(home.Path, "siftd.sock"), rpcDeadline)
 	if err != nil {
 		return Response{}, err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(deadline))
+	_ = c.SetDeadline(time.Now().Add(rpcDeadline))
 	req := Request{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, ClientVersion: Version, RequestID: id, Method: method, Auth: Auth{Kind: "operator", Token: token}, Params: params}
 	if err := writeFrame(c, req); err != nil {
 		return Response{}, err

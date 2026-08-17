@@ -25,6 +25,13 @@ import (
 
 const deadline = 5 * time.Second
 
+// DoctorRPCDeadline is the operator-RPC budget the CLI applies to ops.doctor:
+// the daemon-side doctor may serially probe every agent/forge executable (each
+// probe bounded by its own command deadline inside a 15×deadline overall
+// budget), so the interactive 5s RPC deadline would spuriously time out
+// against a healthy but slow-CLI daemon.
+const DoctorRPCDeadline = 16 * deadline
+
 type reportParams struct {
 	RunID      string         `json:"run_id"`
 	AttemptNo  int            `json:"attempt_no"`
@@ -241,6 +248,15 @@ func (s *Server) handle(c *net.UnixConn, operator bool) error {
 	}
 	if code, message := validateEnvelope(req); code != "" {
 		return writeFrame(c, failure(req.RequestID, code, message, false))
+	}
+	// The initial 5s deadline covers frame reading and ordinary methods.
+	// ops.doctor serially probes every agent/forge executable (each bounded by
+	// its own command deadline inside a 15×deadline overall budget), so the
+	// connection deadline must scale up for it — otherwise the daemon closes
+	// the connection mid-doctor and the CLI sees EOF on a healthy daemon (real
+	// incident: doctor always failed while status/ps answered instantly).
+	if operator && req.Method == "ops.doctor" {
+		_ = c.SetDeadline(time.Now().Add(DoctorRPCDeadline))
 	}
 	if operator {
 		return writeFrame(c, s.operatorRequest(req))
