@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/xsift/sift/internal/cli/render"
@@ -53,23 +52,6 @@ func printRegisteredSetupProject(out io.Writer, project setupProjectContext) {
 	fmt.Fprintf(out, "%s 当前项目已登记：%s\n", render.Status("ok"), project.ID)
 	fmt.Fprintf(out, "  repo: %s\n", project.Repo)
 	fmt.Fprintf(out, "  forge: %s:%s\n", project.Kind, project.Key)
-}
-
-// doctorProjectID extracts the registered project id carried by project-scoped
-// doctor checks. Global checks deliberately return "": they cannot establish
-// whether the current repository is safe to trigger.
-func doctorProjectID(id string) string {
-	for _, prefix := range []string{"policy:", "hooks:"} {
-		if project, ok := strings.CutPrefix(id, prefix); ok && project != "" && project != "storage" {
-			return project
-		}
-	}
-	if rest, ok := strings.CutPrefix(id, "forge-cli:"); ok {
-		if project, _, ok := strings.Cut(rest, ":"); ok && project != "" {
-			return project
-		}
-	}
-	return ""
 }
 
 type closeoutDoctorCheck struct {

@@ -127,9 +127,11 @@ var commands = []commandMeta{
 		group:   groupBasics,
 		brief:   "doctor",
 		summary: "检查本地环境并报告问题",
-		usage:   "sift doctor [--offline] [--json]",
+		usage:   "sift doctor [--offline] [--details|--debug] [--json]",
 		flags: []flagMeta{
 			{"--offline", "", "离线检查，不连接守护进程"},
+			{"--details", "", "显示完整但脱敏的检查表"},
+			{"--debug", "", "开发诊断：检查字段与阶段耗时（仍脱敏）"},
 			{"--json", "", "输出机器可读的 JSON"},
 		},
 		examples: []string{"sift doctor", "sift doctor --offline"},
