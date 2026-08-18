@@ -25,10 +25,8 @@ summary: bebm2 三条 issue 合入 #1024 后的后续切片
 1. **把 `fd6626c` 推成 PR 并关 #1024 的「不用 wrapper」部分**  
    在 issue 里写清：Claude 中转已通；Codex toml 另开；不要宣称三条 issue 都修了。
 
-2. **Codex 直播配置（CC Switch 对称）**  
-   现在只读 `.json` 的 `env`。Codex family 声明了 `~/.codex/config.toml`，init 若冻过 `OPENAI_API_KEY`/`OPENAI_BASE_URL`，Switch 切不动。  
-   做法：`readDeclaredConfigEnv` 对 `.toml` 抽出 `openai_api_key` / 等价 base URL 字段，映射到 family 已声明的 `OPENAI_*`；文件优先于快照，与 Claude 同一优先级。只解析这两个名字，不写通用 TOML 引擎。  
-   验收：有冻住的旧 `OPENAI_*` + 新的 `config.toml` 时，bootstrap `launch_env` 用新值；无 toml 时仍用快照。
+2. **Codex 直播配置（CC Switch 对称）——暂缓**  
+   等用户反馈再做。现在只读 `.json` 的 `env`；init 冻过 `OPENAI_*` 时 CC Switch 切不动 Codex。
 
 3. **向用户说清楚**  
    `sift init` 收尾或 getting-started 补一句：换中转用 CC Switch 后不用重跑 init（Claude / 补齐后的 Codex）；正在跑的任务不会中途变。
