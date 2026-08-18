@@ -1,12 +1,12 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package runtime
 
 import "context"
 
-// PlatformProcessInspector is deliberately fail-closed outside Linux. Darwin
-// needs a native proc_pidinfo implementation before it can supply the complete
-// PID/start/executable/control-nonce proof required for signalling.
+// PlatformProcessInspector is deliberately fail-closed on platforms that have
+// no native inspector (not Linux, not Darwin). It never supplies start time,
+// executable or control-nonce proof, so Terminator will not signal.
 type PlatformProcessInspector struct{ UnknownProcessInspector }
 
 func (PlatformProcessInspector) Observe(ctx context.Context, want ProcessIdentity) (ProcessObservation, error) {

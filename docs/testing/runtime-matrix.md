@@ -86,7 +86,8 @@ R01–R19 的 tmux 参数化断言只能读取 wrapper/control/result/process-gr
 | 平台项 | M6 结论 | 后续归属 |
 |---|---|---|
 | Linux process identity (`/proc`) | 已有 production inspector；M6 双 backend matrix 使用并加固 | #850 |
-| Darwin identity unknown | 必须 fail closed、不发信号、一次 startup_stall；这是合法安全结局 | #850 逻辑/替身；M8 V15 原生完整恢复 |
+| Darwin identity unknown | M6：无 inspector 时必须 fail closed、不发信号、一次 startup_stall | #850 逻辑/替身；#1022 已补 kinfo+proc_info inspector |
+| Darwin native inspector | kinfo（PID/PGID/start）+ `proc_info` 路径 + `control.json`；start/exe 与 wrapper 持久化同源 | #1022 单测已覆盖；真机 launch 不再因身份未知冻结仍待验证 |
 | 真实 Agent executable/version 资格 | M6 仅冻结 key/store/query并使用 synthetic fixture | M7 正式证据 |
 | 四 OS/arch build | 持续回归，不等于 tmux/PTY 原生运行矩阵 | M8 V15 完整发布 |
 
@@ -100,7 +101,7 @@ R01–R19 的 tmux 参数化断言只能读取 wrapper/control/result/process-gr
 | M3 §3.4 competition/old generation/heartbeat/backend mismatch | 前三项局部已有；backend mismatch 未实现 | #847/#849/#850 |
 | M3 §3.7 confirmed-absence production branch | storage分诊已有，生产 qualification predicate 无 durable true path | #847 机制；M7 写真实资格 |
 | M3 §3.8 hooks baseline/automatic recheck | reader/doctor 已有，production writer/recheck 无 | #848 |
-| Darwin native inspector | 当前明确 fail closed；不属于双 backend 逻辑差异 | M8 V15 每 OS 完整恢复 |
+| Darwin native inspector | #1022 已实现 kinfo+proc_info；不属于双 backend 逻辑差异 | M8 V15 每 OS 完整恢复证据 |
 
 ## 6. M6 门禁查询
 
