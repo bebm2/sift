@@ -95,6 +95,48 @@ func TestAgentMaxConcurrentRange(t *testing.T) {
 	}
 }
 
+func TestAgentFamilyModelThinking(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{"family_grammar_ok", "version: 1\nagents:\n  - id: a\n    executable: e\n    family: claude\n", ""},
+		{"family_grammar_rejected", "version: 1\nagents:\n  - id: a\n    executable: e\n    family: Claude\n", "family"},
+		{"model_ok", "version: 1\nagents:\n  - id: a\n    executable: e\n    model: opus\n", ""},
+		{"model_empty_rejected", "version: 1\nagents:\n  - id: a\n    executable: e\n    model: \"\"\n", "model"},
+		{"model_nul_rejected", "version: 1\nagents:\n  - id: a\n    executable: e\n    model: \"a\\u0000b\"\n", "model"},
+		{"thinking_ok", "version: 1\nagents:\n  - id: a\n    executable: e\n    thinking: high\n", ""},
+		{"thinking_empty_rejected", "version: 1\nagents:\n  - id: a\n    executable: e\n    thinking: \"\"\n", "thinking"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, err := mustLoadYAMLOrErr(t, tc.yaml)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected accept, got %v", err)
+				}
+				_ = snap
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestAgentFamilyModelThinkingDefaultEmpty(t *testing.T) {
+	snap, err := mustLoadYAMLOrErr(t, "version: 1\nagents:\n  - id: a\n    executable: e\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := snap.Config.Agents[0]
+	if a.Family != "" || a.Model != "" || a.Thinking != "" {
+		t.Fatalf("defaults must be empty, got family=%q model=%q thinking=%q", a.Family, a.Model, a.Thinking)
+	}
+}
+
 func TestTaskFilePlaceholderRules(t *testing.T) {
 	cases := []struct {
 		name    string

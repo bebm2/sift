@@ -1,0 +1,16 @@
+# pi coding agent (badlogic/pi-mono). Confirmed against pi.dev docs, 2026-08.
+# pi is provider-agnostic: it picks whichever provider key is present, so
+# auth.env lists every provider it natively supports rather than one name.
+id: pi
+match: [pi]
+run:
+  args: ["-p"]
+  version_args: ["--version"]
+  flags:
+    model: ["--model", "{value}"]
+    thinking: ["--thinking", "{value}"]
+    provider: ["--provider", "{value}"]
+auth:
+  env: [ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY]
+config:
+  dirs: ["~/.pi"]

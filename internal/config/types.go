@@ -75,6 +75,12 @@ type Agent struct {
 	// whitelisted, credential-free environment shared by the qualification
 	// probe and production launch.
 	LaunchEnv map[string]string `json:"launch_env,omitempty"`
+	// Family, Model and Thinking are resolved against an agentfamily.Family
+	// at launch time, not by this package (specs/agentfamily.md). Empty
+	// means unset.
+	Family   string `json:"family,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // ForgeRef is the resolved project forge binding (config.md §3.3).

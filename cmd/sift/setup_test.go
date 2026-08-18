@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/xsift/sift/internal/agentfamily"
 	"github.com/xsift/sift/internal/config"
 )
 
@@ -166,10 +167,11 @@ func TestForgeLoginFromStatus(t *testing.T) {
 
 func TestAgentArgsDefaultsAndOverride(t *testing.T) {
 	doc := map[string]any{"version": 1}
-	addAgent(doc, "claude", nil)
-	addAgent(doc, "codex", nil)
+	families := agentfamily.Builtin()
+	addAgent(doc, "claude", nil, families)
+	addAgent(doc, "codex", nil, families)
 	custom := []string{"--custom", "value"}
-	addAgent(doc, "custom=custom-agent", &custom)
+	addAgent(doc, "custom=custom-agent", &custom, families)
 
 	agents := list(doc, "agents")
 	if got := agents[0].(map[string]any)["args"]; !equalStrings(got, []string{"-p"}) {
@@ -2080,7 +2082,7 @@ func TestAddAgentResolvesAbsoluteAndFreezesEnv(t *testing.T) {
 	t.Setenv("HOME", "/frozen/home")
 
 	doc := map[string]any{"version": 1}
-	addAgent(doc, "pi", nil)
+	addAgent(doc, "pi", nil, agentfamily.Builtin())
 
 	agents := list(doc, "agents")
 	if len(agents) != 1 {
@@ -2102,7 +2104,7 @@ func TestAddAgentResolvesAbsoluteAndFreezesEnv(t *testing.T) {
 func TestAddAgentUnresolvableKeepsConfiguredForm(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	doc := map[string]any{"version": 1}
-	addAgent(doc, "missing-agent", nil)
+	addAgent(doc, "missing-agent", nil, agentfamily.Builtin())
 
 	entry := list(doc, "agents")[0].(map[string]any)
 	if got := entry["executable"]; got != "missing-agent" {
@@ -2128,13 +2130,14 @@ func TestAddAgentExistingIDRefreshesFrozenEntry(t *testing.T) {
 
 	t.Setenv("PATH", binA)
 	doc := map[string]any{"version": 1}
+	families := agentfamily.Builtin()
 	custom := []string{"--mine"}
-	addAgent(doc, "pi", &custom)
+	addAgent(doc, "pi", &custom, families)
 
 	// Re-run with the Agent moved to binB and no explicit args: executable and
 	// launch_env refresh, user args stay.
 	t.Setenv("PATH", binB)
-	addAgent(doc, "pi", nil)
+	addAgent(doc, "pi", nil, families)
 
 	agents := list(doc, "agents")
 	if len(agents) != 1 {
@@ -2157,7 +2160,7 @@ func TestAddAgentExistingIDRefreshesFrozenEntry(t *testing.T) {
 
 	// An explicit --agent-args (even empty) replaces user args.
 	explicit := []string{"--new"}
-	addAgent(doc, "pi", &explicit)
+	addAgent(doc, "pi", &explicit, families)
 	if got := entry["args"]; !equalStrings(got, explicit) {
 		t.Fatalf("args = %#v, want explicit --agent-args to win", got)
 	}

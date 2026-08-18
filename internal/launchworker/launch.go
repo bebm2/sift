@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/xsift/sift/internal/agentfamily"
 	"github.com/xsift/sift/internal/config"
 	"github.com/xsift/sift/internal/controlplane"
 	"github.com/xsift/sift/internal/runtime"
@@ -89,7 +90,14 @@ type Worker struct {
 	// must never fall back to the daemon's current configuration.
 	FrozenAgentsRequired      bool
 	QualificationProbeTimeout time.Duration
-	hooks                     workerHooks
+	// Families and SecretsDir resolve an agent's family/model/thinking
+	// reference into extra argv and its captured auth/config env into
+	// launch_env (specs/agentfamily.md §4, issue #1024). Both are optional:
+	// nil/empty makes resolution a no-op, so fixtures that never set them —
+	// and any agent whose Family field is empty — behave exactly as before.
+	Families   map[string]*agentfamily.Family
+	SecretsDir string
+	hooks      workerHooks
 }
 
 type workerHooks struct {
@@ -138,6 +146,25 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if !ok {
 			return err
 		}
+	}
+	// issue #1024: resolve the family reference before qualification, so the
+	// topology key — and the bytes the wrapper ultimately execs — reflect
+	// the fully-resolved argv/env, not just what config.yaml spelled out
+	// literally. Resolution is deterministic given (Families, SecretsDir,
+	// agent), so a resumed dispatch recomputes the same result unless the
+	// family set or captured secrets changed underneath it — in which case
+	// matchesDispatch below correctly refuses to resume silently.
+	agent.Args, err = agentfamily.ResolveArgs(w.Families, agentfamily.LaunchOverrides{FamilyID: agent.Family, Model: agent.Model, Thinking: agent.Thinking}, agent.Args)
+	if err != nil {
+		return fmt.Errorf("launch worker: resolve agent family overrides: %w", err)
+	}
+	var family *agentfamily.Family
+	if agent.Family != "" {
+		family = w.Families[agent.Family]
+	}
+	agent.LaunchEnv, err = agentfamily.ResolveLaunchEnv(family, w.SecretsDir, agent.ID, agent.LaunchEnv)
+	if err != nil {
+		return fmt.Errorf("launch worker: resolve agent secrets: %w", err)
 	}
 	qualification, err := runtime.BuildQualification(runtime.QualificationInput{AgentID: agent.ID, Args: agent.Args, TaskTransport: string(agent.TaskTransport), VersionArgs: agent.VersionArgs, Executable: agent.Executable, LaunchEnv: agent.LaunchEnv, Context: ctx, ProbeTimeout: w.QualificationProbeTimeout})
 	if err != nil {

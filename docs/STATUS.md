@@ -1,7 +1,7 @@
 ---
 status: active
 created: 2026-08-04
-last_updated: 2026-08-17
+last_updated: 2026-08-18
 summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 ---
 
@@ -110,10 +110,18 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 - **#927 consolidated backlog**：静态检查已入 CI；已移除 os.Executable 测试污染并缓解 tmux 时序。#1017 关闭 `sift issue` 引号写动词绕过；#1018 让 init 明示当前项目，并把其他已登记项目的 doctor 问题带路径/显式 remove 指引呈现，避免 error 后误称“全部就绪”；本轮让管道输入的 init closeout prompt 自行换行，不再与下一条输出挤行。仅保留低优先级的安装器矩阵/fish 兼容、macOS 进程/tmux flaky 的持续观察；按价值另拆，不与 M7 门禁混用。
 - **#883 profile**：仍严格绑定 M7 的 ≥3 并行真实 Run；无该负载不得凭本机 doctor 数据声称完成 profile 或 P50 门禁。
 
+## Agent family 与中转 API（2026-08-18，#1024）
+
+- **已落地（本地，待推远程）**：`internal/agentfamily` 内置 claude/codex/cursor/opencode/pi；`sift init`/`agent add` 按 executable 匹配 family，并把 `auth.env`/`config.env` 快照到 `~/.sift/agent-secrets/<id>.env`（0600，不进 `config.yaml`）。派工时 `launchworker` 合并快照；Claude 的 `~/.claude/settings.json` `env` 覆盖同名快照，CC Switch 下次派工生效。规格见 [`specs/agentfamily.md`](specs/agentfamily.md)。
+- **未做**：Codex `config.toml` 尚未解析（init 冻过 `OPENAI_*` 时 CC Switch 切不动）；`model`/`thinking` 无向导 prompt；#1022 macOS 进程身份、#1023 Brain Codex 协议均未动。
+
 ## 遗留 / 延期
 
 - **M7 完整门禁**:≥3 并行 Run + P50<60s 测量、手机端审批证据、凭证存储 spike
 - **#883 性能 profile**:M7 真实负载绑定（应随 M7 并行 Run 片一并做，不再单独排期）
+- **#1024 Claude 中转 API**：主路径已实现（family + secrets + settings.json）；Codex toml / 向导 model 仍开口；issue 保持 Open 至合入并补齐说明
+- **#1022 macOS process 身份 fail-closed**：未做，行为与核实一致
+- **#1023 Brain 支持 Codex 协议**：未做，Brain 仍仅 `claude-json-v1`
 - **#963 `sift issue` 语义入口 v1（只读）**:依赖 #960/#961/#962 均已闭合，已解锁待启动
 - **#927 backlog**:安装器矩阵/fish 兼容及 macOS tmux/进程 flaky 持续观察；详见上节，不作为 M7 门禁替代
 - **wrapper handoff 精调**:`waiting_human` 上的 `kill`/`retry`/`approve` 操作验证

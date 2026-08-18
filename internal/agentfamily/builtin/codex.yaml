@@ -1,0 +1,15 @@
+# OpenAI Codex CLI. Confirmed against the codex exec SDK/CLI, 2026-08.
+id: codex
+match: [codex]
+run:
+  args: ["exec", "-"]
+  version_args: ["--version"]
+  flags:
+    model: ["--model", "{value}"]
+    thinking: ["--config", "model_reasoning_effort={value}"]
+auth:
+  env: [OPENAI_API_KEY]
+config:
+  env: [OPENAI_BASE_URL]
+  dirs: ["~/.codex"]
+  files: ["~/.codex/config.toml"]

@@ -26,6 +26,12 @@
           "executable": {
             "type": "string"
           },
+          "family": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -41,11 +47,23 @@
               "null"
             ]
           },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "task_transport": {
             "enum": [
               "stdin",
               "file"
             ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thinking": {
             "type": [
               "string",
               "null"

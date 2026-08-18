@@ -1,0 +1,14 @@
+# Claude Code (Anthropic). Confirmed against code.claude.com docs, 2026-08.
+id: claude
+match: [claude]
+run:
+  args: ["-p"]
+  version_args: ["--version"]
+  flags:
+    model: ["--model", "{value}"]
+auth:
+  env: [ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN]
+config:
+  env: [ANTHROPIC_BASE_URL, ANTHROPIC_MODEL]
+  dirs: ["~/.claude"]
+  files: ["~/.claude/settings.json"]

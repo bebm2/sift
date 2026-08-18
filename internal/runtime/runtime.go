@@ -142,9 +142,12 @@ type AgentLaunch struct {
 	// again by path.
 	ExecutableImage *os.File
 	Args            []string
-	// Env is the Agent's init-frozen launch environment (K=V entries from
-	// config.md §3.2 launch_env, rendered by FrozenEnvList). It contains only
-	// the credential-free HOME/PATH whitelist.
+	// Env is the Agent's frozen launch environment (K=V entries, rendered by
+	// FrozenEnvList): the config.md §3.2 HOME/PATH whitelist, plus — for an
+	// agent referencing a family — that family's captured auth/config
+	// variables merged in by agentfamily.ResolveLaunchEnv before the
+	// bootstrap was written (specs/agentfamily.md §4). Either way this
+	// package never reads or interprets the values; it only execs with them.
 	Env      []string
 	Worktree string
 	RunDir   string
@@ -164,9 +167,11 @@ type Launcher interface {
 type DirectLauncher struct{}
 
 // Start creates the Agent directly in the wrapper's process group. Its
-// environment contains only the non-secret run-directory hint plus the
-// Agent's frozen launch_env whitelist (issue #993); daemon credentials never
-// enter it.
+// environment is exactly SIFT_RUN_DIR plus launch.Env — never inherited from
+// the wrapper's own ambient environment (issue #993): the frozen HOME/PATH
+// whitelist, and for a family-registered agent, that family's captured
+// auth/config variables (issue #1024). The daemon's own operating
+// credentials (forge tokens, etc.) never flow through either.
 func (DirectLauncher) Start(ctx context.Context, launch AgentLaunch) (*exec.Cmd, error) {
 	if !filepath.IsAbs(launch.Executable) {
 		return nil, fmt.Errorf("runtime: agent executable must be absolute")

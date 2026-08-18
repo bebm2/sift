@@ -127,6 +127,9 @@ agents:
     launch_env:
       HOME: /Users/hex
       PATH: /Users/hex/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin
+    family: claude
+    model: claude-opus-4-6
+    thinking: high
 ```
 
 | 字段 | 类型 | 默认 | 约束 |
@@ -139,8 +142,11 @@ agents:
 | `max_concurrent` | integer | `runtime.default_agent_max_concurrent` | `1..32`；Agent 省略时继承根配置 |
 | `version_args` | `string[]` | `["--version"]` | 启动探测 argv；空数组表示只探测 executable 可执行 |
 | `launch_env` | `map[string]string` | `{}` | 可选；仅允许 `HOME`/`PATH` 两个 key，值非空、不含 NUL。`sift init` 在探测成功时冻结当时环境的 HOME/PATH 快照（含去重后的 PATH），资格探测与生产启动共用同一份冻结值（issue #993） |
+| `family` | string | `""` | 可选；同 Agent id 语法；引用一个 [`agentfamily.md`](agentfamily.md) family id。本包只校验语法，不校验该 family 是否存在——存在性与 `model`/`thinking` 取值是否被该 family 支持，在启动时对已加载的 family 集合校验（issue #1024） |
+| `model` | string | `""` | 可选；非空、不含 NUL。渲染成该 family `run.flags.model` 对应的 argv 片段，在启动时追加到 `args` 之后 |
+| `thinking` | string | `""` | 可选；同 `model` 的语法约束，渲染 family `run.flags.thinking` |
 
-`task_transport=stdin` 时禁止 `{task_file}`；`file` 时必须恰有一个完整 argv token 等于 `{task_file}`，wrapper 只做单 token 替换，不做字符串插值或 shell 展开。除 `launch_env` 白名单（HOME/PATH，非凭据）外，Agent 定义不接受任意环境变量映射。Runtime 只注入协议明确允许的非机密变量（`SIFT_RUN_DIR` 与该 Agent 冻结的 `launch_env`）；凭据不得经配置、argv 或环境变量传递。规范化按 `agent.backend ?? runtime.backend` 为每个 Agent 产生 concrete backend；Run/attempt 从其冻结 config snapshot 写入 `attempts.backend`，retry 与 daemon 重启不得重新读取当前磁盘配置。执行、PTY、tmux session 与资格契约见 [`runtime.md`](runtime.md)。
+`task_transport=stdin` 时禁止 `{task_file}`；`file` 时必须恰有一个完整 argv token 等于 `{task_file}`，wrapper 只做单 token 替换，不做字符串插值或 shell 展开。除 `launch_env` 白名单（HOME/PATH，非凭据）外，Agent 定义不接受任意环境变量映射。Runtime 只注入协议明确允许的非机密变量（`SIFT_RUN_DIR`、该 Agent 冻结的 `launch_env`，以及 `family` 解析出的机密文件内容，见 [`agentfamily.md`](agentfamily.md)）；凭据不得经配置、argv 或环境变量传递。规范化按 `agent.backend ?? runtime.backend` 为每个 Agent 产生 concrete backend；Run/attempt 从其冻结 config snapshot 写入 `attempts.backend`，retry 与 daemon 重启不得重新读取当前磁盘配置。执行、PTY、tmux session 与资格契约见 [`runtime.md`](runtime.md)。
 
 ### 3.3 `projects[]`
 
