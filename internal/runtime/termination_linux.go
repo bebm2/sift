@@ -4,9 +4,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -86,26 +83,4 @@ func linuxBootTimeMS() (int64, error) {
 		}
 	}
 	return 0, errors.New("proc boot time unavailable")
-}
-
-func controlNonceHash(path string) string {
-	if path == "" || !filepath.IsAbs(path) {
-		return ""
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o077 != 0 {
-		return ""
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var control struct {
-		ControlNonce string `json:"control_nonce"`
-	}
-	if json.Unmarshal(data, &control) != nil || control.ControlNonce == "" {
-		return ""
-	}
-	digest := sha256.Sum256([]byte(control.ControlNonce))
-	return hex.EncodeToString(digest[:])
 }

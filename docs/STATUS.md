@@ -1,7 +1,7 @@
 ---
 status: active
 created: 2026-08-04
-last_updated: 2026-08-17
+last_updated: 2026-08-18
 summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 ---
 
@@ -105,6 +105,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 
 ## 近期稳定性与技术债收敛（2026-08-17）
 
+- **#1022 Darwin 进程身份**：process backend 在 macOS 上原先没有 native inspector，Observe 只能给出空身份，恢复路径一律 `process_identity_unknown` 冻结 worktree；`/sift retry` 会在同一点再卡。现以 `sysctl kern.proc.pid` + `proc_info(PROC_PIDPATHINFO)` 重建与 Linux 同组字段，并与 wrapper 持久化的 start/exe 对齐。单测已覆盖；真机「launch 后不再因身份未知冻结」仍待验证，未关闭 #1022。
 - **doctor 慢/超时与呈现**：#1007/#1008 先后关闭 poller 与 reconciler 的限流重试风暴；#1009 仅为 `ops.doctor` 扩展端到端 RPC 预算；#1011、#1014、#1015 将独立 CLI/项目探活并行、加入 `stage_ms` 诊断，并将 SQLite 读检查保持有序以避免伪 `database is locked`。#1020 将默认输出收敛为当前项目/其他项目/运行环境摘要，`--details`/`--debug` 分层，并在 daemon 结果源头剥离 Forge auth 原文、token scope、endpoint 与多行 probe 输出。真实 macOS 在线 doctor 已恢复为约 2–3 秒；排障入口见 [troubleshooting](runbooks/troubleshooting.md#3-doctor-报告)。
 - **`sift issue` 只读边界**：#1013 已合入 `list`/`ls` 和写动词拒绝；#927 中的引号写动词绕过已修复并由测试钉住。混合语义 `list --all <question>` 仍未定义，保持问答路径而非猜测。
 - **#927 consolidated backlog**：静态检查已入 CI；已移除 os.Executable 测试污染并缓解 tmux 时序。#1017 关闭 `sift issue` 引号写动词绕过；#1018 让 init 明示当前项目，并把其他已登记项目的 doctor 问题带路径/显式 remove 指引呈现，避免 error 后误称“全部就绪”；本轮让管道输入的 init closeout prompt 自行换行，不再与下一条输出挤行。仅保留低优先级的安装器矩阵/fish 兼容、macOS 进程/tmux flaky 的持续观察；按价值另拆，不与 M7 门禁混用。

@@ -119,8 +119,8 @@ func RunExecution(ctx context.Context, bootstrapPath string) error {
 		return err
 	}
 	pid := int64(os.Getpid())
-	// Align with PlatformProcessInspector's procfs identity so recovery
-	// liveness checks can match the persisted fields on Linux.
+	// Align with PlatformProcessInspector so recovery can match persisted
+	// fields (Linux procfs; Darwin kinfo + proc_info).
 	started := runtime.ProcessStartedAtMS(os.Getpid())
 	instance, session := secret(), secret()
 	wi := map[string]any{"pid": pid, "started_at_ms": started, "executable": self, "pgid": pid}

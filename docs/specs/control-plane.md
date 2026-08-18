@@ -438,7 +438,7 @@ params：
 
 不得回“已终止”。确认执行体消失后：kill 终结 attempt 且 Run→failed，不创建 attempt；retry 终结当前 attempt并按策略创建新 attempt。确认不了则冻结并发唯一 `startup_stall` Interrupt。重复请求返回同一 probe/结果，不并发发信号。
 
-Linux 以 `/proc/<pid>/stat`、`/proc/<pid>/exe` 与 owner-only `control.json` 独立重建 PID、启动时间、可执行路径、进程组和 control nonce hash；任一证据缺失、格式错误或不匹配均不得发信号。Darwin 当前没有等价的 native inspector，统一返回身份未知并走同一冻结路径，直到补齐 `proc_pidinfo` 实现；不得以 `kill(pid, 0)` 或 PID 单独作为替代证明。
+Linux 以 `/proc/<pid>/stat`、`/proc/<pid>/exe` 与 owner-only `control.json` 独立重建 PID、启动时间、可执行路径、进程组和 control nonce hash；任一证据缺失、格式错误或不匹配均不得发信号。Darwin 以 `sysctl kern.proc.pid`（启动时间、PID、PGID）+ `proc_info(PROC_PIDPATHINFO)`（可执行路径）+ 同一份 `control.json` 重建同一组字段；`sysctl` 失败时仅用 `getpgid` 的 `ESRCH` 区分「进程不存在」与「证据不完整」，不得把 `getpgid`/`kill(pid, 0)` 或单独 PID 当作身份证明。其它平台仍返回身份未知并走同一冻结路径。
 
 同步完成 result 为 `{"disposition":"completed","run_id":"...","run_version":4,"status":"failed","new_attempt_no":null}`；retry 创建 attempt 时 `new_attempt_no` 非空。异步受理使用上例 `accepted`；已有同 request key 返回原 disposition。除 `completed | accepted` 外无成功 disposition。
 

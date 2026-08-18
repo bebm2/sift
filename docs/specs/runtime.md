@@ -183,7 +183,7 @@ tmux attach-session -r -t =<session_name>
 
 恢复侧 `ProcessGroupVerified` 只能查询当前 attempt 冻结的 exact key。unverified 时即便 inspector 报 wrapper/PGID absent，也不能自动释放 isolation/retry，必须走 `process_group_unverified` 的单一 Interrupt 路径。doctor 显示 exact key 的状态与 reason，但不得输出原始 version 文本或测试日志秘密。
 
-M6 交付持久化机制、生产查询接线和 synthetic verified/detached fixtures；真实 Agent CLI/version 的正式记录属于 M7。Darwin 缺 native identity inspector 时仍按 identity unknown fail closed；原生 Darwin absence-proof 与完整恢复证据属于 M8 V15 的逐 OS 验收，不阻断 M6 的双 backend 逻辑矩阵。
+M6 交付持久化机制、生产查询接线和 synthetic verified/detached fixtures；真实 Agent CLI/version 的正式记录属于 M7。Darwin 以 kinfo + `proc_info` 提供与 Linux 同字段的 native inspector（#1022）；其它无 inspector 的平台仍按 identity unknown fail closed。逐 OS 完整恢复证据属于 M8 V15，不阻断 M6 的双 backend 逻辑矩阵。
 
 ## 8. 安全与错误分类
 
