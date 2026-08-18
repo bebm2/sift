@@ -72,6 +72,19 @@ func normalizeAgents(raw []RawAgent, defaultConc int, defaultBackend Backend) ([
 			return nil, err
 		}
 
+		family, err := normalizeAgentFamilyRef(f+".family", a.Family)
+		if err != nil {
+			return nil, err
+		}
+		model, err := normalizeAgentOverrideValue(f+".model", a.Model)
+		if err != nil {
+			return nil, err
+		}
+		thinking, err := normalizeAgentOverrideValue(f+".thinking", a.Thinking)
+		if err != nil {
+			return nil, err
+		}
+
 		out = append(out, Agent{
 			ID:            *a.ID,
 			Executable:    *a.Executable,
@@ -81,6 +94,9 @@ func normalizeAgents(raw []RawAgent, defaultConc int, defaultBackend Backend) ([
 			MaxConcurrent: maxConc,
 			VersionArgs:   versionArgs,
 			LaunchEnv:     launchEnv,
+			Family:        family,
+			Model:         model,
+			Thinking:      thinking,
 		})
 	}
 	return out, nil
@@ -113,6 +129,37 @@ func normalizeLaunchEnv(field string, in map[string]string) (map[string]string, 
 		out[k] = v
 	}
 	return out, nil
+}
+
+// normalizeAgentFamilyRef validates an optional agents[].family reference. It
+// only checks the id grammar (same as agent ids): resolving it against the
+// actual loaded family set happens at launch time (specs/agentfamily.md),
+// not here, so this package never depends on internal/agentfamily.
+func normalizeAgentFamilyRef(field string, in *string) (string, error) {
+	if in == nil {
+		return "", nil
+	}
+	if !agentIDRe.MatchString(*in) {
+		return "", configError(field, "must match ^[a-z][a-z0-9-]{0,62}$")
+	}
+	return *in, nil
+}
+
+// normalizeAgentOverrideValue validates an optional agents[].model or
+// agents[].thinking value: present means non-empty and free of NUL bytes.
+// What values a family actually accepts for the flag is validated at launch
+// time against the resolved family (specs/agentfamily.md).
+func normalizeAgentOverrideValue(field string, in *string) (string, error) {
+	if in == nil {
+		return "", nil
+	}
+	if *in == "" {
+		return "", configError(field, "must be non-empty when present")
+	}
+	if strings.ContainsRune(*in, '\x00') {
+		return "", configError(field, "contains NUL byte")
+	}
+	return *in, nil
 }
 
 // validateArgs enforces the argv contract (config.md §3.2): no NUL bytes, the

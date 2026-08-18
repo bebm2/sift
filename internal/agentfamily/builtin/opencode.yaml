@@ -1,0 +1,16 @@
+# OpenCode CLI (sst/opencode). Confirmed against opencode.ai/docs, 2026-08.
+# opencode is also provider-agnostic like pi; it reads whichever provider
+# key is present in the environment (models.dev provider list).
+id: opencode
+match: [opencode]
+run:
+  args: ["run"]
+  version_args: ["--version"]
+  flags:
+    model: ["--model", "{value}"]
+    thinking: ["--variant", "{value}"]
+auth:
+  env: [ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, OPENROUTER_API_KEY]
+config:
+  env: [OPENCODE_CONFIG]
+  dirs: ["~/.config/opencode"]

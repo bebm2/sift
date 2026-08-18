@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/xsift/sift/internal/agentfamily"
 	"github.com/xsift/sift/internal/agents"
 	"github.com/xsift/sift/internal/cli/render"
 	"github.com/xsift/sift/internal/config"
@@ -178,6 +179,15 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 		}
 	}
 
+	// Family set for issue #1024: built-in families overlaid by any user
+	// overrides under agentFamiliesDir(home). Loaded once and reused by
+	// every addAgent/refreshAgentEntry call plus the secrets sync below.
+	families, err := loadSetupFamilies(home)
+	if err != nil {
+		report(stderr, err)
+		return 1
+	}
+
 	// Agent selection: numbered list with every detected agent preselected;
 	// a numeric subset (1,3), all, or Enter keeps the selection (issue #929).
 	// Each row shows the probed version and the built-in characteristic
@@ -231,9 +241,9 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 							}
 						}
 					}
-					addAgent(doc, spec, &agentArgs)
+					addAgent(doc, spec, &agentArgs, families)
 				} else {
-					addAgent(doc, spec, nil)
+					addAgent(doc, spec, nil, families)
 				}
 			}
 		}
@@ -281,6 +291,14 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 				}
 			}
 		}
+	}
+	// issue #1024: capture each matched family's auth/config environment
+	// variables from this shell into a 0600 secrets file, never into
+	// config.yaml. Runs after every addAgent/refreshAgentEntry above so it
+	// sees the final family assignment.
+	if err := syncAgentSecrets(home, doc, families, os.LookupEnv); err != nil {
+		report(stderr, err)
+		return 1
 	}
 	if err := writeSetupDocument(home, doc, existed); err != nil {
 		report(stderr, err)
@@ -938,7 +956,7 @@ func parseOperatorSpec(spec, defaultKind string) (map[string][]string, error) {
 	return out, nil
 }
 
-func addAgent(doc map[string]any, spec string, args *[]string) {
+func addAgent(doc map[string]any, spec string, args *[]string, families map[string]*agentfamily.Family) {
 	id, executable := filepath.Base(spec), spec
 	if before, after, ok := strings.Cut(spec, "="); ok {
 		id, executable = before, after
@@ -947,12 +965,19 @@ func addAgent(doc map[string]any, spec string, args *[]string) {
 	items := list(doc, "agents")
 	for _, item := range items {
 		if m, ok := item.(map[string]any); ok && m["id"] == id {
-			refreshAgentEntry(m, executable, args)
+			refreshAgentEntry(m, executable, args, families)
 			return
 		}
 	}
+	// issue #1024: a recognized family seeds its own default args (and,
+	// later, model/thinking flag mappings) instead of the hardcoded
+	// defaultAgentArgs switch, so newly added families need no code change.
+	family, matched := agentfamily.Match(families, executable)
 	if args == nil {
 		defaults := defaultAgentArgs(executable)
+		if matched {
+			defaults = append([]string(nil), family.Run.Args...)
+		}
 		args = &defaults
 	}
 	argv := make([]any, len(*args))
@@ -960,6 +985,9 @@ func addAgent(doc map[string]any, spec string, args *[]string) {
 		argv[i] = arg
 	}
 	entry := map[string]any{"id": id, "executable": executable, "args": argv, "task_transport": "stdin", "backend": "process"}
+	if matched {
+		entry["family"] = family.ID
+	}
 	// Issue #993: freeze what made detection succeed. The executable is
 	// resolved to an absolute path and the probe-time HOME/PATH snapshot is
 	// stored as launch_env, so the daemon's closed launchd PATH and the
@@ -980,7 +1008,7 @@ func addAgent(doc map[string]any, spec string, args *[]string) {
 // refresh the frozen executable/launch_env instead of silently keeping the
 // stale entry. User args survive the refresh; an explicit --agent-args
 // (non-nil args, even empty) replaces them.
-func refreshAgentEntry(entry map[string]any, executable string, args *[]string) {
+func refreshAgentEntry(entry map[string]any, executable string, args *[]string, families map[string]*agentfamily.Family) {
 	if abs, ok := resolveAgentExecutable(executable); ok {
 		entry["executable"] = abs
 		if env := frozenLaunchEnv(); env != nil {
@@ -994,6 +1022,14 @@ func refreshAgentEntry(entry map[string]any, executable string, args *[]string) 
 		// the previous executable, not this one.
 		entry["executable"] = executable
 		delete(entry, "launch_env")
+	}
+	// Re-match on every refresh (issue #1024): an agent moved to a
+	// differently-named executable may join or leave a family, same
+	// principle as the launch_env refresh above.
+	if family, ok := agentfamily.Match(families, executable); ok {
+		entry["family"] = family.ID
+	} else {
+		delete(entry, "family")
 	}
 	if args != nil {
 		argv := make([]any, len(*args))

@@ -129,10 +129,20 @@ func runDaemon(ctx context.Context, home config.Home) error {
 		}
 		backends[config.BackendTmux] = launchworker.TmuxBackend{Backend: tmux}
 	}
+	// issue #1024: load the effective family set once at startup — the same
+	// built-in-plus-user-overrides resolution `sift init`/`sift agent add`
+	// used to populate agents[].family — so every launch resolves model/
+	// thinking overrides and captured secrets consistently for the whole
+	// daemon lifetime (config.md §1.3's "no hot-reload" invariant).
+	families, err := loadSetupFamilies(home)
+	if err != nil {
+		return err
+	}
 	workers.SetLaunchWorker(&launchworker.Worker{
 		DB: db, BootID: bootID, WorkerID: "siftd:launch_agent", Root: home.Path,
 		Lease: snapshot.Config.Runtime.SpawnOperationLeaseTTL, Now: time.Now,
 		Backends: backends, Agents: snapshot.Config.Agents, FrozenAgentsRequired: true,
+		Families: families, SecretsDir: agentSecretsDir(home),
 	})
 	s, err := controlplane.Start(home, db)
 	if err != nil {

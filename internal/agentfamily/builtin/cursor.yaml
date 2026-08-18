@@ -1,0 +1,14 @@
+# Cursor CLI (cursor-agent, aliased "agent"). Confirmed against
+# cursor.com/docs/cli, 2026-08.
+id: cursor
+match: [cursor-agent, agent, cursor]
+run:
+  args: ["--print"]
+  version_args: ["--version"]
+  flags:
+    model: ["--model", "{value}"]
+auth:
+  env: [CURSOR_API_KEY]
+config:
+  env: [CURSOR_MODEL]
+  dirs: ["~/.cursor"]

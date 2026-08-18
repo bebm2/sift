@@ -41,6 +41,13 @@ type RawAgent struct {
 	MaxConcurrent *int              `json:"max_concurrent,omitempty"`
 	VersionArgs   []string          `json:"version_args,omitempty"`
 	LaunchEnv     map[string]string `json:"launch_env,omitempty"`
+	// Family, Model and Thinking reference an agentfamily.Family (issue
+	// #1024): config.yaml only names the family and the desired override
+	// values, never a secret. Resolving them into argv/env happens at
+	// launch time, outside this package (agentfamily.md).
+	Family   *string `json:"family,omitempty"`
+	Model    *string `json:"model,omitempty"`
+	Thinking *string `json:"thinking,omitempty"`
 }
 
 // RawForgeRef is the project forge binding (config.md §3.3).
