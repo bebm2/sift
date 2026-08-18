@@ -107,7 +107,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 
 - **doctor 慢/超时与呈现**：#1007/#1008 先后关闭 poller 与 reconciler 的限流重试风暴；#1009 仅为 `ops.doctor` 扩展端到端 RPC 预算；#1011、#1014、#1015 将独立 CLI/项目探活并行、加入 `stage_ms` 诊断，并将 SQLite 读检查保持有序以避免伪 `database is locked`。#1020 将默认输出收敛为当前项目/其他项目/运行环境摘要，`--details`/`--debug` 分层，并在 daemon 结果源头剥离 Forge auth 原文、token scope、endpoint 与多行 probe 输出。真实 macOS 在线 doctor 已恢复为约 2–3 秒；排障入口见 [troubleshooting](runbooks/troubleshooting.md#3-doctor-报告)。
 - **`sift issue` 只读边界**：#1013 已合入 `list`/`ls` 和写动词拒绝；#927 中的引号写动词绕过已修复并由测试钉住。混合语义 `list --all <question>` 仍未定义，保持问答路径而非猜测。
-- **#927 consolidated backlog**：静态检查已入 CI；已移除 os.Executable 测试污染并缓解 tmux 时序。#1017 关闭 `sift issue` 引号写动词绕过；#1018 让 init 明示当前项目，并把其他已登记项目的 doctor 问题带路径/显式 remove 指引呈现，避免 error 后误称“全部就绪”。仅保留低优先级的管道 init 提示观感、安装器矩阵/fish 兼容、macOS 进程/tmux flaky 的持续观察；按价值另拆，不与 M7 门禁混用。
+- **#927 consolidated backlog**：静态检查已入 CI；已移除 os.Executable 测试污染并缓解 tmux 时序。#1017 关闭 `sift issue` 引号写动词绕过；#1018 让 init 明示当前项目，并把其他已登记项目的 doctor 问题带路径/显式 remove 指引呈现，避免 error 后误称“全部就绪”；本轮让管道输入的 init closeout prompt 自行换行，不再与下一条输出挤行。仅保留低优先级的安装器矩阵/fish 兼容、macOS 进程/tmux flaky 的持续观察；按价值另拆，不与 M7 门禁混用。
 - **#883 profile**：仍严格绑定 M7 的 ≥3 并行真实 Run；无该负载不得凭本机 doctor 数据声称完成 profile 或 P50 门禁。
 
 ## 遗留 / 延期
@@ -115,7 +115,7 @@ summary: Sift 总体计划执行情况。工作包分解见 WBS.md。
 - **M7 完整门禁**:≥3 并行 Run + P50<60s 测量、手机端审批证据、凭证存储 spike
 - **#883 性能 profile**:M7 真实负载绑定（应随 M7 并行 Run 片一并做，不再单独排期）
 - **#963 `sift issue` 语义入口 v1（只读）**:依赖 #960/#961/#962 均已闭合，已解锁待启动
-- **#927 backlog**:管道/连续输入时收尾提示错位、安装器矩阵/fish 兼容及 macOS tmux/进程 flaky 持续观察；详见上节，不作为 M7 门禁替代
+- **#927 backlog**:安装器矩阵/fish 兼容及 macOS tmux/进程 flaky 持续观察；详见上节，不作为 M7 门禁替代
 - **wrapper handoff 精调**:`waiting_human` 上的 `kill`/`retry`/`approve` 操作验证
 - **M8 A10 干净机验收**:干净 macOS + systemd Linux 从发布归档安装跑通 + 四组合冒烟证据(人工门禁,待 M7)
 - **M8 live 跨版本升级**:不丢 DB 状态 + 较新 schema 拒旧 daemon(待 M7 真实数据;契约级回归已随 #903)
