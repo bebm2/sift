@@ -99,6 +99,9 @@ func runSetup(args []string, stdin io.Reader, home config.Home, stdout, stderr i
 		return 2
 	}
 	interactive := !opt.offline && opt.agents == "" && opt.project == "" && opt.operator == "" && opt.forge == "" && !agentArgsSet
+	if interactive && !isTerminalInput(stdin) {
+		stdout = setupPromptOutput{Writer: stdout, terminateLines: true}
+	}
 	in := bufio.NewReader(stdin)
 
 	// Probe gh and glab logins independently so each operators allowlist
@@ -397,6 +400,25 @@ func writeSetupDocument(home config.Home, doc map[string]any, backup bool) error
 	return os.Chmod(path, config.ConfigFileMode)
 }
 
+// setupPromptOutput ends prompts in scripted input. A terminal echoes Enter,
+// while a pipe does not; without this terminator the next setup message appears
+// on the prompt line and obscures which answer it consumed.
+type setupPromptOutput struct {
+	io.Writer
+	terminateLines bool
+}
+
+func (out setupPromptOutput) terminatePromptLine() bool { return out.terminateLines }
+
+func isTerminalInput(in io.Reader) bool {
+	file, ok := in.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
 func prompt(in *bufio.Reader, out io.Writer, label, fallback string) string {
 	if fallback == "" {
 		fmt.Fprintf(out, "%s: ", label)
@@ -404,6 +426,9 @@ func prompt(in *bufio.Reader, out io.Writer, label, fallback string) string {
 		fmt.Fprintf(out, "%s [%s]: ", label, fallback)
 	}
 	line, err := in.ReadString('\n')
+	if terminator, ok := out.(interface{ terminatePromptLine() bool }); ok && terminator.terminatePromptLine() {
+		fmt.Fprintln(out)
+	}
 	if err != nil && len(line) == 0 {
 		// EOF is not an answer: never substitute the default (issue #960 P1),
 		// otherwise `sift init </dev/null` would silently confirm an install

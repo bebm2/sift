@@ -1931,6 +1931,17 @@ func TestInteractiveInitCloseoutThreeSteps(t *testing.T) {
 			t.Fatalf("closeout output missing %q:\n%s", want, out.String())
 		}
 	}
+	// A pipe does not echo Enter. Each closeout prompt must therefore terminate
+	// its own line before the following status/label output is rendered.
+	for _, prompt := range []string{
+		"安装用户级服务并启动（sift service install）（y/n） [y]: ",
+		"创建触发 label sift:run（Forge 仓库写操作，确认执行？）（y/n） [y]: ",
+	} {
+		at := strings.Index(out.String(), prompt)
+		if at < 0 || !strings.HasPrefix(out.String()[at+len(prompt):], "\n") {
+			t.Fatalf("piped prompt %q must end its line:\n%s", prompt, out.String())
+		}
+	}
 	create := []string{"gh", "label", "create", "sift:run", "--color", "5319e7", "--repo", "owner/repo"}
 	if len(fake.runs) != 1 || strings.Join(fake.runs[0], " ") != strings.Join(create, " ") {
 		t.Fatalf("label create = %#v, want %v", fake.runs, create)
